@@ -1,0 +1,40 @@
+{
+  "name": "tunelet",
+  "version": "0.1.0",
+  "description": "Vocal pitch correction, choir, harmony, formant control and effects for WebAssembly",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ByteLandTechnology/tunelet.git"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./wasm": {
+      "types": "./pkg/tunelet.d.ts",
+      "import": "./pkg/tunelet.js"
+    }
+  },
+  "files": [
+    "dist",
+    "pkg/tunelet.js",
+    "pkg/tunelet.d.ts",
+    "pkg/tunelet_bg.wasm"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "npm run build:wasm && npm run build:ts",
+    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-opt --features wasm --locked",
+    "build:ts": "tsc",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2"
+  }
+}
