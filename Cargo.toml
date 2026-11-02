@@ -6,6 +6,9 @@ description = "Safe, portable vocal pitch correction, choir, harmony, formant co
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/ByteLandTechnology/tunelet.git"
+keywords = ["audio", "pitch-correction", "harmony", "dsp", "wasm"]
+categories = ["multimedia::audio", "wasm"]
+include = ["/src/**/*.rs", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [lib]
 crate-type = ["rlib", "cdylib"]
