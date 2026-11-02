@@ -189,8 +189,8 @@ npm pack
 ```
 
 `npm pack` builds the Wasm bindings and the TypeScript entry point. Then it
-creates `tunelet-0.1.0.tgz`. To use this archive in a browser project or a
-Node.js project, install it with `npm install /path/to/tunelet-0.1.0.tgz`. For
+creates `tunelet-0.1.1.tgz`. To use this archive in a browser project or a
+Node.js project, install it with `npm install /path/to/tunelet-0.1.1.tgz`. For
 local use, it is not necessary to publish the package to npm. To build without
 an archive, run `npm run build`.
 
