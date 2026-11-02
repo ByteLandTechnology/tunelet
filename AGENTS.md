@@ -126,6 +126,12 @@ npm run build
 - Ignore rules: do not edit the template part of `.gitignore`. To
   update it, run the `npx gitignore` commands that the file lists, in
   the same order. Then add the "Project rules" section again.
+- Releases: release-please sets the versions and writes `CHANGELOG.md`.
+  Do not change the version in `Cargo.toml`, `Cargo.lock`,
+  `package.json`, `package-lock.json` or `.release-please-manifest.json`
+  by hand. The commit types and the `!` mark set the next version. The
+  release workflow is `.github/workflows/release.yml`. It publishes to
+  npm through trusted publishing, so do not rename it.
 
 ## Prohibited changes
 
