@@ -1,0 +1,22 @@
+[package]
+name = "tunelet"
+version = "0.1.0"
+edition = "2021"
+description = "Safe, portable vocal pitch correction, choir, harmony, formant control and effects"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/ByteLandTechnology/tunelet.git"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+test = false
+doctest = false
+
+[features]
+wasm = ["dep:js-sys", "dep:serde", "dep:tsify", "dep:wasm-bindgen"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { version = "0.3", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+tsify = { version = "0.5.8", default-features = false, features = ["js"], optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
