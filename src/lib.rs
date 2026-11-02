@@ -111,6 +111,9 @@ mod processor;
 mod resynthesis;
 mod scale;
 
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub mod wasm;
+
 pub use config::{PrepareConfig, ProcessorConfig, SampleRate};
 pub use effects::alien::AlienConfig;
 pub use effects::punch::PunchConfig;
