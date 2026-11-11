@@ -239,6 +239,7 @@ pub enum Inversion {
 /// - A tonic major chord in root position.
 /// - A register of 50%.
 /// - A closed voicing and zero portamento.
+/// - Four voices for the interval sources.
 ///
 /// These settings configure all sources. Only the fields for the selected
 /// source change the target notes. Validation always checks all fields.
@@ -314,6 +315,25 @@ pub struct HarmonyConfig {
     /// a glide. In the interval sources, if the input moves more than one
     /// semitone bin, each voice starts at its new target without a glide.
     pub portamento_ms: f32,
+    /// The number of voices that sound in the interval sources, 0..=4.
+    ///
+    /// The default is 4. [`HarmonySource::FixedInterval`] and
+    /// [`HarmonySource::SmartInterval`] use the first `voices` voices. The
+    /// other voices release with the usual gain envelope. The chord and MIDI
+    /// sources ignore this field. In JavaScript, the field is optional and
+    /// a missing value gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "default_voices"),
+        tsify(optional)
+    )]
+    pub voices: u8,
+}
+
+/// The default count of interval voices: all of them.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn default_voices() -> u8 {
+    HARMONY_VOICES as u8
 }
 
 impl Default for HarmonyConfig {
@@ -330,6 +350,7 @@ impl Default for HarmonyConfig {
             register_percent: 50.0,
             voicing_spread_percent: 0.0,
             portamento_ms: 0.0,
+            voices: HARMONY_VOICES as u8,
         }
     }
 }
@@ -357,6 +378,8 @@ impl HarmonyConfig {
             let field = "resynthesis.harmony.diatonic_intervals";
             check_count(field, i64::from(interval), -14, 14)?;
         }
+        let field = "resynthesis.harmony.voices";
+        check_count(field, i64::from(self.voices), 0, HARMONY_VOICES as i64)?;
         let field = "resynthesis.harmony.register_percent";
         check_range(field, self.register_percent, 0.0, 100.0)?;
         let field = "resynthesis.harmony.voicing_spread_percent";
@@ -835,6 +858,14 @@ impl HarmonyState {
     /// portamento.
     fn select_target(&mut self, period: Q6, voice: usize) -> Q12 {
         match self.config.source {
+            HarmonySource::FixedInterval | HarmonySource::SmartInterval
+                if voice >= self.config.voices as usize =>
+            {
+                // A voice after the configured count releases. A zero target
+                // keeps its last period until the gain gets to zero.
+                self.target_period[voice] = Q6::ZERO;
+                Q12::ZERO
+            }
             HarmonySource::FixedInterval | HarmonySource::SmartInterval => {
                 let previous = self.scale_note[voice];
                 let (target, note) = self.find_scale_period(period, voice);

@@ -111,6 +111,11 @@ If an argument is not valid, the method returns an error and does not change
 the slices. If no model is available, the method returns `Ok(false)` and
 fills both slices with zeros. Valid envelopes return `Ok(true)`.
 
+`resynthesis.harmony.voices` sets the number of interval voices, in `0..=4`.
+The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
+voices. The other voices release with the usual gain envelope. The chord
+and MIDI sources ignore this field.
+
 `reset()` keeps the configuration, the random stream and some controller and
 filter state. If you need a fully new state, construct a new processor.
 
@@ -256,18 +261,20 @@ during each call. Web Audio uses Float32 samples, which you must convert to
 and from 16-bit PCM. This package does not install an AudioWorklet or an
 integration with an audio device.
 
-Configuration objects contain all fields. They use camelCase names and show
-enums as string literals. To change the configuration, do these steps:
+Configuration objects contain all required fields. They use camelCase names
+and show enums as string literals. To change the configuration, do these steps:
 
 1. Start from `defaultConfig()` or `config()`.
 2. Edit the necessary fields.
 3. Call `setConfig()`.
 
-If a field is missing or a value is not valid, the call throws a JavaScript
-`Error`. The conversion ignores extra object properties. The generated
-declarations contain the parameter documentation from the Rust types.
-`resynthesis.randomSeed` and the `processedFrames` field of feedback and
-telemetry use `bigint`. Frame offsets, block lengths and latency use `number`.
+If a required field is absent or a value is not valid, the call throws a
+JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
+to 4 if it is absent. The conversion ignores extra object properties. The
+generated declarations contain the parameter documentation from the Rust
+types. `resynthesis.randomSeed` and the `processedFrames` field of feedback
+and telemetry use `bigint`. Frame offsets, block lengths and latency use
+`number`.
 
 `telemetry()` and `takeTelemetry()` return a `Telemetry` object.
 `formantEnvelope(maxFrequencyHz, input, output)` fills two `Float32Array`
