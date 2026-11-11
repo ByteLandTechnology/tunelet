@@ -134,6 +134,13 @@ impl Punch {
         result.reset();
         result
     }
+    /// Returns the cached drive divided by the base drive, as f32.
+    ///
+    /// The value is the envelope ratio times the configured input gain. The
+    /// stage state does not change.
+    pub(crate) fn drive_ratio(&self) -> f32 {
+        (self.drive.to_bits() as f64 / BASE_DRIVE.to_bits() as f64) as f32
+    }
     /// Calculates the quantized controls again, and keeps the envelopes and
     /// the cached drive.
     /// The processor controls the bypass. This stage never reads an enabled

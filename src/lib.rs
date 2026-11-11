@@ -56,6 +56,11 @@
 //! resynthesis delay. Voice delays, pitch changes and effects have their own
 //! timing.
 //!
+//! [`Processor::telemetry`] gives data for meters and displays: the ratio and
+//! the gain of each voice, the input and output peaks, the pitch clarity and
+//! the state of the effects. [`Processor::take_telemetry`] also clears the
+//! peak windows of the telemetry. These calls do not change the audio.
+//!
 //! After the last input block, call [`Processor::begin_drain`] one time. Then
 //! render drain blocks until a call returns zero. Each call fills the unused
 //! output with zeros. The drain uses a finite configured budget and mutes
@@ -127,6 +132,6 @@ pub use harmony::{
 };
 pub use midi::MidiEvent;
 pub use pitch::PitchConfig;
-pub use processor::{Feedback, Processor};
+pub use processor::{Feedback, Processor, Telemetry};
 pub use resynthesis::{CorrectionConfig, MultiVoiceMode, ResynthesisConfig};
 pub use scale::{CorrectionScale, NoteMask, PitchClass};

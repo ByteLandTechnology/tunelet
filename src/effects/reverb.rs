@@ -145,6 +145,9 @@ pub(crate) struct Reverb {
     /// The reserved last ring offset. The output sums go to this slot, and
     /// the next ring step clears it.
     scratch: usize,
+    /// The largest absolute Q14 wet contribution in the telemetry window. No
+    /// audio calculation reads it.
+    wet_peak: i32,
 }
 
 /// The divisor for a division by two that truncates toward zero, also for
@@ -180,6 +183,7 @@ impl Reverb {
             decay: Q14::default(),
             binaural_offset: layout.binaural_offset,
             scratch: layout.capacity - 1,
+            wet_peak: 0,
         };
         result.set_config(config);
         result
@@ -204,6 +208,15 @@ impl Reverb {
     /// damping memories.
     pub(crate) fn reset(&mut self) {
         self.delay.reset();
+    }
+    /// Returns the largest absolute Q14 wet contribution since the last
+    /// clear, as f32.
+    pub(crate) fn wet_peak(&self) -> f32 {
+        (self.wet_peak as f64 / 16384.0) as f32
+    }
+    /// Starts a new window for the wet peak. The audio state does not change.
+    pub(crate) fn clear_wet_peak(&mut self) {
+        self.wet_peak = 0;
     }
     /// Calculates the selected network one time and advances the ring by one
     /// frame.
@@ -356,6 +369,20 @@ impl Reverb {
             result[1] = mul(right, dry) + mul(self.mix, result[1]);
         }
         d.step();
+        // Telemetry only. The wet contribution is the output minus the dry
+        // term. Schroeder and Binaural use the mono dry signal.
+        let dry_input = if matches!(
+            self.config.mode,
+            ReverbMode::Schroeder | ReverbMode::Binaural
+        ) {
+            [mono, mono]
+        } else {
+            [left, right]
+        };
+        for (value, input) in result.iter().zip(dry_input) {
+            let wet = (*value - mul(input, dry)).to_bits().wrapping_abs();
+            self.wet_peak = self.wet_peak.max(wet);
+        }
         result
     }
 }

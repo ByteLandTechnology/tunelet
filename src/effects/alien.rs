@@ -93,6 +93,13 @@ impl Alien {
         self.loop_len = config.loop_frames as usize;
         self.phase = self.phase.min(self.loop_len - 1);
     }
+    /// Returns the loop length and the current frame in the loop.
+    ///
+    /// The frame is always less than the length. The stage state does not
+    /// change.
+    pub(crate) fn loop_state(&self) -> (usize, usize) {
+        (self.loop_len, self.phase)
+    }
     /// Clears the recorded audio and sets both cursors to zero, but keeps the
     /// configured loop.
     pub(crate) fn reset(&mut self) {

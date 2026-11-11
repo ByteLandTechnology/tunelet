@@ -96,6 +96,9 @@ pub(crate) struct PitchTracker {
     /// The Q14 threshold of the normalized difference. It applies only to the
     /// acceptance of acquisition minima.
     threshold: Q14,
+    /// The tracking slot of the last refined minimum. Only the clarity
+    /// report reads it.
+    best: usize,
 }
 
 impl PitchTracker {
@@ -129,6 +132,7 @@ impl PitchTracker {
             period: Q6::default(),
             previous_period: Q6::default(),
             threshold: Q14::from_f64(config.threshold as f64),
+            best: 0,
         }
     }
 
@@ -163,6 +167,25 @@ impl PitchTracker {
     /// Returns `true` if acquisition is active before the next frame.
     pub(crate) fn is_detecting(&self) -> bool {
         self.detecting
+    }
+
+    /// Returns how periodic the tracked input is at the last refined lag,
+    /// from 0 to 1.
+    ///
+    /// The value is one minus two times the normalized cycle difference. A
+    /// perfect repeat gives 1. Input with no relation between cycles gives
+    /// 0. During acquisition, or if the window energy is not positive, the
+    /// value is 0. The tracker state does not change.
+    pub(crate) fn clarity(&self) -> f32 {
+        if self.detecting {
+            return 0.0;
+        }
+        let energy = self.tracking_energy[self.best] as f64;
+        if energy <= 0.0 {
+            return 0.0;
+        }
+        let difference = energy / 2.0 - self.tracking_cross[self.best] as f64;
+        (1.0 - 2.0 * difference / energy).clamp(0.0, 1.0) as f32
     }
 
     /// Updates a contiguous run of acquisition lags that does not wrap.
@@ -586,6 +609,7 @@ impl PitchTracker {
                         self.period =
                             Q6::from_bits(lag.wrapping_add(fraction >> 6).wrapping_add(2) >> 2);
                         self.previous_period = self.period;
+                        self.best = best;
                         step.tracking_update = true;
                     }
                 }

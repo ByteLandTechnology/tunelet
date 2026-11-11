@@ -104,6 +104,11 @@ impl Warm {
         result.set_config(config);
         result
     }
+    /// Returns the Q8 normalization gain as f32. The stage state does not
+    /// change.
+    pub(crate) fn normalization_gain(&self) -> f32 {
+        (self.compression.to_bits() as f64 / 256.0) as f32
+    }
     /// Updates the drive and the output compensation, and keeps the envelope
     /// and filter state.
     pub(crate) fn set_config(&mut self, config: WarmConfig) {

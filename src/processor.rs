@@ -49,6 +49,12 @@ pub struct Processor {
     numeric: NumericContext,
     /// The largest absolute clipped stereo PCM sample in the feedback window.
     peak: i32,
+    /// The largest absolute PCM input sample in the telemetry window, before
+    /// Punch.
+    input_peak: i32,
+    /// The largest absolute clipped PCM sample of each output channel in the
+    /// telemetry window.
+    output_peaks: [i32; 2],
     /// The last ratio from correction only.
     ///
     /// It is zero before the first `process` call, after a reset or after a
@@ -110,6 +116,8 @@ impl Processor {
             reverb: Reverb::new(rate, config.reverb),
             numeric: NumericContext::new(config.resynthesis.random_seed as u32),
             peak: 0,
+            input_peak: 0,
+            output_peaks: [0; 2],
             last_resample_ratio: 0.0,
             frames: 0,
             drain_remaining: None,
@@ -347,6 +355,60 @@ impl Processor {
         result
     }
 
+    /// Returns the state of the voices, the levels and the effects, and does
+    /// not clear the peak windows.
+    ///
+    /// The telemetry is for meters and displays. It does not change the
+    /// audio. To start new peak windows, use
+    /// [`take_telemetry`](Self::take_telemetry). The peak windows of the
+    /// telemetry are independent of the peak window of [`Feedback`].
+    pub fn telemetry(&self) -> Telemetry {
+        let mut voice_ratios = [0.0; 16];
+        let mut voice_gains = [0.0; 16];
+        let voice_count = self.resynthesis.voices(&mut voice_ratios, &mut voice_gains);
+        let (alien_loop, alien_phase) = self.alien.loop_state();
+        Telemetry {
+            processed_frames: self.frames,
+            input_peak: self.input_peak as f32 / 32_768.0,
+            output_peak: self.output_peaks.map(|peak| peak as f32 / 32_768.0),
+            reverb_wet_peak: self.reverb.wet_peak(),
+            clarity: self.resynthesis.clarity(),
+            tracking: self.resynthesis.is_tracking(),
+            voice_count,
+            voice_ratios,
+            voice_gains,
+            punch_gain: if self.config.punch.enabled {
+                self.punch.drive_ratio()
+            } else {
+                1.0
+            },
+            warm_gain: if self.config.warm.enabled {
+                self.warm.normalization_gain()
+            } else {
+                1.0
+            },
+            alien_loop_frames: alien_loop as u32,
+            alien_phase_frames: alien_phase as u32,
+        }
+    }
+
+    /// Returns the current telemetry and clears only its three peak windows.
+    ///
+    /// The peak window of [`Feedback`] and all audio histories do not change.
+    pub fn take_telemetry(&mut self) -> Telemetry {
+        let result = self.telemetry();
+        self.clear_telemetry_peaks();
+        result
+    }
+
+    /// Starts new windows for the input peak, the output peaks and the wet
+    /// peak of the reverb.
+    fn clear_telemetry_peaks(&mut self) {
+        self.input_peak = 0;
+        self.output_peaks = [0; 2];
+        self.reverb.clear_wet_peak();
+    }
+
     /// Validates all configuration fields and applies them.
     ///
     /// The validation also examines the fields of disabled stages. A stage
@@ -389,6 +451,7 @@ impl Processor {
             self.alien.reset();
             self.reverb.reset();
             self.peak = 0;
+            self.clear_telemetry_peaks();
             self.last_resample_ratio = 0.0;
         }
         if self.config.resynthesis.random_seed != config.resynthesis.random_seed {
@@ -434,6 +497,7 @@ impl Processor {
         self.alien.reset();
         self.reverb.reset();
         self.peak = 0;
+        self.clear_telemetry_peaks();
         self.frames = 0;
         self.last_resample_ratio = 0.0;
         self.drain_remaining = None;
@@ -500,6 +564,7 @@ impl Processor {
     /// range. This order and the peak measurement before the downmix are part
     /// of the output.
     fn next(&mut self, mut input: i16) -> [i16; 2] {
+        self.input_peak = self.input_peak.max((input as i32).abs());
         if self.config.punch.enabled {
             input = self.punch.process_sample(input, &mut self.numeric);
         }
@@ -520,6 +585,9 @@ impl Processor {
             .peak
             .max((result[0] as i32).abs())
             .max((result[1] as i32).abs());
+        for (peak, sample) in self.output_peaks.iter_mut().zip(result) {
+            *peak = (*peak).max((sample as i32).abs());
+        }
         self.frames = self.frames.saturating_add(1);
         result
     }
@@ -660,4 +728,103 @@ pub struct Feedback {
         tsify(type = "number")
     )]
     pub latency_frames: usize,
+}
+
+/// A snapshot of the voices, the levels and the effect state that you can
+/// copy.
+///
+/// Get it with [`Processor::telemetry`] or [`Processor::take_telemetry`]. The
+/// telemetry is for meters and displays. No audio calculation reads it.
+/// `Default` gives a snapshot with all zeros.
+///
+/// The three peak fields measure a window. The window starts at
+/// construction, at a reset, at a change of stereo output or at a call to
+/// [`Processor::take_telemetry`]. This window is independent of the peak
+/// window of [`Feedback`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(rename_all = "camelCase"),
+    tsify(large_number_types_as_bigints)
+)]
+pub struct Telemetry {
+    /// The number of frames processed since construction or the last reset,
+    /// as [`Feedback::processed_frames`] gives.
+    pub processed_frames: u64,
+    /// The largest absolute input sample in the window, divided by 32768.
+    ///
+    /// The measurement is before Punch and Warm. The value is in 0..=1.
+    pub input_peak: f32,
+    /// The largest absolute clipped sample of the left and the right output
+    /// in the window, divided by 32768.
+    ///
+    /// The measurement is after the output gain. Each value is in
+    /// 0..=32767/32768.
+    pub output_peak: [f32; 2],
+    /// The largest absolute wet contribution of the reverb in the window,
+    /// where 1 is full scale.
+    ///
+    /// The contribution is the wet signal times the mix, before the output
+    /// gain. It is the larger of the two channels. While the reverb is
+    /// disabled, the window gets no new values.
+    pub reverb_wet_peak: f32,
+    /// How periodic the tracked input is, in 0..=1.
+    ///
+    /// The value is 1 for a signal that repeats exactly at the tracked
+    /// period. It is 0 for a signal with no relation between cycles and
+    /// during pitch acquisition. Use it as a confidence score for
+    /// [`Feedback::voiced`]. The tracker updates the related sums on each
+    /// frame.
+    pub clarity: f32,
+    /// This field is `true` if the pitch tracker follows a period. It is
+    /// `false` during pitch acquisition.
+    pub tracking: bool,
+    /// The number of valid entries in [`voice_ratios`](Self::voice_ratios)
+    /// and [`voice_gains`](Self::voice_gains).
+    ///
+    /// The value is 5 in Harmony mode. In Choir mode, it is
+    /// [`crate::ResynthesisConfig::choir_voices`], in 1..=16.
+    pub voice_count: u8,
+    /// The pitch ratio of each voice on the last frame, where 1 is the input
+    /// pitch.
+    ///
+    /// Entry zero is the lead voice. In Harmony mode, entries 1 to 4 are the
+    /// harmony voices. In Choir mode, the entries after the lead are the
+    /// secondary voices. Each ratio includes the correction, the configured
+    /// pitch shift and the ratio of the voice. The entries after
+    /// [`voice_count`](Self::voice_count) are zero.
+    pub voice_ratios: [f32; 16],
+    /// The linear gain of each voice, in the order of
+    /// [`voice_ratios`](Self::voice_ratios).
+    ///
+    /// The lead and the choir voices have a gain of 1. The gain of a harmony
+    /// voice includes the MIDI velocity gain, in 0..=3.98095703125. MIDI
+    /// velocity 127 gives the maximum, approximately +12 dB. The gain is zero
+    /// for a voice that does not sound. It does not include the configured
+    /// harmony level or the pan. The harmony controller updates it every 101
+    /// frames.
+    pub voice_gains: [f32; 16],
+    /// The current drive of Punch, divided by its base drive.
+    ///
+    /// The value is the ratio of the two input envelopes times the
+    /// configured input gain. It is more than 1 at an attack. Punch updates
+    /// it every 100 frames. The value is 1 while Punch is disabled.
+    pub punch_gain: f32,
+    /// The linear gain that Warm applies before its saturation curve and
+    /// removes after it.
+    ///
+    /// The value is the inverse of the input peak envelope. For input below
+    /// -30 dB, it is the gain of +30 dB. Warm updates it every 100 frames.
+    /// The value is 1 while Warm is disabled.
+    pub warm_gain: f32,
+    /// The length of the Alien loop in frames, as
+    /// [`crate::AlienConfig::loop_frames`] gives.
+    pub alien_loop_frames: u32,
+    /// The current frame in the Alien loop. It is less than
+    /// [`alien_loop_frames`](Self::alien_loop_frames).
+    ///
+    /// The reverse reader is two times this number of frames behind the
+    /// recording position. The value advances also while Alien is disabled.
+    pub alien_phase_frames: u32,
 }

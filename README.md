@@ -68,6 +68,7 @@ allocate memory, acquire locks or do I/O:
 - Configuration
 - MIDI
 - Feedback
+- Telemetry
 - Reset
 - Drain
 
@@ -88,6 +89,18 @@ ratio, the frame count and the latency. `take_feedback()` also clears the
 peak window. `latency_frames()` gives 1,593 frames of nominal resynthesis
 latency at both sample rates. Dry mixes, resampled voices and effects have
 different timing.
+
+`telemetry()` reads data for meters and displays. It does not change the
+audio. The data includes these items:
+
+- The pitch ratio and the gain of each voice.
+- The peaks of the input, of the two output channels and of the reverb wet
+  signal.
+- The pitch clarity, which is a confidence score from 0 to 1.
+- The current gains of Punch and Warm, and the position in the Alien loop.
+
+`take_telemetry()` also clears the three peak windows of the telemetry. These
+windows are independent of the peak window of the feedback.
 
 `reset()` keeps the configuration, the random stream and some controller and
 filter state. If you need a fully new state, construct a new processor.
@@ -244,8 +257,10 @@ enums as string literals. To change the configuration, do these steps:
 If a field is missing or a value is not valid, the call throws a JavaScript
 `Error`. The conversion ignores extra object properties. The generated
 declarations contain the parameter documentation from the Rust types.
-`resynthesis.randomSeed` and the `processedFrames` field of feedback use
-`bigint`. Frame offsets, block lengths and latency use `number`.
+`resynthesis.randomSeed` and the `processedFrames` field of feedback and
+telemetry use `bigint`. Frame offsets, block lengths and latency use `number`.
+
+`telemetry()` and `takeTelemetry()` return a `Telemetry` object.
 
 In feedback, `targetMidiNote` is `undefined` in these cases, which are also
 the cases where `voiced` is `false`:
@@ -274,7 +289,7 @@ Wasm. These items can allocate:
 - Object conversion.
 - Supplied events.
 - Errors.
-- Feedback.
+- Feedback and telemetry.
 
 The generated glue can also make temporary views. This binding is for general
 use, and it does not guarantee hard real-time behavior for allocation or

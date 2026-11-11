@@ -427,6 +427,10 @@ pub(crate) struct Resynthesis {
     /// The last Q12 gain envelopes from the harmony controller. An audio
     /// reset keeps them.
     harmony_gains: [Q12; HARMONY_VOICES],
+    /// The effective Q14 ratios of the lead and the four harmony readers from
+    /// the last frame. In Choir mode, only the lead slot changes. Only the
+    /// telemetry reads them.
+    voice_ratios: [Q14; HARMONY_VOICES + 1],
     /// Two cascaded anti-alias filter sections. If the shift is not upward,
     /// they have coefficients of 1.0 and zero.
     post: [Biquad; 2],
@@ -522,6 +526,7 @@ impl Resynthesis {
             harmony_pan: [[Q14::ZERO; 2]; HARMONY_VOICES],
             harmony_ratios: [Q14::ONE; HARMONY_VOICES],
             harmony_gains: [Q12::ZERO; HARMONY_VOICES],
+            voice_ratios: [Q14::ONE; HARMONY_VOICES + 1],
             post: [Biquad::new(), Biquad::new()],
             correction: Q14::ONE,
             correction_decay: Q14::ZERO,
@@ -703,6 +708,7 @@ impl Resynthesis {
         self.old_position = self.positions[0];
         self.fade = Q14::ONE;
         self.harmony_ratios.fill(Q14::ONE);
+        self.voice_ratios.fill(Q14::ONE);
         self.current_output_period = Q6::ZERO;
         self.correction = Q14::ONE;
         self.scale_initialized = false;
@@ -778,6 +784,45 @@ impl Resynthesis {
             Some(class + ((midi - class) / 12.0).round() * 12.0)
         } else {
             Some(midi)
+        }
+    }
+    /// Returns how periodic the tracked input is, from 0 to 1. Refer to
+    /// `PitchTracker::clarity`.
+    pub(crate) fn clarity(&self) -> f32 {
+        self.pitch.clarity()
+    }
+    /// Returns `true` if the pitch tracker follows a period, and `false`
+    /// during acquisition.
+    pub(crate) fn is_tracking(&self) -> bool {
+        !self.pitch.is_detecting()
+    }
+    /// Writes the effective ratio and the linear gain of each voice from the
+    /// last frame, and returns the number of voices.
+    ///
+    /// Slot zero is the lead. In Harmony mode, slots 1 to 4 are the harmony
+    /// voices, and the gain is the envelope of the harmony controller. In
+    /// Choir mode, the slots after the lead are the secondary voices with a
+    /// gain of 1. Each ratio includes the correction, the global shift and
+    /// the ratio of the voice. The entries after the count do not change.
+    pub(crate) fn voices(&self, ratios: &mut [f32; 16], gains: &mut [f32; 16]) -> u8 {
+        let lead = (self.voice_ratios[0].to_bits() as f64 / 16384.0) as f32;
+        ratios[0] = lead;
+        gains[0] = 1.0;
+        if self.config.mode == MultiVoiceMode::Choir {
+            let count = self.config.choir_voices as usize;
+            for voice in 1..count {
+                ratios[voice] =
+                    (lead as f64 * self.drift_ratio[voice].to_bits() as f64 / 16384.0) as f32;
+                gains[voice] = 1.0;
+            }
+            count as u8
+        } else {
+            for voice in 0..HARMONY_VOICES {
+                ratios[voice + 1] =
+                    (self.voice_ratios[voice + 1].to_bits() as f64 / 16384.0) as f32;
+                gains[voice + 1] = (self.harmony_gains[voice].to_bits() as f64 / 4096.0) as f32;
+            }
+            (HARMONY_VOICES + 1) as u8
         }
     }
     /// Selects a target in the period domain and smooths the Q14 correction
@@ -1056,6 +1101,7 @@ impl Resynthesis {
             {
                 let (value, ratio) = self.render_lead(delayed, numeric);
                 final_ratio = ratio;
+                self.voice_ratios[0] = ratio;
                 for (channel, sum) in mix.iter_mut().enumerate() {
                     *sum = *sum
                         + if self.config.stereo_output {
@@ -1156,6 +1202,7 @@ impl Resynthesis {
                     current = Q14::ONE;
                 }
                 final_ratio = current;
+                self.voice_ratios[slot] = current;
                 let position = self.move_reader(slot, current, period, 0, false);
                 let (mut value, _) = history::interpolation(&self.filtered, position);
                 if slot > 0 {

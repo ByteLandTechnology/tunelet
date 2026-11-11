@@ -31,7 +31,7 @@
 //!
 //! - The decode of events.
 //! - The conversion of configurations.
-//! - Feedback objects.
+//! - Feedback and telemetry objects.
 //! - Errors.
 //!
 //! The JavaScript glue can also make temporary views when it copies data. This
@@ -39,7 +39,9 @@
 //! allocation. If you do not need a processor any more, call the generated
 //! `free()` method.
 
-use crate::{Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, TimedEvent};
+use crate::{
+    Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
+};
 use js_sys::Int16Array;
 use serde::{Deserialize, Serialize};
 use tsify::{Ts, Tsify};
@@ -378,6 +380,36 @@ impl WasmProcessor {
         let feedback = self.processor.feedback().into_ts()?;
         self.processor.take_feedback();
         Ok(feedback)
+    }
+
+    /// Returns a new telemetry object and does not clear its peak windows.
+    ///
+    /// The telemetry is for meters and displays. It gives the ratio and the
+    /// gain of each voice, the input and output peaks, the pitch clarity and
+    /// the state of the effects. `processedFrames` is a `bigint`. See
+    /// `Telemetry` for each measurement.
+    ///
+    /// # Errors
+    ///
+    /// If the conversion to a JavaScript object fails, this method throws.
+    pub fn telemetry(&self) -> Result<Ts<Telemetry>, JsError> {
+        Ok(self.processor.telemetry().into_ts()?)
+    }
+
+    /// Returns the telemetry and clears only its three peak windows.
+    ///
+    /// The peak window of the feedback and all audio histories do not change.
+    ///
+    /// # Errors
+    ///
+    /// If the conversion to a JavaScript object fails, this method throws. The
+    /// method clears the peaks only after it successfully makes a telemetry
+    /// object.
+    #[wasm_bindgen(js_name = takeTelemetry)]
+    pub fn take_telemetry(&mut self) -> Result<Ts<Telemetry>, JsError> {
+        let telemetry = self.processor.telemetry().into_ts()?;
+        self.processor.take_telemetry();
+        Ok(telemetry)
     }
 
     /// Resets the audio histories and feedback, as the native processor does.
