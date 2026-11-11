@@ -131,7 +131,7 @@ npm run build
   `package.json`, `package-lock.json` or `.release-please-manifest.json`
   by hand. The commit types and the `!` mark set the next version. The
   release workflow is `.github/workflows/release.yml`. It publishes to
-  npm through trusted publishing, so do not rename it.
+  npm and crates.io through trusted publishing, so do not rename it.
 
 ## Prohibited changes
 
