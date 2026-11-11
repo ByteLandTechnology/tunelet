@@ -431,6 +431,9 @@ pub(crate) struct Resynthesis {
     /// the last frame. In Choir mode, only the lead slot changes. Only the
     /// telemetry reads them.
     voice_ratios: [Q14; HARMONY_VOICES + 1],
+    /// The signed history frame that the formant model used for the last
+    /// frame. The audio path sets it, and only the formant envelope reads it.
+    formant_position: i32,
     /// Two cascaded anti-alias filter sections. If the shift is not upward,
     /// they have coefficients of 1.0 and zero.
     post: [Biquad; 2],
@@ -527,6 +530,7 @@ impl Resynthesis {
             harmony_ratios: [Q14::ONE; HARMONY_VOICES],
             harmony_gains: [Q12::ZERO; HARMONY_VOICES],
             voice_ratios: [Q14::ONE; HARMONY_VOICES + 1],
+            formant_position: 0,
             post: [Biquad::new(), Biquad::new()],
             correction: Q14::ONE,
             correction_decay: Q14::ZERO,
@@ -709,6 +713,7 @@ impl Resynthesis {
         self.fade = Q14::ONE;
         self.harmony_ratios.fill(Q14::ONE);
         self.voice_ratios.fill(Q14::ONE);
+        self.formant_position = 0;
         self.current_output_period = Q6::ZERO;
         self.correction = Q14::ONE;
         self.scale_initialized = false;
@@ -824,6 +829,29 @@ impl Resynthesis {
             }
             (HARMONY_VOICES + 1) as u8
         }
+    }
+    /// Returns the wrapping count of formant model designs.
+    pub(crate) fn formant_generation(&self) -> u32 {
+        self.formant.generation()
+    }
+    /// Writes the formant envelopes of the model that the audio used for the
+    /// last frame. Refer to `Formant::envelope`.
+    ///
+    /// Returns `false` and fills the slices with zeros if the formant stage
+    /// is disabled or has no model. The slices must have the same length.
+    pub(crate) fn formant_envelope(
+        &self,
+        max_frequency_hz: f32,
+        input: &mut [f32],
+        output: &mut [f32],
+    ) -> bool {
+        if !self.config.formant.enabled {
+            input.fill(0.0);
+            output.fill(0.0);
+            return false;
+        }
+        self.formant
+            .envelope(self.formant_position, max_frequency_hz, input, output)
     }
     /// Selects a target in the period domain and smooths the Q14 correction
     /// ratio.
@@ -980,9 +1008,10 @@ impl Resynthesis {
             self.fade = (self.fade + FADE_STEP).min(Q14::ONE);
         }
         if self.config.formant.enabled {
+            self.formant_position = center - FORMANT_OFFSET_FRAMES;
             value = Q14::from_bits(self.formant.forward(
                 value.to_bits(),
-                center - FORMANT_OFFSET_FRAMES,
+                self.formant_position,
                 numeric,
             ));
             value = Q14::from_bits(
@@ -1218,13 +1247,10 @@ impl Resynthesis {
                 }
             }
             if self.config.formant.enabled {
+                self.formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
                 mix = self
                     .formant
-                    .forward_stereo(
-                        mix.map(Q14::to_bits),
-                        (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES,
-                        numeric,
-                    )
+                    .forward_stereo(mix.map(Q14::to_bits), self.formant_position, numeric)
                     .map(Q14::from_bits);
                 for (channel, value) in mix.iter_mut().enumerate() {
                     *value =

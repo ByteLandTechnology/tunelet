@@ -14,6 +14,13 @@ pub enum Error {
         /// The unsupported rate, in hertz.
         hz: u32,
     },
+    /// A frequency is not finite or is outside the interval `0 < hz <= max_hz`.
+    InvalidFrequency {
+        /// The rejected frequency, in hertz.
+        hz: f32,
+        /// The inclusive upper limit, half of the sample rate in hertz.
+        max_hz: f32,
+    },
     /// A configuration field is not valid.
     ///
     /// `field` is the dotted path of the field from the root configuration,
@@ -185,6 +192,12 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnsupportedSampleRate { hz } => write!(f, "unsupported sample rate: {hz} Hz"),
+            Self::InvalidFrequency { hz, max_hz } => {
+                write!(
+                    f,
+                    "frequency {hz} Hz must be finite and in 0 < hz <= {max_hz}"
+                )
+            }
             Self::InvalidConfig { field, problem } => {
                 write!(f, "invalid config: {field} {problem}")
             }

@@ -32,6 +32,7 @@
 //! - The decode of events.
 //! - The conversion of configurations.
 //! - Feedback and telemetry objects.
+//! - The buffers of the formant envelopes.
 //! - Errors.
 //!
 //! The JavaScript glue can also make temporary views when it copies data. This
@@ -42,7 +43,7 @@
 use crate::{
     Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
 };
-use js_sys::Int16Array;
+use js_sys::{Float32Array, Int16Array};
 use serde::{Deserialize, Serialize};
 use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
@@ -107,6 +108,10 @@ pub struct WasmProcessor {
     /// The reusable PCM buffer for the right channel, which the class copies to
     /// the caller only after a successful call.
     right: Vec<i16>,
+    /// The reusable buffers for the two formant envelopes. They become longer
+    /// when a call needs more points, and they do not become shorter.
+    envelope_input: Vec<f32>,
+    envelope_output: Vec<f32>,
 }
 
 #[wasm_bindgen(js_class = Tunelet)]
@@ -164,6 +169,8 @@ impl WasmProcessor {
             input: pcm_buffer(max_block_frames)?,
             left: pcm_buffer(max_block_frames)?,
             right: pcm_buffer(max_block_frames)?,
+            envelope_input: Vec::new(),
+            envelope_output: Vec::new(),
         })
     }
 
@@ -412,6 +419,51 @@ impl WasmProcessor {
         Ok(telemetry)
     }
 
+    /// Writes the formant envelopes of the current model into two
+    /// `Float32Array` buffers of equal length.
+    ///
+    /// `input` gets the vocal-tract envelope that the LPC analysis found.
+    /// `output` gets the envelope after the width and stretch controls. Point
+    /// `k` of `n` is at the frequency `maxFrequencyHz * k / (n - 1)`. The
+    /// values are linear magnitudes with no absolute level. Scale them for a
+    /// display.
+    ///
+    /// `maxFrequencyHz` must be finite, more than zero and not more than half
+    /// of the sample rate.
+    ///
+    /// The method returns `true` if the envelopes are valid. It returns
+    /// `false` and fills the two arrays with zeros if the formant stage is
+    /// disabled or if the current model has no synthesis filter. The audio
+    /// does not change.
+    ///
+    /// The class keeps a buffer for the points. Only the first call and a
+    /// call with more points than before reserve memory.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if the array lengths are not equal, if the frequency
+    /// is not valid or if the reservation of the buffer fails. The arrays
+    /// then do not change.
+    #[wasm_bindgen(js_name = formantEnvelope)]
+    pub fn formant_envelope(
+        &mut self,
+        max_frequency_hz: f32,
+        input: &Float32Array,
+        output: &Float32Array,
+    ) -> Result<bool, JsError> {
+        let points = input.length() as usize;
+        // Check before the buffers become longer for a call that cannot succeed.
+        Error::check_length(points, output.length() as usize)?;
+        let analysis = envelope_buffer(&mut self.envelope_input, points)?;
+        let synthesis = envelope_buffer(&mut self.envelope_output, points)?;
+        let valid = self
+            .processor
+            .formant_envelope(max_frequency_hz, analysis, synthesis)?;
+        input.copy_from(analysis);
+        output.copy_from(synthesis);
+        Ok(valid)
+    }
+
     /// Resets the audio histories and feedback, as the native processor does.
     ///
     /// The configuration, the random stream and some controller and filter
@@ -443,6 +495,19 @@ fn decode_events(events: Option<Ts<BlockEvents>>) -> Result<BlockEvents, JsError
         Some(value) => value.to_rust()?,
         None => BlockEvents::default(),
     })
+}
+
+/// Returns the first `points` entries of a reusable envelope buffer. If the
+/// buffer is shorter, it becomes `points` long first.
+///
+/// If the allocation fails, this function returns a JavaScript error. It does
+/// not panic.
+fn envelope_buffer(buffer: &mut Vec<f32>, points: usize) -> Result<&mut [f32], JsError> {
+    if buffer.len() < points {
+        buffer.try_reserve_exact(points - buffer.len())?;
+        buffer.resize(points, 0.0);
+    }
+    Ok(&mut buffer[..points])
 }
 
 /// Allocates PCM storage that contains zeros.

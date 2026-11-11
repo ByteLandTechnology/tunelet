@@ -389,6 +389,7 @@ impl Processor {
             },
             alien_loop_frames: alien_loop as u32,
             alien_phase_frames: alien_phase as u32,
+            formant_generation: self.resynthesis.formant_generation(),
         }
     }
 
@@ -407,6 +408,50 @@ impl Processor {
         self.input_peak = 0;
         self.output_peaks = [0; 2];
         self.reverb.clear_wet_peak();
+    }
+
+    /// Writes the formant envelopes of the model that the audio used for the
+    /// last frame.
+    ///
+    /// `input` gets the vocal-tract envelope that the LPC analysis found.
+    /// `output` gets the envelope after the width and stretch controls. Point
+    /// `k` of `n` is at the frequency `max_frequency_hz * k / (n - 1)`. The
+    /// values are linear magnitudes. They have no absolute level, because the
+    /// analysis normalizes the signal energy. Scale them for a display.
+    ///
+    /// `max_frequency_hz` must be finite, more than zero and not more than
+    /// half of the sample rate. The two slices must have the same length.
+    ///
+    /// Returns `Ok(true)` if the envelopes are valid. Returns `Ok(false)` and
+    /// fills the two slices with zeros in these cases:
+    ///
+    /// - [`crate::FormantConfig::enabled`] is `false`.
+    /// - The current model has no synthesis filter. This occurs before the
+    ///   first analysis and after an analysis that fails.
+    ///
+    /// The method does not allocate memory and does not change the audio.
+    ///
+    /// # Errors
+    ///
+    /// The method checks [`Error::BufferLength`] first, then
+    /// [`Error::InvalidFrequency`]. On error, the two slices do not change.
+    pub fn formant_envelope(
+        &self,
+        max_frequency_hz: f32,
+        input: &mut [f32],
+        output: &mut [f32],
+    ) -> Result<bool, Error> {
+        Error::check_length(input.len(), output.len())?;
+        let nyquist = self.preparation.sample_rate.hz() / 2.0;
+        if !max_frequency_hz.is_finite() || max_frequency_hz <= 0.0 || max_frequency_hz > nyquist {
+            return Err(Error::InvalidFrequency {
+                hz: max_frequency_hz,
+                max_hz: nyquist,
+            });
+        }
+        Ok(self
+            .resynthesis
+            .formant_envelope(max_frequency_hz, input, output))
     }
 
     /// Validates all configuration fields and applies them.
@@ -827,4 +872,10 @@ pub struct Telemetry {
     /// The reverse reader is two times this number of frames behind the
     /// recording position. The value advances also while Alien is disabled.
     pub alien_phase_frames: u32,
+    /// The wrapping count of formant analyses since construction.
+    ///
+    /// The count increases every 441 frames while the formant stage is
+    /// enabled. Compare two values to find if
+    /// [`Processor::formant_envelope`] can give a new result.
+    pub formant_generation: u32,
 }

@@ -102,6 +102,15 @@ audio. The data includes these items:
 `take_telemetry()` also clears the three peak windows of the telemetry. These
 windows are independent of the peak window of the feedback.
 
+`formant_envelope()` writes two LPC envelopes into slices of equal length:
+the vocal-tract envelope from the analysis, and the envelope after the width
+and stretch controls. The values are linear and have no absolute level. The
+formant stage must be enabled. The envelopes are those of the model that the
+audio used for the last frame. The Rust method returns `Result<bool, Error>`.
+If an argument is not valid, the method returns an error and does not change
+the slices. If no model is available, the method returns `Ok(false)` and
+fills both slices with zeros. Valid envelopes return `Ok(true)`.
+
 `reset()` keeps the configuration, the random stream and some controller and
 filter state. If you need a fully new state, construct a new processor.
 
@@ -261,6 +270,13 @@ declarations contain the parameter documentation from the Rust types.
 telemetry use `bigint`. Frame offsets, block lengths and latency use `number`.
 
 `telemetry()` and `takeTelemetry()` return a `Telemetry` object.
+`formantEnvelope(maxFrequencyHz, input, output)` fills two `Float32Array`
+buffers of equal length and returns `false` if no envelope is available.
+In that case, it fills both buffers with zeros. If the lengths are not equal
+or the frequency is not valid, it throws and does not change the buffers. The
+frequency must be finite, more than zero and not more than half of the sample
+rate. The class keeps a buffer for the points, so only the first call and a
+call with more points than before reserve memory.
 
 In feedback, `targetMidiNote` is `undefined` in these cases, which are also
 the cases where `voiced` is `false`:
@@ -290,6 +306,7 @@ Wasm. These items can allocate:
 - Supplied events.
 - Errors.
 - Feedback and telemetry.
+- The formant envelopes.
 
 The generated glue can also make temporary views. This binding is for general
 use, and it does not guarantee hard real-time behavior for allocation or

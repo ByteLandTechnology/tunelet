@@ -230,6 +230,9 @@ pub(crate) struct Formant {
     /// The Q14 compensation, from the aspiration cutoff divided by the
     /// sample rate.
     noise_amplitude: i32,
+    /// The wrapping count of model designs that the stage tried. Only the
+    /// telemetry reads it.
+    generation: u32,
 }
 
 impl Formant {
@@ -273,6 +276,7 @@ impl Formant {
             noise_filter: Biquad::new(),
             noise_gain: 0_i32,
             noise_amplitude: 0_i32,
+            generation: 0,
         };
         result.set_config(config);
         result.reset();
@@ -560,6 +564,7 @@ impl Formant {
             // inverse coefficients can stay in the bank. But the synthesis
             // order stays zero until all necessary model changes complete.
             self.next_filter();
+            self.generation = self.generation.wrapping_add(1);
             let design_gain = ((db_to_gain(-60.0) + 1.0) * 16384.0) as i32;
             correlations[0] = mul14(correlations[0], design_gain).wrapping_add(200);
             let mut parcor = [0; MAX_ORDER];
@@ -691,6 +696,87 @@ impl Formant {
             output[..order].copy_from_slice(&self.models[stamp.current][..order]);
         }
         order
+    }
+    /// Returns the wrapping count of model designs that the stage tried.
+    pub(crate) fn generation(&self) -> u32 {
+        self.generation
+    }
+    /// Finds and blends the analysis coefficients of the stamp at a signed
+    /// history frame, in the same way as [`Self::coefficients`].
+    ///
+    /// The function writes ORDER entries to the start of `output`.
+    fn analysis_coefficients(&self, position: i32, output: &mut [i32; MAX_ORDER]) {
+        let stamp = self.stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
+        if stamp.blend < 16384 {
+            for (i, value) in output[..ORDER].iter_mut().enumerate() {
+                *value = mul14(16384 - stamp.blend, self.inverse[stamp.previous][i])
+                    .wrapping_add(mul14(stamp.blend, self.inverse[stamp.current][i]));
+            }
+        } else {
+            output[..ORDER].copy_from_slice(&self.inverse[stamp.current][..ORDER]);
+        }
+    }
+    /// Writes the magnitude response of the two models of the stamp at a
+    /// signed history frame. This function is for telemetry only.
+    ///
+    /// `input` gets the vocal-tract envelope from the analysis. `output` gets
+    /// the envelope of the synthesis model, which includes the width gain.
+    /// The two responses include the glottal de-emphasis. Point `k` of `n` is
+    /// at the frequency `max_frequency_hz * k / (n - 1)`. The values are
+    /// linear and have no absolute level, because the analysis normalizes the
+    /// signal energy.
+    ///
+    /// Returns `false` and fills the slices with zeros if the stamp has no
+    /// synthesis model. The slices must have the same length. The function
+    /// does not allocate memory and does not change the stage.
+    pub(crate) fn envelope(
+        &self,
+        position: i32,
+        max_frequency_hz: f32,
+        input: &mut [f32],
+        output: &mut [f32],
+    ) -> bool {
+        let mut synthesis = [0; MAX_ORDER];
+        let order = self.coefficients(position, &mut synthesis);
+        if order == 0 {
+            input.fill(0.0);
+            output.fill(0.0);
+            return false;
+        }
+        let mut analysis = [0; MAX_ORDER];
+        self.analysis_coefficients(position, &mut analysis);
+        let points = input.len();
+        let step = if points > 1 {
+            std::f64::consts::PI * 2.0 * max_frequency_hz as f64
+                / self.rate.hz() as f64
+                / (points - 1) as f64
+        } else {
+            0.0
+        };
+        let glottal = self.glottal as f64 / 16384.0;
+        let width = self.width as f64 / 16384.0;
+        // |1 - sum(c[i] * z^-(i+1))| at z = e^(j * omega).
+        let magnitude = |coefficients: &[i32], cosine: f64, sine: f64| {
+            let (mut real, mut imaginary) = (1.0, 0.0);
+            let (mut c, mut s) = (cosine, sine);
+            for &coefficient in coefficients {
+                let value = coefficient as f64 / 16384.0;
+                real -= value * c;
+                imaginary += value * s;
+                (c, s) = (c * cosine - s * sine, s * cosine + c * sine);
+            }
+            (real * real + imaginary * imaginary).sqrt().max(1e-6)
+        };
+        for (k, (input, output)) in input.iter_mut().zip(output.iter_mut()).enumerate() {
+            let omega = step * k as f64;
+            let (sine, cosine) = omega.sin_cos();
+            let emphasis = ((1.0 - glottal * cosine).powi(2) + (glottal * sine).powi(2))
+                .sqrt()
+                .max(1e-6);
+            *input = (1.0 / (magnitude(&analysis[..ORDER], cosine, sine) * emphasis)) as f32;
+            *output = (width / (magnitude(&synthesis[..order], cosine, sine) * emphasis)) as f32;
+        }
+        true
     }
     /// Applies the optional aspiration and the stamped synthesis model to one
     /// Q14 excitation, then scales the result by the width.
