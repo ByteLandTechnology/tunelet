@@ -7,6 +7,10 @@
 # npm package, and publish-crate publishes the crate to crates.io. The
 # trusted publishers on npm and on crates.io must name this file
 # (release.yml). The jobs do not use stored tokens.
+#
+# The publish-github job also publishes the npm package to GitHub Packages
+# as @bytelandtechnology/tunelet. It uses the GITHUB_TOKEN of the workflow.
+# GitHub links the package to this repository through the repository field.
 name: Release
 
 on:
@@ -57,6 +61,37 @@ jobs:
       - run: npm ci
       # The prepack script builds the Wasm bindings and the TypeScript entry.
       - run: npm publish
+
+  publish-github:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@bytelandtechnology"
+          package-manager-cache: false
+      - run: npm ci
+      # GitHub Packages accepts only names in the scope of the owner.
+      - run: npm pkg set name=@bytelandtechnology/tunelet
+      # The prepack script builds the Wasm bindings and the TypeScript entry.
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-crate:
     needs: release-please
