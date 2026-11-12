@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1090 300" width="1090" height="300" role="img" aria-labelledby="title desc">
+  <title id="title">The tunelet signal chain</title>
+  <desc id="desc">Mono PCM goes through Punch, Warm, pitch tracking and resynthesis, Alien, reverb and the output gain. A dry path goes around the resynthesis stage.</desc>
+  <style>
+    svg { --text: #1f2328; --muted: #59636e; --line: #8c959f; --fill: #f6f8fa; --accent: #0969da; --accent-fill: #ddf4ff; --dry: #9a6700; }
+    @media (prefers-color-scheme: dark) {
+      svg { --text: #e6edf3; --muted: #9198a1; --line: #6e7681; --fill: #161b22; --accent: #4493f8; --accent-fill: #0c2d52; --dry: #d29922; }
+    }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--text); }
+    .name { font-size: 15px; font-weight: 600; text-anchor: middle; }
+    .sub { font-size: 12px; fill: var(--muted); text-anchor: middle; }
+    .title { font-size: 14px; font-weight: 600; fill: var(--accent); text-anchor: middle; }
+    .note { font-size: 12px; fill: var(--muted); }
+    .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .node { fill: var(--fill); stroke: var(--line); stroke-width: 1.5; }
+    .off { stroke-dasharray: 5 4; }
+    .io { fill: none; stroke: var(--text); stroke-width: 1.5; }
+    .stage { fill: var(--accent-fill); stroke: var(--accent); stroke-width: 1.5; }
+    .inner { fill: var(--fill); stroke: var(--accent); stroke-width: 1.2; }
+    .wire { fill: none; stroke: var(--line); stroke-width: 1.5; }
+    .dry { fill: none; stroke: var(--dry); stroke-width: 1.5; stroke-dasharray: 6 4; }
+    .head { fill: var(--line); }
+    .dryhead { fill: var(--dry); }
+    .drytext { font-size: 12px; fill: var(--dry); text-anchor: middle; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="head" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+    <marker id="dryarrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="dryhead" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <!-- Input -->
+  <rect class="io" x="10" y="82" width="100" height="56" rx="28"/>
+  <text class="name" x="60" y="106">Input</text>
+  <text class="sub" x="60" y="124">mono i16 PCM</text>
+
+  <!-- Punch and Warm -->
+  <rect class="node off" x="130" y="82" width="80" height="56" rx="8"/>
+  <text class="name" x="170" y="106">Punch</text>
+  <text class="sub" x="170" y="124">dynamics</text>
+  <rect class="node off" x="230" y="82" width="80" height="56" rx="8"/>
+  <text class="name" x="270" y="106">Warm</text>
+  <text class="sub" x="270" y="124">drive</text>
+
+  <!-- Resynthesis stage -->
+  <rect class="stage" x="340" y="28" width="320" height="160" rx="12"/>
+  <text class="title" x="500" y="52">Pitch tracking and resynthesis</text>
+  <rect class="inner" x="352" y="86" width="80" height="48" rx="6"/>
+  <text class="name" x="392" y="106" style="font-size:13px">Pitch</text>
+  <text class="sub" x="392" y="123">tracker</text>
+  <rect class="inner" x="444" y="86" width="92" height="48" rx="6"/>
+  <text class="name" x="490" y="106" style="font-size:13px">Correction</text>
+  <text class="sub" x="490" y="123">scale or MIDI</text>
+  <rect class="inner" x="548" y="86" width="102" height="48" rx="6"/>
+  <text class="name" x="599" y="106" style="font-size:13px">Voices</text>
+  <text class="sub" x="599" y="123">choir or harmony</text>
+  <rect class="inner off" x="444" y="146" width="206" height="30" rx="6"/>
+  <text class="sub" x="547" y="166">Formant (LPC) and aspiration</text>
+  <path class="wire" d="M432,110 H442" marker-end="url(#arrow)"/>
+  <path class="wire" d="M536,110 H546" marker-end="url(#arrow)"/>
+  <path class="wire" d="M599,146 V136" marker-end="url(#arrow)"/>
+
+  <!-- Alien, reverb, gain -->
+  <rect class="node off" x="690" y="82" width="86" height="56" rx="8"/>
+  <text class="name" x="733" y="106">Alien</text>
+  <text class="sub" x="733" y="124">reverse loop</text>
+  <rect class="node off" x="796" y="82" width="80" height="56" rx="8"/>
+  <text class="name" x="836" y="106">Reverb</text>
+  <text class="sub" x="836" y="124">6 modes</text>
+  <rect class="node" x="896" y="82" width="64" height="56" rx="8"/>
+  <text class="name" x="928" y="106">Gain</text>
+  <text class="sub" x="928" y="124">0..=64</text>
+
+  <!-- Output -->
+  <rect class="io" x="980" y="82" width="102" height="56" rx="28"/>
+  <text class="name" x="1031" y="106">Output</text>
+  <text class="sub" x="1031" y="124">stereo or mono</text>
+
+  <!-- Main wires -->
+  <path class="wire" d="M110,110 H128" marker-end="url(#arrow)"/>
+  <path class="wire" d="M210,110 H228" marker-end="url(#arrow)"/>
+  <path class="wire" d="M310,110 H350" marker-end="url(#arrow)"/>
+  <path class="wire" d="M650,110 H688" marker-end="url(#arrow)"/>
+  <path class="wire" d="M776,110 H794" marker-end="url(#arrow)"/>
+  <path class="wire" d="M876,110 H894" marker-end="url(#arrow)"/>
+  <path class="wire" d="M960,110 H978" marker-end="url(#arrow)"/>
+
+  <!-- Dry path -->
+  <circle cx="325" cy="110" r="3.5" fill="var(--dry)"/>
+  <circle cx="675" cy="110" r="3.5" fill="var(--dry)"/>
+  <path class="dry" d="M325,110 V220 H675 V114" marker-end="url(#dryarrow)"/>
+  <text class="drytext" x="500" y="240"><tspan class="code">dry_mix</tspan>: the dry path, 1,543 frames of delay (default 0)</text>
+
+  <!-- Legend -->
+  <rect class="node" x="10" y="266" width="26" height="16" rx="4"/>
+  <text class="note" x="44" y="279">enabled by default</text>
+  <rect class="node off" x="170" y="266" width="26" height="16" rx="4"/>
+  <text class="note" x="204" y="279">disabled by default</text>
+  <text class="note" x="1082" y="279" text-anchor="end">Nominal latency: 1,593 frames at 44.1 kHz and 48 kHz</text>
+</svg>

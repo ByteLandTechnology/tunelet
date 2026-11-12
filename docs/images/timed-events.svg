@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 268" width="900" height="268" role="img" aria-labelledby="title desc">
+  <title id="title">Timed events in one block</title>
+  <desc id="desc">A block of 16 frames. Events apply immediately before the frame at their offset. Two events at the same offset execute in slice order.</desc>
+  <style>
+    svg { --text: #1f2328; --muted: #59636e; --line: #8c959f; --fill: #f6f8fa; --accent: #8250df; --accent-fill: #fbefff; --frame: #ddf4ff; --frame-line: #0969da; }
+    @media (prefers-color-scheme: dark) {
+      svg { --text: #e6edf3; --muted: #9198a1; --line: #6e7681; --fill: #161b22; --accent: #ab7df8; --accent-fill: #2b1d47; --frame: #0c2d52; --frame-line: #4493f8; }
+    }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--text); }
+    .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .event { fill: var(--accent-fill); stroke: var(--accent); stroke-width: 1.3; }
+    .etext { font-size: 12px; text-anchor: middle; }
+    .frame { fill: var(--frame); stroke: var(--frame-line); stroke-width: 1; }
+    .tick { font-size: 11.5px; fill: var(--muted); text-anchor: middle; }
+    .note { font-size: 12.5px; fill: var(--muted); }
+    .title { font-size: 14px; font-weight: 600; }
+    .wire { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+    .head { fill: var(--accent); }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path class="head" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <!-- Events: offset 0 -->
+  <rect class="event" x="20" y="14" width="150" height="26" rx="6"/>
+  <text class="etext" x="95" y="32"><tspan class="code">outputGain</tspan> at 0</text>
+  <path class="wire" d="M80,40 V128" marker-end="url(#arrow)"/>
+
+  <!-- Events: offset 5, slice order -->
+  <rect class="event" x="250" y="14" width="190" height="26" rx="6"/>
+  <text class="etext" x="345" y="32">1. <tspan class="code">midi</tspan> Note On at 5</text>
+  <rect class="event" x="250" y="48" width="190" height="26" rx="6"/>
+  <text class="etext" x="345" y="66">2. <tspan class="code">reverb</tspan> change at 5</text>
+  <path class="wire" d="M330,74 V128" marker-end="url(#arrow)"/>
+  <text class="note" x="450" y="66">same offset: slice order</text>
+
+  <!-- Events: offset 11 -->
+  <rect class="event" x="560" y="14" width="140" height="26" rx="6"/>
+  <text class="etext" x="630" y="32"><tspan class="code">reset</tspan> at 11</text>
+  <path class="wire" d="M630,40 V128" marker-end="url(#arrow)"/>
+
+  <!-- Frames 0..15, 50 units each from x=80 -->
+  <g>
+    <rect class="frame" x="80" y="132" width="50" height="36"/>
+    <rect class="frame" x="130" y="132" width="50" height="36"/>
+    <rect class="frame" x="180" y="132" width="50" height="36"/>
+    <rect class="frame" x="230" y="132" width="50" height="36"/>
+    <rect class="frame" x="280" y="132" width="50" height="36"/>
+    <rect class="frame" x="330" y="132" width="50" height="36"/>
+    <rect class="frame" x="380" y="132" width="50" height="36"/>
+    <rect class="frame" x="430" y="132" width="50" height="36"/>
+    <rect class="frame" x="480" y="132" width="50" height="36"/>
+    <rect class="frame" x="530" y="132" width="50" height="36"/>
+    <rect class="frame" x="580" y="132" width="50" height="36"/>
+    <rect class="frame" x="630" y="132" width="50" height="36"/>
+    <rect class="frame" x="680" y="132" width="50" height="36"/>
+    <rect class="frame" x="730" y="132" width="50" height="36"/>
+    <rect class="frame" x="780" y="132" width="50" height="36"/>
+    <rect class="frame" x="830" y="132" width="50" height="36"/>
+  </g>
+  <text class="tick" x="105" y="186">0</text>
+  <text class="tick" x="155" y="186">1</text>
+  <text class="tick" x="205" y="186">2</text>
+  <text class="tick" x="255" y="186">3</text>
+  <text class="tick" x="305" y="186">4</text>
+  <text class="tick" x="355" y="186">5</text>
+  <text class="tick" x="405" y="186">6</text>
+  <text class="tick" x="455" y="186">7</text>
+  <text class="tick" x="505" y="186">8</text>
+  <text class="tick" x="555" y="186">9</text>
+  <text class="tick" x="605" y="186">10</text>
+  <text class="tick" x="655" y="186">11</text>
+  <text class="tick" x="705" y="186">12</text>
+  <text class="tick" x="755" y="186">13</text>
+  <text class="tick" x="805" y="186">14</text>
+  <text class="tick" x="855" y="186">15</text>
+  <text class="note" x="20" y="155">frames</text>
+
+  <!-- Rules -->
+  <text class="title" x="20" y="218">An event applies immediately before the frame at its offset.</text>
+  <text class="note" x="20" y="240">Offsets start at 0 in each block, are less than the block length and do not decrease.</text>
+  <text class="note" x="20" y="256">If one event is not valid, the call fails and the output and the state do not change.</text>
+</svg>

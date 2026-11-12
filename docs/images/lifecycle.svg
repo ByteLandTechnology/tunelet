@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 320" width="900" height="320" role="img" aria-labelledby="title desc">
+  <title id="title">The processor lifecycle</title>
+  <desc id="desc">Construction allocates the storage. Then the processor processes blocks. After the last block, begin_drain starts the tail. Drain calls return frames until the budget is used. Then the processor resets and can process again.</desc>
+  <style>
+    svg { --text: #1f2328; --muted: #59636e; --line: #8c959f; --fill: #f6f8fa; --accent: #0969da; --accent-fill: #ddf4ff; --warn: #9a6700; --ok: #1a7f37; }
+    @media (prefers-color-scheme: dark) {
+      svg { --text: #e6edf3; --muted: #9198a1; --line: #6e7681; --fill: #161b22; --accent: #4493f8; --accent-fill: #0c2d52; --warn: #d29922; --ok: #3fb950; }
+    }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--text); }
+    .name { font-size: 15px; font-weight: 600; text-anchor: middle; }
+    .item { font-size: 12.5px; fill: var(--muted); text-anchor: middle; }
+    .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .label { font-size: 12.5px; text-anchor: middle; }
+    .node { fill: var(--fill); stroke: var(--line); stroke-width: 1.5; }
+    .state { fill: var(--accent-fill); stroke: var(--accent); stroke-width: 1.5; }
+    .zone { fill: none; stroke: var(--ok); stroke-width: 1.2; stroke-dasharray: 6 4; }
+    .zonetext { font-size: 12.5px; fill: var(--ok); }
+    .wire { fill: none; stroke: var(--line); stroke-width: 1.5; }
+    .cancel { fill: none; stroke: var(--warn); stroke-width: 1.5; }
+    .head { fill: var(--line); }
+    .warnhead { fill: var(--warn); }
+    .warntext { font-size: 12.5px; fill: var(--warn); text-anchor: middle; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="head" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+    <marker id="warnarrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="warnhead" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <!-- Real-time zone -->
+  <rect class="zone" x="226" y="20" width="664" height="290" rx="14"/>
+  <text class="zonetext" x="242" y="42">No memory allocation, no locks and no I/O in this area</text>
+
+  <!-- Construction -->
+  <rect class="node" x="12" y="104" width="190" height="96" rx="10"/>
+  <text class="name" x="107" y="134"><tspan class="code">Processor::new</tspan></text>
+  <text class="item" x="107" y="158">validates the configuration</text>
+  <text class="item" x="107" y="178">allocates all storage</text>
+
+  <!-- Processing -->
+  <rect class="state" x="260" y="80" width="220" height="144" rx="12"/>
+  <text class="name" x="370" y="108">Process</text>
+  <text class="item code" x="370" y="138">process*(), set_config()</text>
+    <text class="item code" x="370" y="162">feedback(), telemetry()</text>
+  <text class="item" x="370" y="196">one output frame</text>
+  <text class="item" x="370" y="212">for each input sample</text>
+
+  <!-- Draining -->
+  <rect class="state" x="660" y="80" width="220" height="144" rx="12"/>
+  <text class="name" x="770" y="108">Drain</text>
+  <text class="item code" x="770" y="138">drain*() returns n</text>
+  <text class="item" x="770" y="162">use only <tspan class="code">output[..n]</tspan></text>
+  <text class="item" x="770" y="186">zeros fill the other frames</text>
+  <text class="item" x="770" y="210">finite budget: <tspan class="code">tail_frames()</tspan></text>
+
+  <!-- Wires -->
+  <path class="wire" d="M202,152 H258" marker-end="url(#arrow)"/>
+  <path class="wire" d="M480,112 H658" marker-end="url(#arrow)"/>
+  <text class="label" x="570" y="102"><tspan class="code">begin_drain()</tspan></text>
+
+  <path class="cancel" d="M660,170 H482" marker-end="url(#warnarrow)"/>
+  <text class="warntext" x="570" y="190">a process call,</text>
+  <text class="warntext" x="570" y="206"><tspan class="code">set_config</tspan> or <tspan class="code">reset</tspan></text>
+  <text class="warntext" x="570" y="222">cancels the drain</text>
+
+  <path class="wire" d="M770,224 V276 H370 V226" marker-end="url(#arrow)"/>
+  <text class="label" x="570" y="268">the last drain call uses the budget and does a <tspan class="code">reset()</tspan></text>
+  <text class="item" x="570" y="294">the next drain calls return 0</text>
+</svg>
