@@ -240,6 +240,7 @@ pub enum Inversion {
 /// - A register of 50%.
 /// - A closed voicing and zero portamento.
 /// - Four voices for the interval sources.
+/// - Unity gains, default stereo pans, no mutes and unity formant factors.
 ///
 /// These settings configure all sources. Only the fields for the selected
 /// source change the target notes. Validation always checks all fields.
@@ -328,12 +329,89 @@ pub struct HarmonyConfig {
         tsify(optional)
     )]
     pub voices: u8,
+    /// Four linear gains for the harmony voices, each in 0..=1.
+    ///
+    /// The default is `[1, 1, 1, 1]`. Each gain multiplies
+    /// [`crate::ResynthesisConfig::harmony_gain`] and the controller envelope
+    /// in mono and stereo modes. In JavaScript, the field is optional and an
+    /// absent value gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "default_voice_unit"),
+        tsify(optional, type = "[number, number, number, number]")
+    )]
+    pub voice_gains: [f32; HARMONY_VOICES],
+    /// Four stereo pan positions for the harmony voices, each in -1..=1.
+    ///
+    /// A value of -1 is full left, 0 is center and 1 is full right. The
+    /// default is `[-1/3, 1/3, -1, 1]`. Resynthesis uses these pans only if
+    /// [`crate::ResynthesisConfig::stereo_output`] is `true`. In JavaScript,
+    /// the field is optional and an absent value gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "default_voice_pans"),
+        tsify(optional, type = "[number, number, number, number]")
+    )]
+    pub voice_pans: [f32; HARMONY_VOICES],
+    /// Four mute switches for the harmony voices.
+    ///
+    /// The default is `[false, false, false, false]`. If an entry is `true`,
+    /// resynthesis sets the mix gain of that voice to zero in mono and stereo
+    /// modes. In JavaScript, the field is optional and an absent value gives
+    /// the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default),
+        tsify(optional, type = "[boolean, boolean, boolean, boolean]")
+    )]
+    pub voice_mutes: [bool; HARMONY_VOICES],
+    /// Four vocal-tract length factors for the harmony voices, each in
+    /// 0.5..=2.
+    ///
+    /// The default is `[1, 1, 1, 1]`. If the formant stage is enabled, each
+    /// factor sets the area interpolation and the filter order of its voice
+    /// bank. In JavaScript, the field is optional and an absent value gives
+    /// the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "default_voice_unit"),
+        tsify(optional, type = "[number, number, number, number]")
+    )]
+    pub voice_formant_stretch: [f32; HARMONY_VOICES],
+    /// Four vocal-tract width factors for the harmony voices, each in
+    /// 0.5..=2.
+    ///
+    /// The default is `[1, 1, 1, 1]`. If the formant stage is enabled, the
+    /// square of each factor scales the tract areas of its voice bank. The
+    /// factor also scales the synthesized output of that voice. In JavaScript,
+    /// the field is optional and an absent value gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "default_voice_unit"),
+        tsify(optional, type = "[number, number, number, number]")
+    )]
+    pub voice_formant_width: [f32; HARMONY_VOICES],
 }
+
+/// The default stereo pans for the four harmony voices.
+const DEFAULT_VOICE_PANS: [f32; HARMONY_VOICES] = [-1.0 / 3.0, 1.0 / 3.0, -1.0, 1.0];
 
 /// The default count of interval voices: all of them.
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 fn default_voices() -> u8 {
     HARMONY_VOICES as u8
+}
+
+/// The default unity array for per-voice gains and formant factors.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn default_voice_unit() -> [f32; HARMONY_VOICES] {
+    [1.0; HARMONY_VOICES]
+}
+
+/// The default stereo pans for JavaScript configurations that omit the field.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn default_voice_pans() -> [f32; HARMONY_VOICES] {
+    DEFAULT_VOICE_PANS
 }
 
 impl Default for HarmonyConfig {
@@ -351,6 +429,11 @@ impl Default for HarmonyConfig {
             voicing_spread_percent: 0.0,
             portamento_ms: 0.0,
             voices: HARMONY_VOICES as u8,
+            voice_gains: [1.0; HARMONY_VOICES],
+            voice_pans: DEFAULT_VOICE_PANS,
+            voice_mutes: [false; HARMONY_VOICES],
+            voice_formant_stretch: [1.0; HARMONY_VOICES],
+            voice_formant_width: [1.0; HARMONY_VOICES],
         }
     }
 }
@@ -389,7 +472,22 @@ impl HarmonyConfig {
             self.portamento_ms,
             0.0,
             10_000.0,
-        )
+        )?;
+        for gain in self.voice_gains {
+            check_range("resynthesis.harmony.voice_gains", gain, 0.0, 1.0)?;
+        }
+        for pan in self.voice_pans {
+            check_range("resynthesis.harmony.voice_pans", pan, -1.0, 1.0)?;
+        }
+        for stretch in self.voice_formant_stretch {
+            let field = "resynthesis.harmony.voice_formant_stretch";
+            check_range(field, stretch, 0.5, 2.0)?;
+        }
+        for width in self.voice_formant_width {
+            let field = "resynthesis.harmony.voice_formant_width";
+            check_range(field, width, 0.5, 2.0)?;
+        }
+        Ok(())
     }
 }
 
@@ -539,7 +637,15 @@ impl HarmonyState {
         if old.portamento_ms != config.portamento_ms {
             self.prepare_portamento();
         }
-        if old != config {
+        if old.source != config.source
+            || old.key != config.key
+            || old.scale != config.scale
+            || old.chord != config.chord
+            || old.degree != config.degree
+            || old.inversion != config.inversion
+            || old.register_percent != config.register_percent
+            || old.voicing_spread_percent != config.voicing_spread_percent
+        {
             self.setup_chord();
         }
     }

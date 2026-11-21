@@ -194,6 +194,14 @@ The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
 voices. The other voices release with the usual gain envelope. The chord
 and MIDI sources ignore this field.
 
+`resynthesis.lead_gain` (`0..=1`, default `1`) and `resynthesis.harmony_gain`
+(`0..=1`, default `0.5`) scale the lead voice and the harmony voices in mono
+and stereo modes. On `resynthesis.harmony`, `voice_gains` (`0..=1`),
+`voice_pans` (`-1..=1`) and `voice_mutes` control each of the four harmony
+voices. When `resynthesis.formant.enabled` is `true`, `voice_formant_stretch`
+and `voice_formant_width` (`0.5..=2`, default `1`) set separate vocal-tract
+length and width models for the four harmony voices.
+
 ## Process audio
 
 To prepare a processor, do these steps:
@@ -444,10 +452,11 @@ and show enums as string literals. To change the configuration, do these steps:
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+JavaScript `Error`. Optional fields (`resynthesis.leadGain`, and `voices`,
+`voiceGains`, `voicePans`, `voiceMutes`, `voiceFormantStretch` and
+`voiceFormantWidth` on `resynthesis.harmony`) use their defaults if they are
+absent. The conversion ignores extra object properties. The generated
+declarations contain the parameter documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
