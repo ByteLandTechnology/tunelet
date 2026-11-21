@@ -29,12 +29,13 @@
   "sideEffects": false,
   "scripts": {
     "build": "npm run build:wasm && npm run build:ts",
-    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --features wasm --locked",
+    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node --input-type=module -e \"import fs from 'node:fs'; fs.rmSync('pkg/.gitignore', { force: true })\"",
     "build:ts": "node ./node_modules/typescript-native/bin/tsc",
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "typecheck": "node ./node_modules/typescript-native/bin/tsc --noEmit",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "verify:pack": "node scripts/verify-pack.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -44,6 +45,7 @@
     "eslint": "^10.15.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-yml": "^3.10.0",
+    "globals": "^17.14.0",
     "prettier": "^3.10.1",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.73.0",

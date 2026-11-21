@@ -4,6 +4,7 @@ import json from "@eslint/json";
 import markdown from "@eslint/markdown";
 import prettier from "eslint-config-prettier/flat";
 import yml from "eslint-plugin-yml";
+import globals from "globals";
 import tseslint from "typescript-eslint";
 
 export default defineConfig([
@@ -17,6 +18,9 @@ export default defineConfig([
   {
     files: ["**/*.{js,mjs,cjs}"],
     extends: [js.configs.recommended, prettier],
+    languageOptions: {
+      globals: globals.node,
+    },
   },
   {
     files: ["**/*.{ts,mts,cts}"],
