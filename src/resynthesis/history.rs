@@ -1,7 +1,7 @@
 //! Audio histories on the heap and three-point parabolic interpolation.
 
 use crate::numeric::fixed::Q14;
-use crate::numeric::{ring, HISTORY};
+use crate::numeric::{clamp_i32, ring, HISTORY};
 
 /// Allocates `HISTORY` copies of `value` on the heap and keeps that length in
 /// the boxed-array type.
@@ -118,8 +118,8 @@ fn interpolation_taps<T: Copy>(history: &History<T>, center: i32, generation: u3
 ///
 /// Then it truncates the result toward zero. The fraction that is left is
 /// relative to that center. The taps wrap through the history, but the
-/// returned center does not. All intermediate products and sums keep the
-/// 32-bit wrap order of the engine.
+/// returned center does not. Coordinate offsets wrap at 32 bits. Sample
+/// products use `i64` arithmetic and clamp to `i32`.
 pub(super) fn interpolation(history: &History<Q14>, position: Q14, generation: u32) -> (Q14, i32) {
     let bits = position.to_bits();
     let center = if position > Q14::ZERO {
@@ -129,8 +129,10 @@ pub(super) fn interpolation(history: &History<Q14>, position: Q14, generation: u
     };
     let fraction = Q14::from_bits(bits.wrapping_sub(center.wrapping_shl(14)));
     let [left, middle, right] = interpolation_taps(history, center, generation);
-    let curvature = ((left + right) >> 1) - middle;
-    let slope = (right - left) >> 1;
+    let left_i64 = i64::from(left.to_bits());
+    let right_i64 = i64::from(right.to_bits());
+    let curvature = Q14::from_bits(clamp_i32((left_i64 + right_i64) >> 1)) - middle;
+    let slope = Q14::from_bits(clamp_i32((right_i64 - left_i64) >> 1));
     (
         middle + (curvature.mul::<14, 14>(fraction) + slope).mul(fraction),
         center,
