@@ -20,12 +20,16 @@
 //! - Enum values are strings.
 //! - Each object must contain all required fields.
 //! - The optional harmony `voices` field defaults to 4.
+//! - The optional correction and harmony `pitchBendSemitones` fields are in
+//!   0..=24 and default to 2.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
 //! `{ type, value }`, and the reset control has no `value`. MIDI messages use
-//! `{ type, channel, note, velocity }`, with the fields that apply to the
-//! selected variant. The TypeScript declarations come from the same Rust types
-//! that validation uses.
+//! a `type` tag (`"noteOn"`, `"noteOff"`, `"pitchBend"`, `"sustainPedal"` or
+//! `"allNotesOff"`) and the fields for that variant: `channel` (0..=15),
+//! `note` (0..=127), `velocity` (0..=127), `value` (-8192..=8191) or `held`.
+//! The TypeScript declarations come from the same Rust types that validation
+//! uses.
 //!
 //! The class allocates the PCM storage at construction and uses it again for
 //! each block. These operations can allocate:

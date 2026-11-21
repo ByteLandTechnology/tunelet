@@ -68,17 +68,19 @@ pub enum MultiVoiceMode {
 /// empty or correction is disabled, the ratio moves toward 1.0 at the same
 /// rate.
 ///
-/// Correction MIDI replaces the active note table. It does not change this
-/// configuration. A change to `notes` or to `enabled` loads the configured
-/// mask again. Reset releases the correction keys 0..=126. It keeps key 127
-/// and the active note table. Key 127 has no effect on the note table.
+/// Note events for correction MIDI replace the active note table. They do not
+/// change this configuration. Pitch bend scales the target ratio, and the
+/// sustain pedal holds released keys. A change to `notes` or to `enabled`
+/// loads the configured mask again. Reset releases the correction keys 0..=126
+/// and clears sustain and pitch bend. It keeps key 127 and the active note
+/// table. Key 127 has no effect on the note table.
 ///
 /// At construction, the chromatic table uses 44.1 kHz periods, also for a
 /// 48 kHz processor. Each of these events loads the periods for the prepared
 /// rate:
 /// - An initial mask that is not chromatic.
 /// - A later change to the mask or to `enabled`.
-/// - A correction MIDI event.
+/// - A correction MIDI event that reloads the note table.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -106,6 +108,24 @@ pub struct CorrectionConfig {
     /// tracking update. A value that is not zero is a half-life. It is not a
     /// fixed time to get exactly to the target.
     pub retune_ms: f32,
+    /// The maximum pitch bend in semitones, 0..=24. The default is 2.
+    ///
+    /// A [`MidiEvent::PitchBend`] value of -8192 lowers the target pitch by
+    /// this range, and 8191 raises it by this range. Zero disables pitch bend.
+    /// In JavaScript, the field is optional and an absent value gives the
+    /// default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "default_pitch_bend_semitones"),
+        tsify(optional)
+    )]
+    pub pitch_bend_semitones: f32,
+}
+
+/// The default pitch-bend range in semitones.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn default_pitch_bend_semitones() -> f32 {
+    2.0
 }
 
 impl Default for CorrectionConfig {
@@ -114,6 +134,7 @@ impl Default for CorrectionConfig {
             enabled: true,
             notes: NoteMask::default(),
             retune_ms: 0.0,
+            pitch_bend_semitones: 2.0,
         }
     }
 }
@@ -121,20 +142,27 @@ impl Default for CorrectionConfig {
 impl CorrectionConfig {
     /// Validates all fields, also if correction is disabled.
     ///
-    /// All values of `enabled` and `notes` are valid. `retune_ms` must be
-    /// finite and in its documented inclusive range. Validation does not
-    /// clamp values. It does not change the state of the processor.
+    /// All values of `enabled` and `notes` are valid. `retune_ms` and
+    /// `pitch_bend_semitones` must be finite and in their documented inclusive
+    /// ranges. Validation does not clamp values. It does not change the state
+    /// of the processor.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfig`], with the dotted path of the field and
-    /// the problem, if `retune_ms` is not valid.
+    /// the problem, if `retune_ms` or `pitch_bend_semitones` is not valid.
     pub fn validate(self) -> Result<(), Error> {
         check_range(
             "resynthesis.correction.retune_ms",
             self.retune_ms,
             0.0,
             400.0,
+        )?;
+        check_range(
+            "resynthesis.correction.pitch_bend_semitones",
+            self.pitch_bend_semitones,
+            0.0,
+            24.0,
         )
     }
 }
@@ -509,6 +537,7 @@ impl Resynthesis {
                 // configured rate become active.
                 let mut scale = CorrectionTable::new(SampleRate::Hz44100, NoteMask::default());
                 scale.set_sample_rate(rate);
+                scale.set_pitch_bend_semitones(config.correction.pitch_bend_semitones);
                 if config.correction.notes != NoteMask::default() {
                     scale.set_notes(config.correction.notes);
                 }
@@ -650,6 +679,10 @@ impl Resynthesis {
             self.scale.set_notes(config.correction.notes);
             self.scale_initialized = false;
         }
+        if old.correction.pitch_bend_semitones != config.correction.pitch_bend_semitones {
+            self.scale
+                .set_pitch_bend_semitones(config.correction.pitch_bend_semitones);
+        }
         if old.pitch_ratio != config.pitch_ratio {
             self.configure_shift_filters();
         }
@@ -729,8 +762,9 @@ impl Resynthesis {
     /// Applies a correction MIDI event that the API or the block code checked
     /// before.
     pub(crate) fn apply_correction_midi(&mut self, event: MidiEvent) {
-        self.scale.apply_validated_midi(event);
-        self.scale_initialized = false;
+        if self.scale.apply_validated_midi(event) {
+            self.scale_initialized = false;
+        }
     }
 
     /// Returns the finite number of frames for a drain of resynthesis.
@@ -915,6 +949,9 @@ impl Resynthesis {
             let denominator = Q6::from_bits(self.scale.periods[self.scale_index]);
             if denominator != Q6::ZERO {
                 target_ratio = target.div(denominator);
+            }
+            if self.scale.bend_ratio != Q14::ONE {
+                target_ratio = target_ratio.mul(self.scale.bend_ratio);
             }
         }
         self.correction = self.correction_decay.mul(self.correction - target_ratio) + target_ratio;

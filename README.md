@@ -445,7 +445,9 @@ and show enums as string literals. To change the configuration, do these steps:
 
 If a required field is absent or a value is not valid, the call throws a
 JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
+to 4 if it is absent. The optional `resynthesis.correction.pitchBendSemitones`
+and `resynthesis.harmony.pitchBendSemitones` fields are in `0..=24` and default
+to 2 if they are absent. The conversion ignores extra object properties. The
 generated declarations contain the parameter documentation from the Rust
 types.
 
@@ -467,6 +469,16 @@ A harmony Note On event has this form:
 
 ```ts
 { offset: 0, event: { type: "midi", value: { type: "noteOn", channel: 0, note: 60, velocity: 100 } } }
+```
+
+MIDI events also accept `"noteOff"`, `"pitchBend"` (`channel` in `0..=15`,
+`value` in `-8192..=8191`), `"sustainPedal"` (`channel` in `0..=15`, `held` as
+a `boolean`) and `"allNotesOff"`. For example, these events hold the sustain
+pedal and bend the pitch upward:
+
+```ts
+{ offset: 0, event: { type: "midi", value: { type: "sustainPedal", channel: 0, held: true } } }
+{ offset: 0, event: { type: "midi", value: { type: "pitchBend", channel: 0, value: 4096 } } }
 ```
 
 Use `correctionMidi` for the separate correction keyboard. The native rules

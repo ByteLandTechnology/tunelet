@@ -7,7 +7,7 @@
 mod chords;
 
 use crate::error::{check_count, check_range};
-use crate::midi::{note_period, velocity_gain, MidiEvent};
+use crate::midi::{bend_ratio, note_period, velocity_gain, MidiEvent};
 use crate::numeric::fixed::{Q12, Q14, Q6};
 use crate::scale::PitchClass;
 use crate::{Error, SampleRate};
@@ -240,6 +240,7 @@ pub enum Inversion {
 /// - A register of 50%.
 /// - A closed voicing and zero portamento.
 /// - Four voices for the interval sources.
+/// - A pitch-bend range of two semitones.
 ///
 /// These settings configure all sources. Only the fields for the selected
 /// source change the target notes. Validation always checks all fields.
@@ -328,12 +329,30 @@ pub struct HarmonyConfig {
         tsify(optional)
     )]
     pub voices: u8,
+    /// The maximum pitch bend in semitones, 0..=24.
+    ///
+    /// The default is 2. A [`MidiEvent::PitchBend`] value of -8192 lowers the
+    /// pitch by this range, and 8191 raises the pitch by this range. Zero
+    /// disables pitch bend. In JavaScript, the field is optional and an absent
+    /// value gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "default_pitch_bend_semitones"),
+        tsify(optional)
+    )]
+    pub pitch_bend_semitones: f32,
 }
 
 /// The default count of interval voices: all of them.
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 fn default_voices() -> u8 {
     HARMONY_VOICES as u8
+}
+
+/// The default pitch-bend range in semitones.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn default_pitch_bend_semitones() -> f32 {
+    2.0
 }
 
 impl Default for HarmonyConfig {
@@ -351,6 +370,7 @@ impl Default for HarmonyConfig {
             voicing_spread_percent: 0.0,
             portamento_ms: 0.0,
             voices: HARMONY_VOICES as u8,
+            pitch_bend_semitones: 2.0,
         }
     }
 }
@@ -389,6 +409,12 @@ impl HarmonyConfig {
             self.portamento_ms,
             0.0,
             10_000.0,
+        )?;
+        check_range(
+            "resynthesis.harmony.pitch_bend_semitones",
+            self.pitch_bend_semitones,
+            0.0,
+            24.0,
         )
     }
 }
@@ -464,6 +490,20 @@ pub(crate) struct HarmonyState {
     /// The signed assignment order of each pending note. The largest positive
     /// value resumes first.
     pending_order: [i32; 128],
+    /// The sustain latches for notes that Note Off released during sustain.
+    sustained: [bool; 128],
+    /// The sustain latches for the four allocated voice slots.
+    voice_sustained: [bool; HARMONY_VOICES],
+    /// The sustain-pedal state (controller 64) for each MIDI channel.
+    sustain_held: [bool; 16],
+    /// The centered 14-bit pitch bend on each MIDI channel.
+    pitch_bend: [i16; 16],
+    /// The Q14 pitch-bend ratio on each MIDI channel.
+    bend_ratio: [Q14; 16],
+    /// The latest centered 14-bit pitch bend across all channels.
+    omni_pitch_bend: i16,
+    /// The Q14 pitch-bend ratio from `omni_pitch_bend`.
+    omni_bend_ratio: Q14,
     /// The wrapping i32 counter of Note On and Note Off events. A reset sets
     /// it to zero. The note assignment compares its signed values.
     event_counter: i32,
@@ -498,6 +538,13 @@ impl HarmonyState {
             porta_decay: Q14::ZERO,
             pending_gain: [Q12::ZERO; 128],
             pending_order: [0; 128],
+            sustained: [false; 128],
+            voice_sustained: [false; HARMONY_VOICES],
+            sustain_held: [false; 16],
+            pitch_bend: [0; 16],
+            bend_ratio: [Q14::ONE; 16],
+            omni_pitch_bend: 0,
+            omni_bend_ratio: Q14::ONE,
             event_counter: 0,
             gains: std::array::from_fn(|i| velocity_gain(i as u8)),
         };
@@ -539,6 +586,13 @@ impl HarmonyState {
         if old.portamento_ms != config.portamento_ms {
             self.prepare_portamento();
         }
+        if old.pitch_bend_semitones != config.pitch_bend_semitones {
+            for channel in 0..16 {
+                self.bend_ratio[channel] =
+                    bend_ratio(self.pitch_bend[channel], config.pitch_bend_semitones);
+            }
+            self.omni_bend_ratio = bend_ratio(self.omni_pitch_bend, config.pitch_bend_semitones);
+        }
         if old != config {
             self.setup_chord();
         }
@@ -549,6 +603,7 @@ impl HarmonyState {
     ///
     /// - The active MIDI periods, which releases the voices.
     /// - The pending stolen notes and their assignment orders.
+    /// - The sustained notes, the sustain pedals and the pitch-bend state.
     /// - The portamento start state.
     /// - The MIDI event counter.
     ///
@@ -565,6 +620,13 @@ impl HarmonyState {
         self.portamento_period.fill(Q6::ZERO);
         self.pending_gain.fill(Q12::ZERO);
         self.pending_order.fill(0);
+        self.sustained.fill(false);
+        self.voice_sustained.fill(false);
+        self.sustain_held.fill(false);
+        self.pitch_bend.fill(0);
+        self.bend_ratio.fill(Q14::ONE);
+        self.omni_pitch_bend = 0;
+        self.omni_bend_ratio = Q14::ONE;
         self.event_counter = 0;
         if self.config.source == HarmonySource::ChordViaMidi {
             self.setup_chord();
@@ -694,20 +756,32 @@ impl HarmonyState {
             index as i32,
         )
     }
-    /// Applies a MIDI event with channel, note and velocity values that are
-    /// already in range.
+    /// Applies a MIDI event with channel, note, velocity and bend values that
+    /// are already in range.
     /// Returns `true` if resynthesis must make its next control step due.
-    /// This occurs after a new note assignment and after each Note Off in
-    /// the omni sources. The omni sources steal the oldest voice and resume
-    /// the newest pending note. If two orders are equal, strict comparisons
-    /// keep the lowest voice index or pitch. Each Note Off clears the pending
-    /// entry of its pitch. All Notes Off calls `reset` and returns `false`.
-    /// The gain releases occur at the next control steps.
+    /// This occurs after a new note assignment, after an unheld Note Off or
+    /// pedal release in the omni sources, and after an active Pitch Bend. The
+    /// omni sources steal the oldest voice and resume the newest pending note.
+    /// While sustain is active, Note Off latches active notes until the pedal
+    /// releases. All Notes Off calls `reset` and returns `false`. The gain
+    /// releases occur at the next control steps.
     pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent) -> bool {
         let (channel, note, velocity) = match event {
             MidiEvent::AllNotesOff => {
                 self.reset();
                 return false;
+            }
+            MidiEvent::PitchBend { channel, value } => {
+                let idx = usize::from(channel);
+                let ratio = bend_ratio(value, self.config.pitch_bend_semitones);
+                self.pitch_bend[idx] = value;
+                self.bend_ratio[idx] = ratio;
+                self.omni_pitch_bend = value;
+                self.omni_bend_ratio = ratio;
+                return self.config.source != HarmonySource::MidiChannels || channel < 4;
+            }
+            MidiEvent::SustainPedal { channel, held } => {
+                return self.apply_sustain_pedal(usize::from(channel), held);
             }
             MidiEvent::NoteOn {
                 channel,
@@ -718,47 +792,49 @@ impl HarmonyState {
         };
         self.event_counter = self.event_counter.wrapping_add(1);
         let gain = self.gains[velocity as usize];
-        if velocity == 0 {
-            self.pending_gain[note] = Q12::ZERO;
-            self.pending_order[note] = 0;
-        }
         if matches!(
             self.config.source,
             HarmonySource::MidiOmni | HarmonySource::ChordViaMidi
         ) {
             if velocity == 0 {
+                if self.sustain_held.contains(&true) {
+                    let mut active = self.pending_order[note] != 0;
+                    for voice in 0..HARMONY_VOICES {
+                        if self.midi_period[voice] != Q6::ZERO
+                            && self.midi_note[voice] == note as i32
+                        {
+                            self.voice_sustained[voice] = true;
+                            active = true;
+                        }
+                    }
+                    if active {
+                        self.sustained[note] = true;
+                    }
+                    return false;
+                }
+                self.sustained[note] = false;
+                self.pending_gain[note] = Q12::ZERO;
+                self.pending_order[note] = 0;
                 let mut released = None;
                 for voice in 0..HARMONY_VOICES {
                     if self.midi_period[voice] != Q6::ZERO && self.midi_note[voice] == note as i32 {
                         self.midi_period[voice] = Q6::ZERO;
+                        self.voice_sustained[voice] = false;
                         released = Some(voice);
                     }
                 }
                 if let Some(voice) = released {
-                    let mut best_order = 0;
-                    let mut best = None;
-                    for pending in 0..128 {
-                        if self.pending_order[pending] > best_order {
-                            best_order = self.pending_order[pending];
-                            best = Some(pending);
-                        }
-                    }
-                    if let Some(pending) = best {
-                        self.midi_period[voice] = note_period(self.rate, pending as i32);
-                        self.midi_note[voice] = pending as i32;
-                        self.midi_gain[voice] = self.pending_gain[pending];
-                        self.midi_order[voice] = self.pending_order[pending];
-                        self.pending_gain[pending] = Q12::ZERO;
-                        self.pending_order[pending] = 0;
-                    }
+                    self.resume_pending(voice);
                 }
                 if self.config.source == HarmonySource::ChordViaMidi {
                     self.setup_chord();
                 }
                 return true;
             }
+            self.sustained[note] = false;
             for voice in 0..HARMONY_VOICES {
                 if self.midi_period[voice] != Q6::ZERO && self.midi_note[voice] == note as i32 {
+                    self.voice_sustained[voice] = false;
                     self.midi_gain[voice] = gain;
                     self.midi_order[voice] = self.event_counter;
                     if self.config.source == HarmonySource::ChordViaMidi {
@@ -767,6 +843,8 @@ impl HarmonyState {
                     return false;
                 }
             }
+            self.pending_gain[note] = Q12::ZERO;
+            self.pending_order[note] = 0;
             let voice = if let Some(free) =
                 (0..HARMONY_VOICES).find(|&v| self.midi_period[v] == Q6::ZERO)
             {
@@ -784,6 +862,7 @@ impl HarmonyState {
                 self.pending_order[stolen] = self.midi_order[oldest];
                 oldest
             };
+            self.voice_sustained[voice] = false;
             self.assign(voice, note, gain);
             if self.config.source == HarmonySource::ChordViaMidi {
                 self.setup_chord();
@@ -794,17 +873,132 @@ impl HarmonyState {
             let voice = usize::from(channel);
             if velocity == 0 {
                 if self.midi_period[voice] != Q6::ZERO && self.midi_note[voice] == note as i32 {
-                    self.midi_period[voice] = Q6::ZERO;
+                    if self.sustain_held[voice] {
+                        self.voice_sustained[voice] = true;
+                        self.sustained[note] = true;
+                    } else {
+                        self.midi_period[voice] = Q6::ZERO;
+                        self.voice_sustained[voice] = false;
+                        self.pending_gain[note] = Q12::ZERO;
+                        self.pending_order[note] = 0;
+                    }
+                } else if !self.sustain_held[voice] {
+                    self.pending_gain[note] = Q12::ZERO;
+                    self.pending_order[note] = 0;
                 }
             } else {
+                if self.voice_sustained[voice] && self.midi_period[voice] != Q6::ZERO {
+                    let old_note = self.midi_note[voice] as usize;
+                    self.voice_sustained[voice] = false;
+                    self.clear_sustained_if_unused(old_note);
+                }
+                self.sustained[note] = false;
+                self.voice_sustained[voice] = false;
                 if self.midi_period[voice] == Q6::ZERO {
                     self.portamento_period[voice] = Q6::ZERO;
                 }
                 self.assign(voice, note, gain);
                 return true;
             }
+            return false;
+        }
+        if velocity == 0 && !self.sustain_held[usize::from(channel)] {
+            self.pending_gain[note] = Q12::ZERO;
+            self.pending_order[note] = 0;
         }
         false
+    }
+    /// Updates the sustain-pedal state for `channel` and releases unheld notes
+    /// when sustain ends.
+    fn apply_sustain_pedal(&mut self, channel: usize, held: bool) -> bool {
+        self.sustain_held[channel] = held;
+        if held {
+            return false;
+        }
+        if matches!(
+            self.config.source,
+            HarmonySource::MidiOmni | HarmonySource::ChordViaMidi
+        ) {
+            if self.sustain_held.contains(&true) {
+                return false;
+            }
+            for pending in 0..128 {
+                if self.sustained[pending] {
+                    self.pending_gain[pending] = Q12::ZERO;
+                    self.pending_order[pending] = 0;
+                }
+            }
+            let mut released = false;
+            for voice in 0..HARMONY_VOICES {
+                let note = self.midi_note[voice] as usize;
+                if self.midi_period[voice] != Q6::ZERO
+                    && (self.sustained[note] || self.voice_sustained[voice])
+                {
+                    self.midi_period[voice] = Q6::ZERO;
+                    self.voice_sustained[voice] = false;
+                    released = true;
+                    self.resume_pending(voice);
+                }
+            }
+            self.sustained.fill(false);
+            self.voice_sustained.fill(false);
+            if released {
+                if self.config.source == HarmonySource::ChordViaMidi {
+                    self.setup_chord();
+                }
+                return true;
+            }
+            return false;
+        }
+        if self.config.source == HarmonySource::MidiChannels && channel < HARMONY_VOICES {
+            if self.voice_sustained[channel] {
+                self.voice_sustained[channel] = false;
+                if self.midi_period[channel] != Q6::ZERO {
+                    let note = self.midi_note[channel] as usize;
+                    self.midi_period[channel] = Q6::ZERO;
+                    self.clear_sustained_if_unused(note);
+                }
+            }
+            if !self.sustain_held.contains(&true) {
+                self.sustained.fill(false);
+            }
+        } else if !self.sustain_held.contains(&true) {
+            self.sustained.fill(false);
+            self.voice_sustained.fill(false);
+        }
+        false
+    }
+    /// Clears `sustained[note]` if no sustained voice slot holds `note`.
+    fn clear_sustained_if_unused(&mut self, note: usize) {
+        let used = (0..HARMONY_VOICES).any(|voice| {
+            self.voice_sustained[voice]
+                && self.midi_period[voice] != Q6::ZERO
+                && self.midi_note[voice] == note as i32
+        });
+        if !used {
+            self.sustained[note] = false;
+        }
+    }
+    /// Resumes the pending note with the newest positive assignment order onto
+    /// `voice`.
+    fn resume_pending(&mut self, voice: usize) {
+        let mut best_order = 0;
+        let mut best = None;
+        for pending in 0..128 {
+            if self.pending_order[pending] > best_order {
+                best_order = self.pending_order[pending];
+                best = Some(pending);
+            }
+        }
+        if let Some(pending) = best {
+            self.midi_period[voice] = note_period(self.rate, pending as i32);
+            self.midi_note[voice] = pending as i32;
+            self.midi_gain[voice] = self.pending_gain[pending];
+            self.midi_order[voice] = self.pending_order[pending];
+            self.voice_sustained[voice] = self.sustained[pending];
+            self.pending_gain[pending] = Q12::ZERO;
+            self.pending_order[pending] = 0;
+        }
     }
     /// Assigns a validated MIDI pitch and gain to a voice and records the
     /// current event order.
@@ -821,7 +1015,8 @@ impl HarmonyState {
     /// also clears the portamento start state and keeps the gain envelope.
     /// If the input is voiced, the function advances the gain envelope. It
     /// keeps the target of a released voice until the gain is zero. Then, in
-    /// the same step, it applies portamento in the period domain.
+    /// the same step, it applies portamento in the period domain and scales
+    /// the ratio by any active pitch bend.
     pub(crate) fn advance_voice(&mut self, period: Q6, voice: usize) -> (Q14, Q12) {
         if period == Q6::ZERO {
             self.portamento_period[voice] = Q6::ZERO;
@@ -847,7 +1042,17 @@ impl HarmonyState {
                     + (Q14::ONE - self.porta_decay).mul(self.period_output[voice])
             };
             if self.portamento_period[voice] > Q6::ZERO {
-                self.current_ratio[voice] = period.div(self.portamento_period[voice]);
+                let ratio = period.div(self.portamento_period[voice]);
+                let bend = if self.config.source == HarmonySource::MidiChannels {
+                    self.bend_ratio[voice]
+                } else {
+                    self.omni_bend_ratio
+                };
+                self.current_ratio[voice] = if bend == Q14::ONE {
+                    ratio
+                } else {
+                    ratio.mul(bend)
+                };
             }
         }
         (self.current_ratio[voice], self.smoothed_gain[voice])
