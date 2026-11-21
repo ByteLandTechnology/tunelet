@@ -48,19 +48,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: "false"
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
+          tool: wasm-pack,wasm-opt
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
-          package-manager-cache: false
+          cache: "npm"
       # Trusted publishing needs npm 11.5.1 or later.
       - run: npm install --global npm@latest
       - run: npm ci
-      # The prepack script builds the Wasm bindings and the TypeScript entry.
-      - run: npm publish
+      # Check the archive files and loadTunelet() before npm publish.
+      - run: npm run verify:pack
+      # Publish the built files without a second prepack build.
+      - run: npm publish --ignore-scripts
 
   publish-github:
     needs: release-please
@@ -76,20 +81,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: "false"
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
+          tool: wasm-pack,wasm-opt
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
           registry-url: "https://npm.pkg.github.com"
           scope: "@bytelandtechnology"
-          package-manager-cache: false
+          cache: "npm"
       - run: npm ci
       # GitHub Packages accepts only names in the scope of the owner.
       - run: npm pkg set name=@bytelandtechnology/tunelet
-      # The prepack script builds the Wasm bindings and the TypeScript entry.
-      - run: npm publish
+      # Check the archive files and loadTunelet() before npm publish.
+      - run: npm run verify:pack
+      # Publish the built files without a second prepack build.
+      - run: npm publish --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
