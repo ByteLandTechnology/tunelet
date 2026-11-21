@@ -96,12 +96,25 @@ cargo clippy --locked --lib -- -D warnings
 cargo doc --locked --no-deps
 ```
 
+If you change TypeScript, JSON, YAML or Markdown files, also check the
+lints and the format:
+
+```sh
+npm ci
+npm run lint
+npm run format:check
+```
+
 If you change the Wasm or TypeScript code, also run these commands.
-`npm run build` compiles `src/wasm.rs` and `src/index.ts`:
+`npm run build` compiles `src/wasm.rs` and `src/index.ts`. Run
+`npm run build:wasm` before `npm run typecheck` so `pkg/tunelet.d.ts`
+exists:
 
 ```sh
 rustup target add wasm32-unknown-unknown
 npm ci
+npm run build:wasm
+npm run typecheck
 npm run build
 ```
 
