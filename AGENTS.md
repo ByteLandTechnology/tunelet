@@ -95,17 +95,21 @@ cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 cargo doc --locked --no-deps
+rustup target add wasm32-unknown-unknown
+cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
 ```
 
 If you change the Wasm, TypeScript, JSON, YAML or Markdown files, also
-run these commands. `npm run build` compiles `src/wasm.rs` and
+run these commands. `npm run check:wasm` runs Clippy and rustdoc for
+`wasm32-unknown-unknown`. `npm run build` compiles `src/wasm.rs` and
 `src/index.ts`. `npm run lint` and `npm run typecheck` need
 `pkg/tunelet.d.ts` from `npm run build:wasm`:
 
 ```sh
-rustup target add wasm32-unknown-unknown
 npm ci
 npm run format:check
+npm run check:wasm
 npm run build
 npm run lint
 npm run typecheck
