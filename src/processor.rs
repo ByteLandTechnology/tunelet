@@ -602,9 +602,8 @@ impl Processor {
     /// Renders one stereo frame through the full chain and updates stereo
     /// feedback.
     ///
-    /// Resynthesis produces Q14 audio. Output gain is Q8. The multiplication
-    /// wraps before the shift. PCM conversion clips to the symmetric 16-bit
-    /// range.
+    /// Resynthesis produces Q14 audio. Output gain is Q8. The gain product
+    /// uses `i64` arithmetic before the symmetric `-32767..=32767` PCM clamp.
     fn next(&mut self, mut input: i16) -> [i16; 2] {
         self.input_peak = self.input_peak.max((input as i32).abs());
         if self.config.punch.enabled {
@@ -617,11 +616,9 @@ impl Processor {
         self.last_resample_ratio = self.resynthesis.resample_ratio();
         let alien = self.alien.process_sample(voice);
         let reverb = self.reverb.process_sample(alien);
-        let gain = (self.config.output_gain as f64 * 256.0) as i32;
+        let gain = (self.config.output_gain as f64 * 256.0) as i64;
         let result = reverb.map(|sample| {
-            (sample.to_bits().wrapping_mul(gain) >> 8)
-                .wrapping_shl(1)
-                .clamp(-32767, 32767) as i16
+            (((i64::from(sample.to_bits()) * gain) >> 8) << 1).clamp(-32767, 32767) as i16
         });
         self.peak = self
             .peak
@@ -637,8 +634,8 @@ impl Processor {
     /// Renders one frame through the mono reverb bus and updates mono
     /// feedback.
     ///
-    /// Output gain is Q8 and wraps before the shift. PCM conversion clips to
-    /// the symmetric 16-bit range. Both output peak channels record the mono
+    /// Output gain is Q8. The gain product uses `i64` arithmetic before the
+    /// symmetric `-32767..=32767` PCM clamp. Both output peaks record the mono
     /// sample.
     fn next_mono(&mut self, mut input: i16) -> i16 {
         self.input_peak = self.input_peak.max((input as i32).abs());
@@ -652,10 +649,8 @@ impl Processor {
         self.last_resample_ratio = self.resynthesis.resample_ratio();
         let alien = self.alien.process_sample(voice);
         let reverb = self.reverb.process_mono_sample(alien);
-        let gain = (self.config.output_gain as f64 * 256.0) as i32;
-        let result = (reverb.to_bits().wrapping_mul(gain) >> 8)
-            .wrapping_shl(1)
-            .clamp(-32767, 32767) as i16;
+        let gain = (self.config.output_gain as f64 * 256.0) as i64;
+        let result = (((i64::from(reverb.to_bits()) * gain) >> 8) << 1).clamp(-32767, 32767) as i16;
         let peak = (result as i32).abs();
         self.peak = self.peak.max(peak);
         self.output_peaks[0] = self.output_peaks[0].max(peak);
