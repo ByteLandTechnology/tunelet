@@ -5,6 +5,7 @@
 //! coefficients.
 
 use crate::numeric::fixed::Q14;
+use crate::numeric::round_q14;
 
 /// The biquad coefficients in single precision, before normalization by
 /// `a[0]`.
@@ -101,7 +102,8 @@ impl Design {
 /// A direct-form Q14 filter that keeps two input samples and two output
 /// samples.
 ///
-/// An `i64` Q28 sum holds all products, then rounds and saturates to `i32`.
+/// The five Q28 products accumulate in `i64` before one signed half-unit
+/// shift and an `i32` saturation clamp.
 #[derive(Clone, Debug)]
 pub(crate) struct Biquad {
     /// The normalized Q14 feed-forward coefficients for the current input and
@@ -131,8 +133,8 @@ impl Biquad {
     /// Sets a feed-forward coefficient of 1.0 and feedback coefficients of
     /// zero. The history does not change.
     ///
-    /// The filter still uses fixed-point signed rounding. Thus, each negative
-    /// input comes out one Q14 unit lower, if the product does not wrap.
+    /// The filter still uses fixed-point signed rounding. Thus, if the output
+    /// does not saturate, each negative input becomes one Q14 unit lower.
     /// Inputs that are zero or positive do not change.
     pub(crate) fn bypass(&mut self) {
         self.b = [Q14::ONE, Q14::default(), Q14::default()];
@@ -155,16 +157,17 @@ impl Biquad {
     /// Filters one sample with the direct-form recurrence and advances the
     /// two-sample history.
     ///
-    /// An `i64` Q28 sum holds all products until one final signed half-unit
-    /// shift and `i32` saturation. Do not round each product separately.
+    /// The five Q28 products accumulate in `i64` until one final signed
+    /// half-unit shift and an `i32` clamp. Do not round each product
+    /// separately.
     #[inline]
     pub(crate) fn process_sample(&mut self, input: Q14) -> Q14 {
-        let sum = i64::from(self.b[0].to_bits()) * i64::from(input.to_bits())
-            + i64::from(self.b[1].to_bits()) * i64::from(self.x[0].to_bits())
-            + i64::from(self.b[2].to_bits()) * i64::from(self.x[1].to_bits())
-            - i64::from(self.a[0].to_bits()) * i64::from(self.y[0].to_bits())
-            - i64::from(self.a[1].to_bits()) * i64::from(self.y[1].to_bits());
-        let output = Q14::round_from::<28>(sum);
+        let sum = (i64::from(self.b[0].to_bits()) * i64::from(input.to_bits()))
+            .saturating_add(i64::from(self.b[1].to_bits()) * i64::from(self.x[0].to_bits()))
+            .saturating_add(i64::from(self.b[2].to_bits()) * i64::from(self.x[1].to_bits()))
+            .saturating_sub(i64::from(self.a[0].to_bits()) * i64::from(self.y[0].to_bits()))
+            .saturating_sub(i64::from(self.a[1].to_bits()) * i64::from(self.y[1].to_bits()));
+        let output = Q14::from_bits(round_q14(sum));
         self.x[1] = self.x[0];
         self.x[0] = input;
         self.y[1] = self.y[0];

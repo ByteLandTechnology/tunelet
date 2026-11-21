@@ -1,23 +1,19 @@
 //! Signed fixed-point values that use `i32` storage.
 //!
-//! `Fixed<F>` represents `bits / 2^F`. Arithmetic, shifts and products use
-//! `i64` intermediates and saturate to `i32`. Multiplication and division
-//! state the fractional format of the result. Callers must supply valid
-//! formats and divisors that are not zero.
+//! `Fixed<F>` represents `bits / 2^F`. Addition, subtraction, negation and
+//! absolute value saturate in `i32`. Multiplication, division and upward
+//! rescale use `i64` arithmetic and clamp to `i32::MIN..=i32::MAX`. Callers
+//! must supply valid formats and divisors that are not zero.
 
+use crate::numeric::clamp_i32;
 use std::ops::{Add, Neg, Shl, Shr, Sub};
-
-/// Saturates a signed 64-bit word to the 32-bit storage range.
-#[inline]
-pub(crate) fn saturate_i32(value: i64) -> i32 {
-    value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
-}
 
 /// A signed `i32` word that represents `bits / 2^FRAC`.
 ///
-/// This type marks the format. Arithmetic and products use `i64`
-/// intermediates and saturate at the `i32` limits. Callers must use
-/// fractional bit counts and shift differences that are less than 32.
+/// This type marks the binary format. Addition, subtraction, negation and
+/// absolute value saturate in `i32`. Products, quotients and upward rescale
+/// use `i64` arithmetic and clamp to `i32::MIN..=i32::MAX`. Callers must
+/// use fractional bit counts and shift differences that are less than 32.
 /// Conversions and division have the conditions that their documentation
 /// gives.
 ///
@@ -72,55 +68,41 @@ impl<const F: u32> Fixed<F> {
         Self((value * f64::from(1u32 << F)) as i32)
     }
 
-    /// Returns `(self * rhs) >> (F + B - R)`, the product in format `R`.
-    ///
-    /// The intermediate product uses `i64` and saturates to `i32`.
+    /// Returns `(self * rhs) >> (F + B - R)` in format `R`, clamped to `i32`.
     #[inline]
     pub(crate) fn mul<const B: u32, const R: u32>(self, rhs: Fixed<B>) -> Fixed<R> {
         const { assert!(F + B >= R, "product cannot gain fraction bits") };
-        Fixed(saturate_i32(
+        const { assert!(F + B - R < 64, "product shift must be less than 64") };
+        Fixed(clamp_i32(
             (i64::from(self.0) * i64::from(rhs.0)) >> (F + B - R),
         ))
     }
 
-    /// Returns `(self << (R + B - F)) / rhs`, the quotient in format `R`.
+    /// Returns `(self << (R + B - F)) / rhs` in format `R`, clamped to `i32`.
     ///
-    /// The caller must supply a divisor that is not zero. The shifted
-    /// numerator uses `i64`, and the quotient saturates to `i32`.
+    /// The caller must supply a divisor that is not zero. Division panics if
+    /// the divisor is zero.
     #[inline]
     pub(crate) fn div<const B: u32, const R: u32>(self, rhs: Fixed<B>) -> Fixed<R> {
         const { assert!(R + B >= F, "quotient cannot lose fraction bits") };
-        Fixed(saturate_i32(
-            (i64::from(self.0) << (R + B - F)).wrapping_div(i64::from(rhs.0)),
+        const { assert!(R + B - F < 32, "quotient shift must be less than 32") };
+        Fixed(clamp_i32(
+            (i64::from(self.0) << (R + B - F)) / i64::from(rhs.0),
         ))
     }
 
-    /// Returns the same value, shifted into format `R`.
+    /// Returns the value shifted into format `R`.
     ///
-    /// If `R` adds fractional bits, the shift uses `i64` and saturates to
-    /// `i32`. If `R` removes fractional bits, the shift truncates toward -inf.
+    /// If `R` adds fractional bits, the shift uses `i64` and clamps to `i32`.
+    /// If `R` removes fractional bits, the shift truncates toward -inf.
     #[inline]
     pub(crate) fn rescale<const R: u32>(self) -> Fixed<R> {
+        const { assert!(R.abs_diff(F) < 32, "rescale shift must be less than 32") };
         if R >= F {
-            Fixed(saturate_i32(i64::from(self.0) << (R - F)))
+            Fixed(clamp_i32(i64::from(self.0) << R.saturating_sub(F)))
         } else {
-            Fixed(saturate_i32(i64::from(self.0) >> (F - R)))
+            Fixed(self.0 >> F.saturating_sub(R))
         }
-    }
-
-    /// Removes fractional bits from a signed 64-bit word in format `S` to get
-    /// format `F`, with a signed half-unit adjustment and `i32` saturation.
-    ///
-    /// If the bits are nonnegative, the function adds half a unit. If the
-    /// bits are negative, the function subtracts half a unit. Then an
-    /// arithmetic shift to the right removes the bits, and the result
-    /// saturates to `i32`.
-    #[inline]
-    pub(crate) fn round_from<const S: u32>(bits: i64) -> Self {
-        const { assert!(S > F, "rounding must drop fraction bits") };
-        let half = 1_i64 << (S - F - 1);
-        let adjusted = if bits >= 0 { bits + half } else { bits - half };
-        Self(saturate_i32(adjusted >> (S - F)))
     }
 
     /// Returns the saturated absolute value. `i32::MIN` becomes `i32::MAX`.
@@ -134,14 +116,14 @@ impl<const F: u32> Add for Fixed<F> {
     type Output = Self;
     #[inline]
     fn add(self, rhs: Self) -> Self {
-        Self(saturate_i32(i64::from(self.0) + i64::from(rhs.0)))
+        Self(self.0.saturating_add(rhs.0))
     }
 }
 impl<const F: u32> Sub for Fixed<F> {
     type Output = Self;
     #[inline]
     fn sub(self, rhs: Self) -> Self {
-        Self(saturate_i32(i64::from(self.0) - i64::from(rhs.0)))
+        Self(self.0.saturating_sub(rhs.0))
     }
 }
 impl<const F: u32> Neg for Fixed<F> {
@@ -151,8 +133,8 @@ impl<const F: u32> Neg for Fixed<F> {
         Self(self.0.saturating_neg())
     }
 }
-/// Raw bit shifts that keep the format, for approximate comparisons and
-/// for scale changes.
+/// Raw bit shifts that keep the format and wrap at 32 bits, for approximate
+/// comparisons and for scale changes.
 impl<const F: u32> Shr<u32> for Fixed<F> {
     type Output = Self;
     #[inline]
@@ -164,6 +146,6 @@ impl<const F: u32> Shl<u32> for Fixed<F> {
     type Output = Self;
     #[inline]
     fn shl(self, bits: u32) -> Self {
-        Self(saturate_i32(i64::from(self.0) << bits))
+        Self(self.0.wrapping_shl(bits))
     }
 }
