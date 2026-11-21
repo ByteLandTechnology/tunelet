@@ -124,7 +124,7 @@ const BANKS: usize = 30;
 ///
 /// Bank indices wrap independently of audio positions. `blend` is the Q14
 /// weight of the current bank. The previous bank gets the rest of the weight.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Stamp {
     /// The new model bank that was active when the related audio frame was
     /// recorded.
@@ -140,6 +140,63 @@ impl Default for Stamp {
             current: 0,
             previous: 0,
             blend: 16384,
+        }
+    }
+}
+
+/// The cached synthesis coefficients for the last blended `Stamp`.
+#[derive(Debug)]
+struct SynthesisCache {
+    /// The stamp of the cached blend, or `None` when the cache is empty.
+    stamp: Option<Stamp>,
+    /// The active synthesis order of the cached blend.
+    order: usize,
+    /// The Q14 synthesis coefficients of the cached blend.
+    coefficients: [i32; MAX_ORDER],
+}
+
+impl SynthesisCache {
+    /// Clears the cached stamp, the active order and the coefficients.
+    fn reset(&mut self) {
+        self.stamp = None;
+        self.order = 0;
+        self.coefficients = [0; MAX_ORDER];
+    }
+
+    /// Returns the synthesis slice for the stamp at a signed history frame.
+    ///
+    /// On a steady frame, the function borrows `models` directly. On a
+    /// transition frame, it updates the cache on a miss and borrows the cached
+    /// slice. Negative positions wrap in the ring.
+    #[inline]
+    fn coefficients<'a>(
+        &'a mut self,
+        position: i32,
+        stamps: &[Stamp],
+        orders: &[usize; BANKS],
+        models: &'a [[i32; MAX_ORDER]],
+    ) -> &'a [i32] {
+        let stamp = stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
+        let order = orders[stamp.current];
+        if stamp.blend < 16384 && orders[stamp.previous] != 0 {
+            if self.stamp != Some(stamp) {
+                let order = order.max(orders[stamp.previous]);
+                let previous_weight = 16384 - stamp.blend;
+                let previous = &models[stamp.previous][..order];
+                let current = &models[stamp.current][..order];
+                for ((slot, &prev), &curr) in self.coefficients[..order]
+                    .iter_mut()
+                    .zip(previous)
+                    .zip(current)
+                {
+                    *slot = mul14(previous_weight, prev).wrapping_add(mul14(stamp.blend, curr));
+                }
+                self.stamp = Some(stamp);
+                self.order = order;
+            }
+            &self.coefficients[..self.order]
+        } else {
+            &models[stamp.current][..order]
         }
     }
 }
@@ -182,12 +239,16 @@ pub(crate) struct Formant {
     /// A counter that increases from a negative value to zero. At zero, the
     /// stage tries to make a model.
     design_counter: i32,
-    /// The separate Q14 feedback histories of the synthesis, for the left and
+    /// The precomputed Q14 inverse coefficients for a transition frame.
+    inverse_blend: [i32; ORDER],
+    /// The cached Q14 synthesis coefficients for a transition stamp.
+    synthesis_cache: SynthesisCache,
+    /// The mirrored Q14 feedback histories of the synthesis, for the left and
     /// right channels. Mono synthesis uses channel zero.
-    history: [[i32; MAX_ORDER]; 2],
-    /// The next slot in the synthesis history. The two channels use the same
-    /// slot.
-    history_index: usize,
+    history: [[i32; 2 * MAX_ORDER]; 2],
+    /// The read cursor in `0..MAX_ORDER` for the mirrored synthesis history.
+    /// The two channels use the same cursor.
+    pos: usize,
     /// The two previous normalized autocorrelation vectors for the moving
     /// average.
     correlation_history: [[i32; 111]; 2],
@@ -258,8 +319,14 @@ impl Formant {
             previous: 0,
             blend: 0,
             design_counter: 0,
-            history: [[0; MAX_ORDER]; 2],
-            history_index: 0,
+            inverse_blend: [0; ORDER],
+            synthesis_cache: SynthesisCache {
+                stamp: None,
+                order: 0,
+                coefficients: [0; MAX_ORDER],
+            },
+            history: [[0; 2 * MAX_ORDER]; 2],
+            pos: 0,
             correlation_history: [[0; 111]; 2],
             correlation_sum: [0; 111],
             smooth_index: 0,
@@ -318,8 +385,10 @@ impl Formant {
         self.input.fill(0_i32);
 
         self.stamps.fill(Stamp::default());
-        self.history = [[0; MAX_ORDER]; 2];
-        self.history_index = 0;
+        self.history = [[0; 2 * MAX_ORDER]; 2];
+        self.pos = 0;
+        self.inverse_blend = [0; ORDER];
+        self.synthesis_cache.reset();
         self.current = BANKS - 1;
         self.next_filter();
         self.next_filter();
@@ -374,8 +443,8 @@ impl Formant {
     }
     /// Moves to the next bank and keeps the old bank for the blend.
     ///
-    /// The function clears the inverse coefficients, the forward coefficients
-    /// and the active order of the new bank.
+    /// The function clears the inverse coefficients, the forward coefficients,
+    /// the active order of the new bank and the blend caches.
     fn next_filter(&mut self) {
         self.previous = self.current;
         self.current += 1;
@@ -383,6 +452,8 @@ impl Formant {
             self.current = 0;
         }
         self.blend = 0;
+        self.inverse_blend = [0; ORDER];
+        self.synthesis_cache.reset();
         self.inverse[self.current].fill(0_i32);
 
         self.models[self.current].fill(0_i32);
@@ -618,6 +689,16 @@ impl Formant {
         }
         if self.blend < 16384 {
             self.blend = (self.blend + 1638).min(16384);
+            if self.blend < 16384 {
+                let previous_weight = 16384 - self.blend;
+                let previous = &self.inverse[self.previous][..ORDER];
+                let current = &self.inverse[self.current][..ORDER];
+                for ((slot, &prev), &curr) in
+                    self.inverse_blend.iter_mut().zip(previous).zip(current)
+                {
+                    *slot = mul14(previous_weight, prev).wrapping_add(mul14(self.blend, curr));
+                }
+            }
         }
         self.stamps[position] = Stamp {
             current: self.current,
@@ -626,34 +707,44 @@ impl Formant {
         };
     }
 
-    /// Applies the blended 50th-order prediction-error filter to the delayed
-    /// input.
+    /// Applies the 50th-order prediction-error filter to the delayed input.
     ///
-    /// The full sum of products wraps before one signed rounding. The function
-    /// blends the coefficients for the current transition. Then it multiplies
-    /// them with the previous samples.
+    /// The full sum of products wraps before one call to `round_q14`. On a
+    /// transition frame, the function reads the precomputed inverse blend.
     fn inverse(&self, position: usize) -> i32 {
         let read = if position < ANALYSIS_FRAMES {
             position + HISTORY_FRAMES - ANALYSIS_FRAMES
         } else {
             position - ANALYSIS_FRAMES
         };
-
-        let mut cursor = read;
+        let coefficients = if self.blend < 16384 {
+            &self.inverse_blend[..]
+        } else {
+            &self.inverse[self.current][..ORDER]
+        };
         let mut sum = 0_i32;
-        for i in 0..ORDER {
-            let coefficient = if self.blend < 16384 {
-                mul14(16384 - self.blend, self.inverse[self.previous][i])
-                    .wrapping_add(mul14(self.blend, self.inverse[self.current][i]))
-            } else {
-                self.inverse[self.current][i]
-            };
-            cursor = if cursor == 0 {
-                HISTORY_FRAMES - 1
-            } else {
-                cursor - 1
-            };
-            sum = sum.wrapping_add(self.input[cursor].wrapping_mul(coefficient));
+        if read >= ORDER {
+            for (&sample, &coefficient) in self.input[read - ORDER..read]
+                .iter()
+                .rev()
+                .zip(coefficients)
+            {
+                sum = sum.wrapping_add(sample.wrapping_mul(coefficient));
+            }
+        } else {
+            for (&sample, &coefficient) in
+                self.input[..read].iter().rev().zip(&coefficients[..read])
+            {
+                sum = sum.wrapping_add(sample.wrapping_mul(coefficient));
+            }
+            let tail = ORDER - read;
+            for (&sample, &coefficient) in self.input[HISTORY_FRAMES - tail..]
+                .iter()
+                .rev()
+                .zip(&coefficients[read..])
+            {
+                sum = sum.wrapping_add(sample.wrapping_mul(coefficient));
+            }
         }
         self.input[read].wrapping_sub(round_q14(sum))
     }
@@ -677,25 +768,28 @@ impl Formant {
         mul14(sample, 16384_i32.wrapping_sub(self.noise_gain))
             .wrapping_add(mul14(noise, self.noise_gain))
     }
-    /// Finds and blends the synthesis model of the stamp at a signed history
-    /// frame.
+    /// Returns the synthesis slice of the stamp at a signed history frame
+    /// without a change to the stage.
     ///
-    /// Returns the length of the active prefix that the function writes to
-    /// `output`. The entries after the prefix are not specified, and you must
-    /// not use them. Negative positions wrap in the ring.
-    fn coefficients(&self, position: i32, output: &mut [i32; MAX_ORDER]) -> usize {
+    /// On a steady frame, the function borrows `self.models`. On a transition
+    /// frame, it borrows the cache on a hit or writes the blend into
+    /// `scratch`. Negative positions wrap in the ring.
+    fn coefficients<'a>(&'a self, position: i32, scratch: &'a mut [i32; MAX_ORDER]) -> &'a [i32] {
         let stamp = self.stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
         let mut order = self.orders[stamp.current];
         if stamp.blend < 16384 && self.orders[stamp.previous] != 0 {
+            if self.synthesis_cache.stamp == Some(stamp) {
+                return &self.synthesis_cache.coefficients[..self.synthesis_cache.order];
+            }
             order = order.max(self.orders[stamp.previous]);
-            for (i, value) in output[..order].iter_mut().enumerate() {
+            for (i, value) in scratch[..order].iter_mut().enumerate() {
                 *value = mul14(16384 - stamp.blend, self.models[stamp.previous][i])
                     .wrapping_add(mul14(stamp.blend, self.models[stamp.current][i]));
             }
+            &scratch[..order]
         } else {
-            output[..order].copy_from_slice(&self.models[stamp.current][..order]);
+            &self.models[stamp.current][..order]
         }
-        order
     }
     /// Returns the wrapping count of model designs that the stage tried.
     pub(crate) fn generation(&self) -> u32 {
@@ -736,9 +830,9 @@ impl Formant {
         input: &mut [f32],
         output: &mut [f32],
     ) -> bool {
-        let mut synthesis = [0; MAX_ORDER];
-        let order = self.coefficients(position, &mut synthesis);
-        if order == 0 {
+        let mut scratch = [0; MAX_ORDER];
+        let synthesis = self.coefficients(position, &mut scratch);
+        if synthesis.is_empty() {
             input.fill(0.0);
             output.fill(0.0);
             return false;
@@ -774,7 +868,7 @@ impl Formant {
                 .sqrt()
                 .max(1e-6);
             *input = (1.0 / (magnitude(&analysis[..ORDER], cosine, sine) * emphasis)) as f32;
-            *output = (width / (magnitude(&synthesis[..order], cosine, sine) * emphasis)) as f32;
+            *output = (width / (magnitude(synthesis, cosine, sine) * emphasis)) as f32;
         }
         true
     }
@@ -790,24 +884,20 @@ impl Formant {
         context: &mut NumericContext,
     ) -> i32 {
         let sample = self.add_noise(sample, context);
-        let mut coefficients = [0; MAX_ORDER];
-        let order = self.coefficients(position, &mut coefficients);
+        let coefficients =
+            self.synthesis_cache
+                .coefficients(position, &self.stamps, &self.orders, &self.models);
+        let order = coefficients.len();
+        let pos = self.pos;
         let mut sum = 0_i32;
-        let mut cursor = self.history_index;
-        for &coefficient in &coefficients[..order] {
-            cursor = if cursor == 0 {
-                MAX_ORDER - 1
-            } else {
-                cursor - 1
-            };
-            sum = sum.wrapping_add(self.history[0][cursor].wrapping_mul(coefficient));
+        for (&tap, &coefficient) in self.history[0][pos..pos + order].iter().zip(coefficients) {
+            sum = sum.wrapping_add(tap.wrapping_mul(coefficient));
         }
         let sample = sample.wrapping_add(round_q14(sum));
-        self.history[0][self.history_index] = sample;
-        self.history_index += 1;
-        if self.history_index == MAX_ORDER {
-            self.history_index = 0;
-        }
+        let pos = if pos == 0 { MAX_ORDER - 1 } else { pos - 1 };
+        self.history[0][pos] = sample;
+        self.history[0][pos + MAX_ORDER] = sample;
+        self.pos = pos;
         round_q14(sample.wrapping_mul(self.width))
     }
     /// Synthesizes two Q14 channels with one stamped model for the two
@@ -829,21 +919,28 @@ impl Formant {
         for sample in &mut samples {
             *sample = sample.wrapping_add(noise);
         }
-        let mut coefficients = [0; MAX_ORDER];
-        let order = self.coefficients(position, &mut coefficients);
-        for (channel, sample) in samples.iter_mut().enumerate() {
-            let mut sum = 0_i32;
-            for (i, &coefficient) in coefficients[..order].iter().enumerate() {
-                sum = sum.wrapping_add(
-                    self.history[channel][(self.history_index + MAX_ORDER - i - 1) % MAX_ORDER]
-                        .wrapping_mul(coefficient),
-                );
-            }
+        let coefficients =
+            self.synthesis_cache
+                .coefficients(position, &self.stamps, &self.orders, &self.models);
+        let order = coefficients.len();
+        let pos = self.pos;
+        let mut sums = [0_i32; 2];
+        for ((&left, &right), &coefficient) in self.history[0][pos..pos + order]
+            .iter()
+            .zip(&self.history[1][pos..pos + order])
+            .zip(coefficients)
+        {
+            sums[0] = sums[0].wrapping_add(left.wrapping_mul(coefficient));
+            sums[1] = sums[1].wrapping_add(right.wrapping_mul(coefficient));
+        }
+        let pos = if pos == 0 { MAX_ORDER - 1 } else { pos - 1 };
+        for (channel, (sample, sum)) in samples.iter_mut().zip(sums).enumerate() {
             *sample = sample.wrapping_add(round_q14(sum));
-            self.history[channel][self.history_index] = *sample;
+            self.history[channel][pos] = *sample;
+            self.history[channel][pos + MAX_ORDER] = *sample;
             *sample = round_q14(sample.wrapping_mul(self.width));
         }
-        self.history_index = (self.history_index + 1) % MAX_ORDER;
+        self.pos = pos;
         samples
     }
 }
