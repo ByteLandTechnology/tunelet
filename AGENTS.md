@@ -93,16 +93,19 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
-cargo doc --locked --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
+cargo package --list --locked
 ```
 
-If you change the Wasm or TypeScript code, also run these commands.
-`npm run build` compiles `src/wasm.rs` and `src/index.ts`:
+If you change the Wasm, TypeScript or package files, also run these
+commands. `npm run build` compiles `src/wasm.rs` and `src/index.ts`.
+`npm pack --dry-run` checks the file list of the npm archive:
 
 ```sh
 rustup target add wasm32-unknown-unknown
 npm ci
 npm run build
+npm pack --dry-run
 ```
 
 - Make sure that there are no new warnings. This includes broken

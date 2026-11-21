@@ -1,0 +1,79 @@
+# Continuous integration for the Rust crate and the npm package.
+#
+# Each pull request to main and each push to main runs two parallel jobs.
+# The rust job checks the native crate, and the wasm job checks the Wasm
+# and TypeScript package. Then the ci-gate job reports one status check
+# for branch protection.
+#
+# On a pull request, a new commit cancels the active run for that pull
+# request. On main, each push runs to completion.
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --lib -- -D warnings
+      - run: cargo build --locked --release
+      # Cargo checks the file list of the crate archive.
+      - run: cargo package --list --locked
+      # RUSTDOCFLAGS makes rustdoc fail on a warning.
+      - run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      # The build script compiles the Wasm bindings and the TypeScript entry.
+      - run: npm run build
+      # npm checks the file list of the package archive.
+      - run: npm pack --dry-run
+
+  ci-gate:
+    needs: [rust, wasm]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      # Branch protection uses this job as one required status check.
+      - env:
+          RUST_RESULT: ${{ needs.rust.result }}
+          WASM_RESULT: ${{ needs.wasm.result }}
+        run: |
+          if [ "$RUST_RESULT" != "success" ] || [ "$WASM_RESULT" != "success" ]; then
+            echo "Required jobs did not succeed: rust=$RUST_RESULT, wasm=$WASM_RESULT" >&2
+            exit 1
+          fi
