@@ -29,8 +29,9 @@
   "sideEffects": false,
   "scripts": {
     "build": "npm run build:wasm && npm run build:ts",
-    "build:wasm": "cargo clippy-wasm && cargo doc-wasm && wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node --input-type=module -e \"import fs from 'node:fs'; fs.rmSync('pkg/.gitignore', { force: true })\"",
+    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node --input-type=module -e \"import fs from 'node:fs'; fs.rmSync('pkg/.gitignore', { force: true })\"",
     "build:ts": "tsc",
+    "check:wasm": "cargo clippy-wasm && cargo doc-wasm",
     "prepack": "npm run build",
     "verify:pack": "node scripts/verify-pack.mjs"
   },

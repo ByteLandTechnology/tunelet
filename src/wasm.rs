@@ -191,7 +191,7 @@ impl WasmProcessor {
         self.input.len()
     }
 
-    /// The nominal resynthesis latency: 1,593 frames at both rates.
+    /// The nominal resynthesis latency: 1,593 frames at both sample rates.
     ///
     /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
     /// and effects have their own timing. Thus, this value does not align all
@@ -295,20 +295,11 @@ impl WasmProcessor {
         Ok(())
     }
 
-    /// Starts a tail with the current `tailFrames` budget and returns that
-    /// budget as a number.
+    /// Starts a finite tail budget and returns its frame count as a number.
     ///
-    /// Call this method one time after the last input block. Another call
-    /// starts the full budget again, but it does not clear the histories. A
-    /// successful process call, a successful configuration call or a reset
-    /// cancels the drain.
-    ///
-    /// The drain uses silent input and mutes aspiration temporarily. Each
-    /// drain call returns a frame count and fills the unused output with zeros.
-    /// The call that uses all of the budget does a `reset`, also if it returns
-    /// frames. An empty buffer uses no budget. The budget can include silence.
-    /// The reset at the end of the budget stops the fixed-point output that is
-    /// left in the histories that it clears.
+    /// Call this method one time after the final input block. Another call
+    /// starts the full budget again, but it does not clear the histories. Refer
+    /// to `drain` for completion.
     #[wasm_bindgen(js_name = beginDrain)]
     pub fn begin_drain(&mut self) -> usize {
         self.processor.begin_drain()
@@ -346,12 +337,11 @@ impl WasmProcessor {
         Ok(count)
     }
 
-    /// Renders the tail as mono PCM and returns the number of rendered frames.
+    /// Renders a mono tail block and returns its frame count.
     ///
-    /// The downmix is the same as in `processMono`. The method fills unused
-    /// samples with zeros. If the drain is not active or is complete, the
-    /// method returns zero. An empty buffer uses no budget. At completion, the
-    /// method does a reset, as `beginDrain` describes.
+    /// The method fills the unused output with zeros. The downmix and the peak
+    /// feedback are the same as for `processMono`. The return values, empty
+    /// arrays and completion are the same as for `drain`.
     ///
     /// # Errors
     ///

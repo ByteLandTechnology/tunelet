@@ -101,14 +101,18 @@ cargo doc-wasm
 ```
 
 If you change the Wasm or TypeScript code, also run these commands.
-`npm run build` runs `cargo clippy-wasm` and `cargo doc-wasm` before it
-compiles `src/wasm.rs` and `src/index.ts`:
+`npm run check:wasm` runs `cargo clippy-wasm` and `cargo doc-wasm`.
+`npm run build` compiles `src/wasm.rs` and `src/index.ts`.
+`npm run verify:pack` runs `npm run build` and checks the archives:
 
 ```sh
 npm ci
-npm run build
+npm run check:wasm
+npm run verify:pack
 ```
 
+- `.github/workflows/ci.yml` runs these checks on each pull request and each
+  push to `main`.
 - Make sure that there are no new warnings. This includes broken
   rustdoc links.
 - The crate has no tests (`test = false`). Do not add tests or test
