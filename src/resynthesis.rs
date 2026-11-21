@@ -1025,8 +1025,7 @@ impl Resynthesis {
     /// Adds a Q14 voice sample to the two channels of `mix`.
     ///
     /// If `pan` is `Some`, each channel adds the Q14 product of `sample` and
-    /// its pan gain. If `pan` is `None`, each channel adds `sample` directly
-    /// without a product wrap.
+    /// its pan gain. If `pan` is `None`, each channel adds `sample` directly.
     #[inline]
     fn add_voice(mix: &mut [Q14; 2], sample: Q14, pan: Option<[Q14; 2]>) {
         for (channel, sum) in mix.iter_mut().enumerate() {
