@@ -1058,8 +1058,8 @@ impl Resynthesis {
             } else {
                 5
             };
-            for voice in 0..voices {
-                self.positions[voice] = self.positions[voice] - position_of(HISTORY as i32);
+            for position in &mut self.positions[..voices] {
+                *position = *position - position_of(HISTORY as i32);
             }
             self.old_position = self.old_position - position_of(HISTORY as i32);
         }
