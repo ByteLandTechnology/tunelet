@@ -470,9 +470,10 @@ impl Formant {
     /// Tries a model that uses the pitch each ANALYSIS_FRAMES, and stamps
     /// each frame.
     ///
-    /// If a pitch is available, the segment folds adjacent cycles. If not,
-    /// the segment is a window of approximately 10 ms. Before the Durbin
-    /// analysis, the function does these steps on the correlations:
+    /// If a pitch is available, the segment folds adjacent cycles and clamps
+    /// the period to `rate / 40`. If not, the segment is a window of
+    /// approximately 10 ms. Before the Durbin analysis, the function does
+    /// these steps on the correlations:
     /// 1. It rescales them during the sum.
     /// 2. It applies sinc weights.
     /// 3. It calculates their average.
@@ -492,7 +493,8 @@ impl Formant {
         position: usize,
         output_period_q6: i32,
     ) {
-        let period = output_period_q6.wrapping_shr(6).max(0) as usize;
+        let max_period = (self.rate.as_u32() as usize / 40).max(1);
+        let period = (output_period_q6.wrapping_shr(6).max(0) as usize).min(max_period);
         let design_now = self.design_counter == 0;
         self.design_counter += 1;
         let one = 16384;
@@ -502,8 +504,10 @@ impl Formant {
             if period == 0 {
                 count = (self.rate.as_u32() as usize + 50) / 100;
                 for i in 0..count {
-                    self.temporary[i] =
-                        self.input_sample((position + HISTORY_FRAMES - i) % HISTORY_FRAMES);
+                    let index = (position as i32)
+                        .wrapping_sub(i as i32)
+                        .rem_euclid(HISTORY_FRAMES as i32) as usize;
+                    self.temporary[i] = self.input_sample(index);
                 }
                 self.temporary[count..count + ORDER].fill(0_i32);
             } else {
@@ -516,12 +520,18 @@ impl Formant {
                 let extra = (period / 10).max(1);
                 if position_period == Q6::ZERO {
                     for i in 0..count + extra {
-                        self.temporary[i] =
-                            self.input_sample((position + HISTORY_FRAMES - i) % HISTORY_FRAMES);
+                        let index = (position as i32)
+                            .wrapping_sub(i as i32)
+                            .rem_euclid(HISTORY_FRAMES as i32)
+                            as usize;
+                        self.temporary[i] = self.input_sample(index);
                     }
                 } else {
                     for i in 0..count + extra {
-                        let index = (position + HISTORY_FRAMES - i) % HISTORY_FRAMES;
+                        let index = (position as i32)
+                            .wrapping_sub(i as i32)
+                            .rem_euclid(HISTORY_FRAMES as i32)
+                            as usize;
                         let mut accumulator = (index as i32) << 6;
                         let mut sum = 0_i32;
                         let mut reads = 0;
