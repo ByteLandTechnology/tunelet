@@ -224,46 +224,38 @@ impl Reverb {
     /// averages use integer division toward zero. The PCM downmix in the
     /// processor uses a shift.
     pub(crate) fn process_sample(&mut self, frame: [Q14; 2]) -> [Q14; 2] {
-        let [left, right] = frame;
-        let mono = (left + right).div::<0, 14>(TWO);
-        let t = self.taps;
-        let dry = Q14::ONE - self.mix;
-        let d = &mut self.delay;
         if !self.config.enabled {
             return frame;
         }
-        let mut result = match self.config.mode {
+        let [left, right] = frame;
+        let mono = (left + right).div::<0, 14>(TWO);
+        let t = self.taps;
+        let wet = match self.config.mode {
             ReverbMode::Echo => {
+                let d = &mut self.delay;
                 d.put(mono, t[0]);
                 let echo: Fixed<0> = Fixed::<0>::from_bits(t[39] as i32).mul(self.diffuse);
                 d.comb(t[0], echo.to_bits() as usize, self.decay);
                 [
-                    mul(left, dry) + mul(self.mix, d.get(t[25]) - d.get(t[32])),
-                    mul(right, dry) - mul(self.mix, d.get(t[26]) - d.get(t[31])),
+                    mul(self.mix, d.get(t[25]) - d.get(t[32])),
+                    -mul(self.mix, d.get(t[26]) - d.get(t[31])),
                 ]
             }
             ReverbMode::Schroeder => {
+                let d = &mut self.delay;
                 for i in [0, 13, 23, 29] {
                     d.put(mono.div::<0, 14>(TWO), t[i]);
                 }
                 for (a, b, g) in [(0, 12, 0.9), (13, 22, 0.89), (23, 28, 0.87), (29, 34, 0.86)] {
                     d.comb(t[a], t[b], q14(g));
                 }
-                d.fir(
-                    t[40],
-                    &[
-                        (t[12], q14(0.25)),
-                        (t[22], q14(0.25)),
-                        (t[28], q14(0.25)),
-                        (t[34], q14(0.25)),
-                    ],
-                );
+                d.fir(t[40], &t, &[(12, 0.25), (22, 0.25), (28, 0.25), (34, 0.25)]);
                 d.allpass(t[40], t[43], self.decay);
                 d.allpass(t[44], t[45], self.decay);
-                let value = mul(mono, dry) + mul(self.mix, d.get(t[45]));
-                [value, value]
+                [mul(self.mix, d.get(t[45])); 2]
             }
             ReverbMode::SmallRoom => {
+                let d = &mut self.delay;
                 d.put(left, t[0]);
                 d.put(right, t[40]);
                 for (a, b, g) in [(1, 15, 0.3), (2, 7, 0.7), (8, 14, 0.5), (18, 24, 0.5)] {
@@ -275,115 +267,87 @@ impl Reverb {
                 }
                 d.comb_lpf(t[0], t[66], self.decay, &mut self.lpf2);
                 [
-                    d.fir(
-                        self.scratch,
-                        &[(t[16], q14(0.2)), (t[32], q14(0.2)), (t[51], q14(0.2))],
-                    ),
-                    d.fir(
-                        self.scratch,
-                        &[(t[49], q14(0.2)), (t[65], q14(0.2)), (t[17], q14(0.2))],
-                    ),
+                    d.fir(self.scratch, &t, &[(16, 0.2), (32, 0.2), (51, 0.2)]),
+                    d.fir(self.scratch, &t, &[(49, 0.2), (65, 0.2), (17, 0.2)]),
                 ]
+                .map(|sample| mul(self.mix, sample))
             }
             ReverbMode::Binaural => {
-                let seed = t[10];
-                let tap = t[25];
-                let filter = tap + self.binaural_offset;
+                let offset = self.binaural_offset;
+                let filter = t[25] + offset;
+                let gain = self.diffuse >> 1;
+                let d = &mut self.delay;
                 d.put(left, t[0]);
                 d.put(right, t[40]);
-                let a = mul(
-                    self.diffuse >> 1,
-                    d.get(t[0] + seed) + d.get(t[11] + seed) + d.get(t[21] + seed),
-                );
-                d.put(a, tap);
-                d.lpf(filter, &mut self.lpf1);
-                let out = mul(mono, dry) + mul(self.mix, d.get(t[40] + filter) + a);
-                let b = mul(
-                    self.diffuse >> 1,
-                    d.get(t[47] + seed) + d.get(t[48] + seed) + d.get(t[54] + seed),
-                );
-                d.put(b, t[40] + tap);
-                d.lpf(t[40] + filter, &mut self.lpf2);
-                [out, mul(mono, dry) + mul(self.mix, d.get(filter) + b)]
+                let a = d.binaural(&t, [0, 11, 21], 0, offset, gain, &mut self.lpf1);
+                let cross = d.get(t[40] + filter);
+                let b = d.binaural(&t, [47, 48, 54], t[40], offset, gain, &mut self.lpf2);
+                [cross + a, d.get(filter) + b].map(|sample| mul(self.mix, sample))
             }
-            ReverbMode::MediumHall => {
-                d.put(mono.div::<0, 14>(TWO), t[0]);
-                d.lpf(t[2], &mut self.lpf1);
-                for (a, b, g) in [(3, 15, 0.4), (4, 7, 0.9), (8, 14, 0.6), (18, 24, 0.6)] {
-                    d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
-                }
-                d.put(d.get(t[35]), t[40]);
-                for (a, b, g) in [(41, 50, 0.5), (42, 46, 0.8)] {
-                    d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
-                }
-                d.comb_lpf(t[0], t[66], self.decay, &mut self.lpf2);
+            ReverbMode::MediumHall => self.hall(
+                mono.div::<0, 14>(TWO),
+                &[(3, 15, 0.4), (4, 7, 0.9), (8, 14, 0.6), (18, 24, 0.6)],
+                35,
+                &[(41, 50, 0.5), (42, 46, 0.8)],
+                (0, 66),
                 [
-                    d.fir(
-                        self.scratch,
-                        &[
-                            (t[16], q14(-0.25)),
-                            (t[33], q14(0.25)),
-                            (t[51], q14(-0.25)),
-                            (t[55], q14(0.25)),
-                        ],
-                    ),
-                    d.fir(
-                        self.scratch,
-                        &[
-                            (t[16], q14(0.25)),
-                            (t[32], q14(0.25)),
-                            (t[52], q14(0.25)),
-                            (t[56], q14(0.2)),
-                        ],
-                    ),
-                ]
-            }
-            ReverbMode::LargeHall => {
-                d.put(mono, t[0]);
-                d.lpf(t[2], &mut self.lpf1);
-                for (a, b, g) in [(3, 5, 0.6), (6, 9, 0.6), (19, 30, 0.95), (20, 27, 0.5)] {
-                    d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
-                }
-                d.put(d.get(t[38]), t[40]);
-                for (a, b, g) in [(41, 63, 0.95), (42, 58, 0.5), (59, 62, 0.5)] {
-                    d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
-                }
-                d.comb_lpf(t[1], t[64], self.decay, &mut self.lpf2);
+                    &[(16, -0.25), (33, 0.25), (51, -0.25), (55, 0.25)],
+                    &[(16, 0.25), (32, 0.25), (52, 0.25), (56, 0.2)],
+                ],
+            ),
+            ReverbMode::LargeHall => self.hall(
+                mono,
+                &[(3, 5, 0.6), (6, 9, 0.6), (19, 30, 0.95), (20, 27, 0.5)],
+                38,
+                &[(41, 63, 0.95), (42, 58, 0.5), (59, 62, 0.5)],
+                (1, 64),
                 [
-                    d.fir(
-                        self.scratch,
-                        &[(t[10], q14(0.6)), (t[36], q14(0.3)), (t[61], q14(0.3))],
-                    ),
-                    d.fir(
-                        self.scratch,
-                        &[(t[10], q14(0.6)), (t[37], q14(0.3)), (t[60], q14(0.3))],
-                    ),
-                ]
-            }
+                    &[(10, 0.6), (36, 0.3), (61, 0.3)],
+                    &[(10, 0.6), (37, 0.3), (60, 0.3)],
+                ],
+            ),
         };
-        if matches!(
-            self.config.mode,
-            ReverbMode::SmallRoom | ReverbMode::MediumHall | ReverbMode::LargeHall
-        ) {
-            result[0] = mul(left, dry) + mul(self.mix, result[0]);
-            result[1] = mul(right, dry) + mul(self.mix, result[1]);
+        self.delay.step();
+        for sample in wet {
+            self.wet_peak = self.wet_peak.max(sample.to_bits().wrapping_abs());
         }
-        d.step();
-        // Telemetry only. The wet contribution is the output minus the dry
-        // term. Schroeder and Binaural use the mono dry signal.
-        let dry_input = if matches!(
-            self.config.mode,
-            ReverbMode::Schroeder | ReverbMode::Binaural
-        ) {
-            [mono, mono]
-        } else {
-            [left, right]
+        // Schroeder and Binaural mix the mono dry signal.
+        let dry = Q14::ONE - self.mix;
+        let dry_input = match self.config.mode {
+            ReverbMode::Schroeder | ReverbMode::Binaural => [mono, mono],
+            _ => frame,
         };
-        for (value, input) in result.iter().zip(dry_input) {
-            let wet = (*value - mul(input, dry)).to_bits().wrapping_abs();
-            self.wet_peak = self.wet_peak.max(wet);
+        [
+            mul(dry_input[0], dry) + wet[0],
+            mul(dry_input[1], dry) + wet[1],
+        ]
+    }
+    /// Runs the seven-stage hall network and returns the scaled wet channels.
+    fn hall(
+        &mut self,
+        input: Q14,
+        early: &'static [(usize, usize, f64)],
+        bridge: usize,
+        late: &'static [(usize, usize, f64)],
+        comb: (usize, usize),
+        outputs: [&'static [(usize, f64)]; 2],
+    ) -> [Q14; 2] {
+        let t = &self.taps;
+        let d = &mut self.delay;
+        d.put(input, t[0]);
+        d.lpf(t[2], &mut self.lpf1);
+        for &(a, b, g) in early {
+            d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
         }
-        result
+        d.put(d.get(t[bridge]), t[40]);
+        for &(a, b, g) in late {
+            d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
+        }
+        d.comb_lpf(t[comb.0], t[comb.1], self.decay, &mut self.lpf2);
+        [
+            mul(self.mix, d.fir(self.scratch, t, outputs[0])),
+            mul(self.mix, d.fir(self.scratch, t, outputs[1])),
+        ]
     }
 }
 
@@ -503,12 +467,32 @@ impl DelayLine {
     }
     /// Adds the weighted taps in the listed order, then writes the sum to the
     /// target.
-    fn fir(&mut self, target: usize, taps: &[(usize, Q14)]) -> Q14 {
+    fn fir(&mut self, target: usize, taps: &[usize; 67], weights: &'static [(usize, f64)]) -> Q14 {
         let mut accumulator = Q14::default();
-        for &(delay, coefficient) in taps {
-            accumulator = accumulator + mul(coefficient, self.get(delay));
+        for &(tap, gain) in weights {
+            accumulator = accumulator + mul(q14(gain), self.get(taps[tap]));
         }
         self.put(accumulator, target)
+    }
+    /// Sums three early taps, writes the tap, and filters the delayed tap.
+    fn binaural(
+        &mut self,
+        taps: &[usize; 67],
+        early: [usize; 3],
+        base: usize,
+        offset: usize,
+        gain: Q14,
+        filter: &mut Biquad,
+    ) -> Q14 {
+        let seed = taps[10];
+        let tap = base + taps[25];
+        let sum = self.get(taps[early[0]] + seed)
+            + self.get(taps[early[1]] + seed)
+            + self.get(taps[early[2]] + seed);
+        let value = mul(gain, sum);
+        self.put(value, tap);
+        self.lpf(tap + offset, filter);
+        value
     }
 }
 
