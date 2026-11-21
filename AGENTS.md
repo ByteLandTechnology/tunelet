@@ -52,9 +52,10 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
   controls, feedback, reset and drain must not allocate memory, acquire
   locks or do I/O. The Wasm binding can also allocate when it converts
   objects, events, feedback and errors.
-- The fixed-point arithmetic uses explicit wrapping and quantization. If
-  you change the operation order, the rounding or a table value, the
-  output samples change. Treat this as a change of behavior.
+- The fixed-point arithmetic uses `i64` products, saturated `i32` bounds
+  and explicit quantization. If you change the operation order, the
+  rounding or a table value, the output samples change. Treat this as a
+  change of behavior.
 - A call that can fail must validate the full block or configuration
   before it changes the state or the output. Keep this rule.
 - The default build has no dependencies. Make each Wasm dependency
@@ -94,14 +95,18 @@ cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 cargo doc --locked --no-deps
+rustup target add wasm32-unknown-unknown
+cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
 ```
 
 If you change the Wasm or TypeScript code, also run these commands.
+`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
 `npm run build` compiles `src/wasm.rs` and `src/index.ts`:
 
 ```sh
-rustup target add wasm32-unknown-unknown
 npm ci
+npm run check:wasm
 npm run build
 ```
 
