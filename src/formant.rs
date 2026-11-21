@@ -135,6 +135,7 @@ struct Stamp {
     /// The weight of the current bank in Q14, from zero to 16384 inclusive.
     blend: u16,
 }
+/// Keeps each stamp at four bytes in the history ring.
 const _: () = assert!(std::mem::size_of::<Stamp>() == 4);
 impl Default for Stamp {
     fn default() -> Self {
@@ -164,8 +165,7 @@ pub(crate) struct Formant {
     /// The preallocated segment memory for period folding and
     /// autocorrelation.
     temporary: Vec<i32>,
-    /// The Q14 coefficient banks for the inverse filter, with ORDER entries
-    /// in each bank.
+    /// The Q14 coefficient banks for the inverse filter.
     inverse: Vec<[i32; ORDER]>,
     /// The Q14 coefficient banks for the forward filter. `orders` holds the
     /// active lengths.
@@ -206,6 +206,8 @@ pub(crate) struct Formant {
     /// If `true`, the next call to `smooth` clears the state of the
     /// correlation average.
     smooth_reset: bool,
+    /// If `true`, the stage changed state since construction or the last reset.
+    dirty: bool,
     /// The Q14 first-order coefficient for pre-emphasis and de-emphasis.
     glottal: i32,
     /// The Q14 width control. The stage also uses it as the output gain of
@@ -322,6 +324,7 @@ impl Formant {
             smooth_index: 0,
             smooth_filled: 0,
             smooth_reset: true,
+            dirty: false,
             glottal: (0.5_f64.powf(1.0 / d2) * 16384.0) as i32,
             width: 16384,
             width_squared: 16384,
@@ -372,6 +375,10 @@ impl Formant {
     /// the correlation smoothing again. The other banks stay allocated. The
     /// stage clears each bank when it uses that bank again.
     pub(crate) fn reset(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
         if self.ring_generation == u32::MAX {
             self.input_tags.fill(0);
             self.stamp_tags.fill(0);
@@ -459,6 +466,7 @@ impl Formant {
         write: usize,
         output_period_q6: i32,
     ) -> i32 {
+        self.dirty = true;
         self.set_input(write, self.remove_glottal(sample, previous));
 
         self.design(periods, period_generation, write, output_period_q6);
@@ -476,7 +484,6 @@ impl Formant {
         }
         self.blend = 0;
         self.inverse[self.current].fill(0_i32);
-
         self.models[self.current].fill(0_i32);
         self.orders[self.current] = 0;
     }
@@ -760,7 +767,7 @@ impl Formant {
             }
             &blended[..]
         } else {
-            &self.inverse[self.current][..]
+            &self.inverse[self.current]
         };
         let sum = tagged_ring_sum(
             &self.input,
@@ -923,6 +930,7 @@ impl Formant {
         position: i32,
         context: &mut NumericContext,
     ) -> i32 {
+        self.dirty = true;
         let sample = self.add_noise(sample, context);
         let mut blended;
         let coefficients = if let Some(slice) = self.coefficients(position) {
@@ -954,6 +962,7 @@ impl Formant {
         position: i32,
         context: &mut NumericContext,
     ) -> [i32; 2] {
+        self.dirty = true;
         let mid = ((i64::from(samples[0]) + i64::from(samples[1])) >> 1) as i32;
         let noise = self.add_noise(mid, context).saturating_sub(mid);
         for sample in &mut samples {
