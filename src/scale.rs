@@ -64,7 +64,14 @@ impl PitchClass {
     }
 }
 
-/// A scale for [`NoteMask::from_key_scale`].
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " A scale for [`NoteMask::from_key_scale`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " A scale preset for pitch-class correction."
+)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -86,10 +93,16 @@ pub enum CorrectionScale {
 ///
 /// A `true` flag enables that pitch class in all octaves.
 ///
-/// The default is [`Self::CHROMATIC`]. All combinations of flags are valid.
-/// This includes [`Self::NONE`]. If the mask is empty, the correction ratio
-/// moves toward unity with the configured retune half-life. An empty mask
-/// does not clear the histories.
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " The default is [`Self::CHROMATIC`]. All combinations of flags are valid. This includes [`Self::NONE`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " The default enables all twelve pitch classes. All combinations of flags are valid, also an all-`false` array."
+)]
+/// If the mask is empty, the correction ratio moves toward unity with the
+/// configured retune half-life. An empty mask does not clear the histories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),

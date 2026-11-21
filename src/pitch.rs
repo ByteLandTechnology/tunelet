@@ -9,7 +9,7 @@ mod search;
 pub(crate) mod tracker;
 
 use crate::error::{check_range, ConfigProblem};
-use crate::Error;
+use crate::{ConfigField, Error};
 
 /// The acquisition sensitivity and the bounds for pitch reports to the host.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -28,16 +28,30 @@ pub struct PitchConfig {
     pub threshold: f32,
     /// The lower bound of the feedback in hertz (inclusive), 40..=2000.
     ///
-    /// The default is 40. It must be strictly less than `max_frequency_hz`.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The default is 40. It must be strictly less than `max_frequency_hz`."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The default is 40. It must be strictly less than `maxFrequencyHz`."
+    )]
     /// These bounds do not change the tracking, the correction or the
     /// resampling. A feedback query applies the current bounds to the kept
     /// analysis. It does not process another sample.
     pub min_frequency_hz: f32,
     /// The upper bound of the feedback in hertz (inclusive), 40..=2000.
     ///
-    /// The default is 1100. It must be strictly greater than
-    /// `min_frequency_hz`. Results outside the bounds are reported as
-    /// unvoiced, with zero frequency and zero period.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The default is 1100. It must be strictly greater than `min_frequency_hz`."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The default is 1100. It must be strictly greater than `minFrequencyHz`."
+    )]
+    /// Results outside the bounds are reported as unvoiced, with zero frequency
+    /// and zero period.
     pub max_frequency_hz: f32,
 }
 
@@ -75,19 +89,32 @@ impl PitchConfig {
     ///
     /// Returns [`Error::InvalidConfig`] for a value that is not finite or is
     /// out of range. If the bounds are equal or reversed, the error has the
-    /// field `resynthesis.pitch.min_frequency_hz` and the problem
+    /// field [`ConfigField::ResynthesisPitchMinFrequencyHz`] and the problem
     /// [`ConfigProblem::Unordered`]. The `other` value of that problem is
-    /// `resynthesis.pitch.max_frequency_hz`.
+    /// [`ConfigField::ResynthesisPitchMaxFrequencyHz`], and both rejected
+    /// bounds are stored.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("resynthesis.pitch.threshold", self.threshold, 0.002, 0.2)?;
+        check_range(
+            ConfigField::ResynthesisPitchThreshold,
+            self.threshold,
+            0.002,
+            0.2,
+        )?;
         let (min, max) = (
-            "resynthesis.pitch.min_frequency_hz",
-            "resynthesis.pitch.max_frequency_hz",
+            ConfigField::ResynthesisPitchMinFrequencyHz,
+            ConfigField::ResynthesisPitchMaxFrequencyHz,
         );
         check_range(min, self.min_frequency_hz, 40.0, 2000.0)?;
         check_range(max, self.max_frequency_hz, 40.0, 2000.0)?;
         if self.min_frequency_hz >= self.max_frequency_hz {
-            return Err(Error::config(min, ConfigProblem::Unordered { other: max }));
+            return Err(Error::config(
+                min,
+                ConfigProblem::Unordered {
+                    value: self.min_frequency_hz,
+                    other: max,
+                    other_value: self.max_frequency_hz,
+                },
+            ));
         }
         Ok(())
     }

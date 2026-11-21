@@ -4,7 +4,7 @@
 use crate::error::check_range;
 use crate::numeric::fixed::{Q14, Q8};
 use crate::numeric::{coefficient_to_exp_value, db_to_gain, envelope_decay, NumericContext};
-use crate::{Error, SampleRate};
+use crate::{ConfigField, Error, SampleRate};
 
 /// The update interval of the peak follower, in frames.
 const WINDOW_FRAMES: usize = 100;
@@ -41,8 +41,15 @@ pub struct PunchConfig {
     /// The transient emphasis without a unit, 0..=1.
     ///
     /// The default is 0.5. It sets the release half-life of the adaptive
-    /// follower: 5000 ms at 0, 250 ms at 0.5 and 1 ms at 1. The attack uses
-    /// `attack_ms`.
+    /// follower: 5000 ms at 0, 250 ms at 0.5 and 1 ms at 1.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The attack uses `attack_ms`."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The attack uses `attackMs`."
+    )]
     pub impact: f32,
     /// The output ceiling of the saturation in dBFS, -96..=0.
     ///
@@ -75,13 +82,13 @@ impl PunchConfig {
     ///
     /// # Errors
     ///
-    /// Returns the first [`Error::InvalidConfig`] with its dotted field path
-    /// and the problem.
+    /// Returns the first [`Error::InvalidConfig`] with its [`ConfigField`] and
+    /// the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("punch.gain_db", self.gain_db, -96.0, 12.0)?;
-        check_range("punch.impact", self.impact, 0.0, 1.0)?;
-        check_range("punch.ceiling_db", self.ceiling_db, -96.0, 0.0)?;
-        check_range("punch.attack_ms", self.attack_ms, 0.01, 5000.0)
+        check_range(ConfigField::PunchGainDb, self.gain_db, -96.0, 12.0)?;
+        check_range(ConfigField::PunchImpact, self.impact, 0.0, 1.0)?;
+        check_range(ConfigField::PunchCeilingDb, self.ceiling_db, -96.0, 0.0)?;
+        check_range(ConfigField::PunchAttackMs, self.attack_ms, 0.01, 5000.0)
     }
 }
 

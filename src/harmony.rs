@@ -6,11 +6,11 @@
 
 mod chords;
 
-use crate::error::{check_count, check_range};
+use crate::error::{check_count, check_range, check_voice_count};
 use crate::midi::{note_period, velocity_gain, MidiEvent};
 use crate::numeric::fixed::{Q12, Q14, Q6};
 use crate::scale::PitchClass;
-use crate::{Error, SampleRate};
+use crate::{ConfigField, Error, SampleRate};
 use chords::SCALE_TONES;
 
 /// The number of harmony voices in addition to the lead voice: four.
@@ -33,11 +33,16 @@ const GAIN_ATTACK: Q12 = Q12::from_bits(163);
 const GAIN_RELEASE: Q12 = Q12::from_bits(81);
 
 /// The source of target periods for the four harmony voices.
-///
-/// The default is [`Self::MidiChannels`]. The static interval and chord
-/// sources use the related [`HarmonyConfig`] fields. The MIDI sources use
-/// [`crate::ControlEvent::Midi`]. The configuration of the sources that are
-/// not selected is still validated and kept.
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = "",
+    doc = " The default is [`Self::MidiChannels`]. The static interval and chord sources use the related [`HarmonyConfig`] fields. The MIDI sources use [`crate::ControlEvent::Midi`]. Validation checks and keeps the configuration of sources that are not selected."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = "",
+    doc = " The default is `'midiChannels'`. The static interval and chord sources use the related `HarmonyConfig` fields. The MIDI sources use `ControlEvent` `'midi'`. Validation checks and keeps the configuration of sources that are not selected."
+)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -45,11 +50,23 @@ const GAIN_RELEASE: Q12 = Q12::from_bits(81);
     serde(rename_all = "camelCase")
 )]
 pub enum HarmonySource {
-    /// Each voice is a fixed number of semitones from the singer. This source
-    /// uses `chromatic_intervals`.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " Each voice is a fixed number of semitones from the singer. This source uses `chromatic_intervals`."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " Each voice is a fixed number of semitones from the singer. This source uses `chromaticIntervals`."
+    )]
     FixedInterval,
-    /// Each voice follows an interval in scale steps from the singer. This
-    /// source uses `diatonic_intervals`, `key` and `scale`.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " Each voice follows an interval in scale steps from the singer. This source uses `diatonic_intervals`, `key` and `scale`."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " Each voice follows an interval in scale steps from the singer. This source uses `diatonicIntervals`, `key` and `scale`."
+    )]
     SmartInterval,
     /// The voices sing a chord on a scale degree. This source uses `degree`,
     /// `key`, `scale` and `inversion`.
@@ -57,11 +74,14 @@ pub enum HarmonySource {
     /// The voices sing a named chord. This source uses `chord`, `key` and
     /// `inversion`.
     ChordByName,
-    /// The voices sing the active MIDI notes as a chord. The register and
-    /// the spread select new octaves and a new order for these notes. The
-    /// key and the inversion do not apply. This source combines all
-    /// channels. It uses the same rules to allocate and steal voices as
-    /// [`Self::MidiOmni`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The voices sing the active MIDI notes as a chord. The register and the spread select new octaves and a new order for these notes. The key and the inversion do not apply. This source combines all channels. It uses the same rules to allocate and steal voices as [`Self::MidiOmni`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The voices sing the active MIDI notes as a chord. The register and the spread select new octaves and a new order for these notes. The key and the inversion do not apply. This source combines all channels. It uses the same rules to allocate and steal voices as `'midiOmni'`."
+    )]
     ChordViaMidi,
     /// A note from any channel goes to the first free voice. If all four
     /// voices are busy, the note steals the voice with the oldest assignment.
@@ -111,7 +131,14 @@ pub enum HarmonyScale {
     MinorMajorSeventh,
 }
 
-/// A named chord for [`HarmonySource::ChordByName`].
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " A named chord for [`HarmonySource::ChordByName`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " A named chord for `'chordByName'`."
+)]
 ///
 /// Each variant lists the semitones above the root. These values do not
 /// include the inversion, the key transposition, the register or the voicing
@@ -161,13 +188,26 @@ pub enum ChordName {
     SuspendedSeventh,
 }
 
-/// A diatonic chord with its root on a degree of the selected
-/// [`HarmonyScale`].
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " A diatonic chord with its root on a degree of the selected [`HarmonyScale`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " A diatonic chord with its root on a degree of the selected `HarmonyScale`."
+)]
 ///
 /// Triads use the root, third and fifth scale degrees. Seventh chords also
 /// use the seventh. Degrees above the seventh go into higher octaves. The
 /// degree names do not set a major or minor quality. The selected scale
-/// supplies the tones. The default is the tonic triad, [`Self::I`].
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " supplies the tones. The default is the tonic triad, [`Self::I`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " supplies the tones. The default is the tonic triad, `'i'`."
+)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
 #[cfg_attr(
@@ -261,7 +301,14 @@ pub enum Inversion {
     serde(rename_all = "camelCase")
 )]
 pub struct HarmonyConfig {
-    /// The pitch source. The default is [`HarmonySource::MidiChannels`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The pitch source. The default is [`HarmonySource::MidiChannels`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The pitch source. The default is `'midiChannels'`."
+    )]
     pub source: HarmonySource,
     /// The pitch class of the tonic. The default is C. Smart intervals, named
     /// chords and degree chords use it. It does not transpose direct MIDI
@@ -269,27 +316,43 @@ pub struct HarmonyConfig {
     pub key: PitchClass,
     /// The scale for smart intervals and degree chords. The default is major.
     pub scale: HarmonyScale,
-    /// Four fixed semitone offsets, each in -24..=24. The default is all
-    /// zeros. [`HarmonySource::FixedInterval`] uses them. A value of 12 makes
-    /// the pitch one octave higher.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " Four fixed semitone offsets, each in -24..=24. The default is all zeros. [`HarmonySource::FixedInterval`] uses them. A value of 12 makes the pitch one octave higher."
+    )]
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
+        doc = " Four fixed semitone offsets, each in -24..=24. The default is all zeros. `'fixedInterval'` uses them. A value of 12 makes the pitch one octave higher.",
         tsify(type = "[number, number, number, number]")
     )]
     pub chromatic_intervals: [i8; HARMONY_VOICES],
-    /// Four offsets in scale steps, each in -14..=14. The default is all
-    /// zeros. [`HarmonySource::SmartInterval`] uses them. Seven steps make
-    /// the pitch one octave higher.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " Four offsets in scale steps, each in -14..=14. The default is all zeros. [`HarmonySource::SmartInterval`] uses them. Seven steps make the pitch one octave higher."
+    )]
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
+        doc = " Four offsets in scale steps, each in -14..=14. The default is all zeros. `'smartInterval'` uses them. Seven steps make the pitch one octave higher.",
         tsify(type = "[number, number, number, number]")
     )]
     pub diatonic_intervals: [i8; HARMONY_VOICES],
-    /// The named chord for [`HarmonySource::ChordByName`]. The default is
-    /// major.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The named chord for [`HarmonySource::ChordByName`]. The default is major."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The named chord for `'chordByName'`. The default is `'major'`."
+    )]
     pub chord: ChordName,
-    /// The chord on a scale degree for [`HarmonySource::ChordByDegree`]. The
-    /// default is I.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The chord on a scale degree for [`HarmonySource::ChordByDegree`]. The default is I."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The chord on a scale degree for `'chordByDegree'`. The default is `'i'`."
+    )]
     pub degree: ChordDegree,
     /// The inversion for named chords and degree chords. The default is root
     /// position.
@@ -316,14 +379,15 @@ pub struct HarmonyConfig {
     /// semitone bin, each voice starts at its new target without a glide.
     pub portamento_ms: f32,
     /// The number of voices that sound in the interval sources, 0..=4.
-    ///
-    /// The default is 4. [`HarmonySource::FixedInterval`] and
-    /// [`HarmonySource::SmartInterval`] use the first `voices` voices. The
-    /// other voices release with the usual gain envelope. The chord and MIDI
-    /// sources ignore this field. In JavaScript, the field is optional and
-    /// a missing value gives the default.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = "",
+        doc = " The default is 4. [`HarmonySource::FixedInterval`] and [`HarmonySource::SmartInterval`] use the first `voices` voices. The other voices release with the usual gain envelope. The chord and MIDI sources ignore this field. In JavaScript, the field is optional and a missing value gives the default."
+    )]
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
+        doc = "",
+        doc = " The default is 4. `'fixedInterval'` and `'smartInterval'` use the first `voices` voices. The other voices release with the usual gain envelope. The chord and MIDI sources ignore this field. In JavaScript, the field is optional and a missing value gives the default.",
         serde(default = "default_voices"),
         tsify(optional)
     )]
@@ -366,26 +430,48 @@ impl HarmonyConfig {
     ///
     /// # Errors
     ///
-    /// Returns the first [`Error::InvalidConfig`] with its dotted field path
-    /// and the problem. For an array control, the error identifies the array
-    /// field, not the index of an element.
+    /// Returns the first [`Error::InvalidConfig`] with its field and the
+    /// problem. For an interval array control, `voice` holds `Some(0..=3)` for
+    /// the rejected slot.
     pub fn validate(self) -> Result<(), Error> {
-        for interval in self.chromatic_intervals {
-            let field = "resynthesis.harmony.chromatic_intervals";
-            check_count(field, i64::from(interval), -24, 24)?;
+        for (voice, interval) in self.chromatic_intervals.into_iter().enumerate() {
+            check_voice_count(
+                ConfigField::ResynthesisHarmonyChromaticIntervals,
+                voice,
+                i128::from(interval),
+                -24,
+                24,
+            )?;
         }
-        for interval in self.diatonic_intervals {
-            let field = "resynthesis.harmony.diatonic_intervals";
-            check_count(field, i64::from(interval), -14, 14)?;
+        for (voice, interval) in self.diatonic_intervals.into_iter().enumerate() {
+            check_voice_count(
+                ConfigField::ResynthesisHarmonyDiatonicIntervals,
+                voice,
+                i128::from(interval),
+                -14,
+                14,
+            )?;
         }
-        let field = "resynthesis.harmony.voices";
-        check_count(field, i64::from(self.voices), 0, HARMONY_VOICES as i64)?;
-        let field = "resynthesis.harmony.register_percent";
-        check_range(field, self.register_percent, 0.0, 100.0)?;
-        let field = "resynthesis.harmony.voicing_spread_percent";
-        check_range(field, self.voicing_spread_percent, 0.0, 100.0)?;
+        check_count(
+            ConfigField::ResynthesisHarmonyVoices,
+            i128::from(self.voices),
+            0,
+            HARMONY_VOICES as i128,
+        )?;
         check_range(
-            "resynthesis.harmony.portamento_ms",
+            ConfigField::ResynthesisHarmonyRegisterPercent,
+            self.register_percent,
+            0.0,
+            100.0,
+        )?;
+        check_range(
+            ConfigField::ResynthesisHarmonyVoicingSpreadPercent,
+            self.voicing_spread_percent,
+            0.0,
+            100.0,
+        )?;
+        check_range(
+            ConfigField::ResynthesisHarmonyPortamentoMs,
             self.portamento_ms,
             0.0,
             10_000.0,

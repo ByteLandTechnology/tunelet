@@ -382,15 +382,17 @@ For a custom asset location, give one of these sources to
 - A promise for one of these.
 
 For a Node.js `file:` source, use a URL object. A string source obeys fetch
-rules. The first concurrent call selects the source. Later arguments do not
-replace an initialized module. A custom binary must match the generated
-bindings.
+rules. Repeated calls with the same source share one initialization result. A
+call with a different source, or with a binary that does not match the
+generated bindings, rejects with a `TuneletError`.
 
-The package root also exports `loadTunelet` as its default export. For direct
-control of Wasm initialization, `tunelet/wasm` gives the generated default
-initializer and `initSync`. The package root re-exports `initSync` too. Use
-only one initialization entry point for each module instance. The package
-gives only ESM exports. CommonJS applications can use `await import("tunelet")`.
+The package root also exports `loadTunelet` as its default export. It exports
+`TuneletError` with a `camelCase` message and a typed `details` payload for all
+validation and lifecycle errors. For direct control of Wasm initialization,
+`tunelet/wasm` gives the generated default initializer and `initSync`. The
+package root exports `initSync` too. Use only one initialization entry point
+for each module instance. The package gives only ESM exports. CommonJS
+applications can use `await import("tunelet")`.
 
 ### Deployment
 
@@ -418,7 +420,7 @@ page that opens the JavaScript.
 | Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`         |
 | Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)` |
 | Configured tail budget            | `tailFrames()`                                           |
-| Reset or release memory           | `reset()`, `free()`                                      |
+| Reset or release memory           | `reset()`, `free()`, `[Symbol.dispose]()`                |
 
 ### Audio buffers
 
@@ -444,9 +446,9 @@ and show enums as string literals. To change the configuration, do these steps:
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
+`TuneletError` with `details`. The optional `resynthesis.harmony.voices` field
+defaults to 4 if it is absent. The conversion ignores extra object properties.
+The generated declarations contain the parameter documentation from the Rust
 types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and

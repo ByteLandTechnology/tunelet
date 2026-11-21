@@ -3,9 +3,16 @@
 use crate::error::check_range;
 use crate::filter::{Biquad, Design};
 use crate::numeric::fixed::{Fixed, Q14};
-use crate::{Error, SampleRate};
+use crate::{ConfigField, Error, SampleRate};
 
-/// The echo or reverberation network. The default is [`Self::Echo`].
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " The echo or reverberation network. The default is [`Self::Echo`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " The echo or reverberation network. The default is `\"echo\"`."
+)]
 ///
 /// All modes share one delay buffer. A mode change uses the same buffer
 /// contents and damping filter memories. Thus a transition can play audio
@@ -53,8 +60,14 @@ pub struct ReverbConfig {
     /// Enables the selected network. The default is `false`. In bypass, the
     /// histories do not change.
     pub enabled: bool,
-    /// The topology of the delay network. The default is
-    /// [`ReverbMode::Echo`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The topology of the delay network. The default is [`ReverbMode::Echo`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The topology of the delay network. The default is `\"echo\"`."
+    )]
     pub mode: ReverbMode,
     /// The wet fraction, 0..=1.
     ///
@@ -105,13 +118,18 @@ impl ReverbConfig {
     ///
     /// # Errors
     ///
-    /// Returns the first [`Error::InvalidConfig`] with its dotted field path
-    /// and the problem.
+    /// Returns the first [`Error::InvalidConfig`] with its [`ConfigField`] and
+    /// the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("reverb.mix", self.mix, 0.0, 1.0)?;
-        check_range("reverb.diffusion", self.diffusion, 0.0, 1.0)?;
-        check_range("reverb.decay", self.decay, 0.0, 1.0)?;
-        check_range("reverb.brightness_hz", self.brightness_hz, 80.0, 20000.0)
+        check_range(ConfigField::ReverbMix, self.mix, 0.0, 1.0)?;
+        check_range(ConfigField::ReverbDiffusion, self.diffusion, 0.0, 1.0)?;
+        check_range(ConfigField::ReverbDecay, self.decay, 0.0, 1.0)?;
+        check_range(
+            ConfigField::ReverbBrightnessHz,
+            self.brightness_hz,
+            80.0,
+            20000.0,
+        )
     }
 }
 

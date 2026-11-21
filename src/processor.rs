@@ -8,7 +8,7 @@ use crate::events::{ValidatedEvent, ValidatedEvents};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
 use crate::resynthesis::{self, Resynthesis};
-use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
+use crate::{BufferName, ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
 
 /// A prepared vocal processor with state, mono input and stereo synthesis.
 ///
@@ -149,7 +149,7 @@ impl Processor {
         output: &mut [[i16; 2]],
         events: &[TimedEvent],
     ) -> Result<(), Error> {
-        Error::check_length(input.len(), output.len())?;
+        Error::check_length(BufferName::Output, input.len(), output.len())?;
         self.process_into(input, events, |index, frame| output[index] = frame)
     }
 
@@ -173,8 +173,8 @@ impl Processor {
         right: &mut [i16],
         events: &[TimedEvent],
     ) -> Result<(), Error> {
-        Error::check_length(input.len(), left.len())?;
-        Error::check_length(input.len(), right.len())?;
+        Error::check_length(BufferName::Left, input.len(), left.len())?;
+        Error::check_length(BufferName::Right, input.len(), right.len())?;
         self.process_into(input, events, |index, frame| {
             left[index] = frame[0];
             right[index] = frame[1];
@@ -260,7 +260,7 @@ impl Processor {
     /// [`Error::BlockTooLarge`]. If either error occurs, the two channels and
     /// the drain state do not change.
     pub fn drain_planar(&mut self, left: &mut [i16], right: &mut [i16]) -> Result<usize, Error> {
-        Error::check_length(left.len(), right.len())?;
+        Error::check_length(BufferName::Right, left.len(), right.len())?;
         let count = self.drain_into(left.len(), |index, frame| {
             left[index] = frame[0];
             right[index] = frame[1];
@@ -441,7 +441,7 @@ impl Processor {
         input: &mut [f32],
         output: &mut [f32],
     ) -> Result<bool, Error> {
-        Error::check_length(input.len(), output.len())?;
+        Error::check_length(BufferName::Output, input.len(), output.len())?;
         let nyquist = self.preparation.sample_rate.hz() / 2.0;
         if !max_frequency_hz.is_finite() || max_frequency_hz <= 0.0 || max_frequency_hz > nyquist {
             return Err(Error::InvalidFrequency {
@@ -697,12 +697,16 @@ impl Processor {
 }
 
 /// A snapshot of the pitch analysis and the output level that you can copy.
-///
-/// Get it with [`Processor::feedback`] or [`Processor::take_feedback`]. The
-/// pitch fields describe the tracked input and the correction target. The
-/// peak measures the final clipped stereo output. `Default` gives a snapshot
-/// with all zeros and no target. It does not read the nominal latency of a
-/// prepared processor.
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = "",
+    doc = " Get it with [`Processor::feedback`] or [`Processor::take_feedback`]. The pitch fields describe the tracked input and the correction target. The peak measures the final clipped stereo output. `Default` gives a snapshot with all zeros and no target. It does not read the nominal latency of a prepared processor."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = "",
+    doc = " Get it with `Tunelet.feedback` or `Tunelet.takeFeedback`. The pitch fields describe the tracked input and the correction target. The peak measures the final clipped stereo output."
+)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -719,9 +723,16 @@ pub struct Feedback {
     /// a change of stereo output.
     pub resample_ratio: f32,
     /// The reported input pitch period in samples, with fractional samples.
-    ///
-    /// It is zero if the input is unvoiced or outside the reporting bounds of
-    /// [`crate::PitchConfig`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = "",
+        doc = " It is zero if the input is unvoiced or outside the reporting bounds of [`crate::PitchConfig`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = "",
+        doc = " It is zero if the input is unvoiced or outside the reporting bounds of `PitchConfig`."
+    )]
     pub period_samples: f32,
     /// The reported input pitch frequency in hertz.
     ///
@@ -741,11 +752,16 @@ pub struct Feedback {
     /// The pitch class is in the octave nearest to the reported input. In
     /// other cases, the value is the input pitch as a fractional MIDI note. It
     /// is not the final pitch of shifted output or harmony output.
-    ///
-    /// The value is `None` if [`voiced`](Self::voiced) is `false`, and only
-    /// then. This occurs if the input is unvoiced or if its frequency is
-    /// outside the current reporting bounds. A target table that has no
-    /// selected target does not give `None`.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = "",
+        doc = " The value is `None` if [`voiced`](Self::voiced) is `false`, and only then. This occurs if the input is unvoiced or if its frequency is outside the current reporting bounds. A target table that has no selected target does not give `None`."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = "",
+        doc = " The value is `undefined` if `voiced` is `false`, and only then. This occurs if the input is unvoiced or if its frequency is outside the current reporting bounds. A target table that has no selected target does not give `undefined`."
+    )]
     pub target_midi_note: Option<f32>,
     /// This field is `true` if the current pitch estimate is positive and
     /// inside the current reporting bounds.
@@ -754,11 +770,16 @@ pub struct Feedback {
     /// can stay between detector updates.
     pub voiced: bool,
     /// The largest absolute clipped stereo sample, divided by 32768.
-    ///
-    /// The peak window starts at construction, at a reset, at a change of
-    /// stereo output or at a call to [`Processor::take_feedback`]. The value
-    /// is in 0..=32767/32768. The mono downmix occurs after this measurement.
-    /// [`Processor::feedback`] does not clear the value.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = "",
+        doc = " The peak window starts at construction, at a reset, at a change of stereo output or at a call to [`Processor::take_feedback`]. The value is in 0..=32767/32768. The mono downmix occurs after this measurement. [`Processor::feedback`] does not clear the value."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = "",
+        doc = " The peak window starts at construction, at a reset, at a change of stereo output or at a call to `Tunelet.takeFeedback`. The value is in 0..=32767/32768. The mono downmix occurs after this measurement. `Tunelet.feedback` does not clear the value."
+    )]
     pub peak_level: f32,
     /// The number of frames processed since construction or the last reset,
     /// with drain frames included.
@@ -766,9 +787,13 @@ pub struct Feedback {
     /// The count saturates at `u64::MAX`. Drain completion resets it in the
     /// last drain call.
     pub processed_frames: u64,
-    /// The nominal resynthesis latency, as [`Processor::latency_frames`] gives.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The nominal resynthesis latency, as [`Processor::latency_frames`] gives."
+    )]
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The nominal resynthesis latency, as `Tunelet.latencyFrames` gives.",
         serde(serialize_with = "crate::wasm::serialize_frame_count"),
         tsify(type = "number")
     )]
@@ -777,15 +802,20 @@ pub struct Feedback {
 
 /// A snapshot of the voices, the levels and the effect state that you can
 /// copy.
-///
-/// Get it with [`Processor::telemetry`] or [`Processor::take_telemetry`]. The
-/// telemetry is for meters and displays. No audio calculation reads it.
-/// `Default` gives a snapshot with all zeros.
-///
-/// The three peak fields measure a window. The window starts at
-/// construction, at a reset, at a change of stereo output or at a call to
-/// [`Processor::take_telemetry`]. This window is independent of the peak
-/// window of [`Feedback`].
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = "",
+    doc = " Get it with [`Processor::telemetry`] or [`Processor::take_telemetry`]. The telemetry is for meters and displays. No audio calculation reads it. `Default` gives a snapshot with all zeros.",
+    doc = "",
+    doc = " The three peak fields measure a window. The window starts at construction, at a reset, at a change of stereo output or at a call to [`Processor::take_telemetry`]. This window is independent of the peak window of [`Feedback`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = "",
+    doc = " Get it with `Tunelet.telemetry` or `Tunelet.takeTelemetry`. The telemetry is for meters and displays. No audio calculation reads it.",
+    doc = "",
+    doc = " The three peak fields measure a window. The window starts at construction, at a reset, at a change of stereo output or at a call to `Tunelet.takeTelemetry`. This window is independent of the peak window of `Feedback`."
+)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -794,8 +824,14 @@ pub struct Feedback {
     tsify(large_number_types_as_bigints)
 )]
 pub struct Telemetry {
-    /// The number of frames processed since construction or the last reset,
-    /// as [`Feedback::processed_frames`] gives.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The number of frames processed since construction or the last reset, as [`Feedback::processed_frames`] gives."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The number of frames processed since construction or the last reset, as `Feedback.processedFrames` gives."
+    )]
     pub processed_frames: u64,
     /// The largest absolute input sample in the window, divided by 32768.
     ///
@@ -815,33 +851,54 @@ pub struct Telemetry {
     /// disabled, the window gets no new values.
     pub reverb_wet_peak: f32,
     /// How periodic the tracked input is, in 0..=1.
-    ///
-    /// The value is 1 for a signal that repeats exactly at the tracked
-    /// period. It is 0 for a signal with no relation between cycles and
-    /// during pitch acquisition. Use it as a confidence score for
-    /// [`Feedback::voiced`]. The tracker updates the related sums on each
-    /// frame.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = "",
+        doc = " The value is 1 for a signal that repeats exactly at the tracked period. It is 0 for a signal with no relation between cycles and during pitch acquisition. Use it as a confidence score for [`Feedback::voiced`]. The tracker updates the related sums on each frame."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = "",
+        doc = " The value is 1 for a signal that repeats exactly at the tracked period. It is 0 for a signal with no relation between cycles and during pitch acquisition. Use it as a confidence score for `Feedback.voiced`. The tracker updates the related sums on each frame."
+    )]
     pub clarity: f32,
     /// This field is `true` if the pitch tracker follows a period. It is
     /// `false` during pitch acquisition.
     pub tracking: bool,
-    /// The number of valid entries in [`voice_ratios`](Self::voice_ratios)
-    /// and [`voice_gains`](Self::voice_gains).
-    ///
-    /// The value is 5 in Harmony mode. In Choir mode, it is
-    /// [`crate::ResynthesisConfig::choir_voices`], in 1..=16.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The number of valid entries in [`voice_ratios`](Self::voice_ratios) and [`voice_gains`](Self::voice_gains).",
+        doc = "",
+        doc = " The value is 5 in Harmony mode. In Choir mode, it is [`crate::ResynthesisConfig::choir_voices`], in 1..=16."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The number of valid entries in `voiceRatios` and `voiceGains`.",
+        doc = "",
+        doc = " The value is 5 in Harmony mode. In Choir mode, it is `ResynthesisConfig.choirVoices`, in 1..=16."
+    )]
     pub voice_count: u8,
     /// The pitch ratio of each voice on the last frame, where 1 is the input
     /// pitch.
-    ///
-    /// Entry zero is the lead voice. In Harmony mode, entries 1 to 4 are the
-    /// harmony voices. In Choir mode, the entries after the lead are the
-    /// secondary voices. Each ratio includes the correction, the configured
-    /// pitch shift and the ratio of the voice. The entries after
-    /// [`voice_count`](Self::voice_count) are zero.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = "",
+        doc = " Entry zero is the lead voice. In Harmony mode, entries 1 to 4 are the harmony voices. In Choir mode, the entries after the lead are the secondary voices. Each ratio includes the correction, the configured pitch shift and the ratio of the voice. The entries after [`voice_count`](Self::voice_count) are zero."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = "",
+        doc = " Entry zero is the lead voice. In Harmony mode, entries 1 to 4 are the harmony voices. In Choir mode, the entries after the lead are the secondary voices. Each ratio includes the correction, the configured pitch shift and the ratio of the voice. The entries after `voiceCount` are zero."
+    )]
     pub voice_ratios: [f32; 16],
-    /// The linear gain of each voice, in the order of
-    /// [`voice_ratios`](Self::voice_ratios).
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The linear gain of each voice, in the order of [`voice_ratios`](Self::voice_ratios)."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The linear gain of each voice, in the order of `voiceRatios`."
+    )]
     ///
     /// The lead and the choir voices have a gain of 1. The gain of a harmony
     /// voice includes the MIDI velocity gain, in 0..=3.98095703125. MIDI
@@ -863,19 +920,37 @@ pub struct Telemetry {
     /// -30 dB, it is the gain of +30 dB. Warm updates it every 100 frames.
     /// The value is 1 while Warm is disabled.
     pub warm_gain: f32,
-    /// The length of the Alien loop in frames, as
-    /// [`crate::AlienConfig::loop_frames`] gives.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The length of the Alien loop in frames, as [`crate::AlienConfig::loop_frames`] gives."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The length of the Alien loop in frames, as `AlienConfig.loopFrames` gives."
+    )]
     pub alien_loop_frames: u32,
-    /// The current frame in the Alien loop. It is less than
-    /// [`alien_loop_frames`](Self::alien_loop_frames).
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The current frame in the Alien loop. It is less than [`alien_loop_frames`](Self::alien_loop_frames)."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The current frame in the Alien loop. It is less than `alienLoopFrames`."
+    )]
     ///
     /// The reverse reader is two times this number of frames behind the
     /// recording position. The value advances also while Alien is disabled.
     pub alien_phase_frames: u32,
     /// The wrapping count of formant analyses since construction.
-    ///
-    /// The count increases every 441 frames while the formant stage is
-    /// enabled. Compare two values to find if
-    /// [`Processor::formant_envelope`] can give a new result.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = "",
+        doc = " The count increases every 441 frames while the formant stage is enabled. Compare two values to find if [`Processor::formant_envelope`] can give a new result."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = "",
+        doc = " The count increases every 441 frames while the formant stage is enabled. Compare two values to find if `Tunelet.formantEnvelope` can give a new result."
+    )]
     pub formant_generation: u32,
 }

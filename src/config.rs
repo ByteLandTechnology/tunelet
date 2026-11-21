@@ -5,8 +5,7 @@ use crate::effects::punch::PunchConfig;
 use crate::effects::reverb::ReverbConfig;
 use crate::effects::warm::WarmConfig;
 use crate::error::{check_range, ConfigProblem};
-use crate::Error;
-use crate::ResynthesisConfig;
+use crate::{ConfigField, Error, ResynthesisConfig};
 use std::num::NonZeroUsize;
 
 /// The sample rate of the input and the output.
@@ -98,17 +97,18 @@ impl PrepareConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidConfig`] with the field
-    /// `prepare.max_block_frames` if the maximum is zero. The field type is
-    /// [`NonZeroUsize`]. Thus, this invariant also holds if you edit the field
-    /// after construction.
+    /// Returns [`Error::InvalidConfig`] with [`ConfigField::PrepareMaxBlockFrames`]
+    /// and [`ConfigProblem::IntegerOutOfRange`] if `max_block_frames` is zero.
+    /// The field type is [`NonZeroUsize`]. Thus, this invariant also holds if
+    /// you edit the field after construction.
     pub fn new(sample_rate: SampleRate, max_block_frames: usize) -> Result<Self, Error> {
         let max_block_frames = NonZeroUsize::new(max_block_frames).ok_or_else(|| {
             Error::config(
-                "prepare.max_block_frames",
-                ConfigProblem::OutOfRange {
-                    min: 1.0,
-                    max: usize::MAX as f64,
+                ConfigField::PrepareMaxBlockFrames,
+                ConfigProblem::IntegerOutOfRange {
+                    value: 0,
+                    min: 1,
+                    max: usize::MAX as i128,
                 },
             )
         })?;
@@ -126,9 +126,16 @@ impl PrepareConfig {
 /// configuration does active pitch processing. It is not a bypass with zero
 /// latency.
 ///
-/// Change a copy, then apply it with [`crate::Processor::set_config`] or
-/// [`crate::ControlEvent::Configure`]. The validation examines all fields
-/// before a change has an effect. This includes the fields of disabled stages.
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " Change a copy, then apply it with [`crate::Processor::set_config`] or [`crate::ControlEvent::Configure`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " Change a copy, then apply it with `Tunelet.setConfig` or a `configure` event."
+)]
+/// The validation examines all fields before a change has an effect. This
+/// includes the fields of disabled stages.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -148,8 +155,16 @@ pub struct ProcessorConfig {
     pub warm: WarmConfig,
     /// The stage for pitch tracking, correction, voice resynthesis and
     /// formant control.
-    ///
-    /// The default is [`ResynthesisConfig::default`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = "",
+        doc = " The default is [`ResynthesisConfig::default`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = "",
+        doc = " The default is chromatic correction with one choir voice."
+    )]
     pub resynthesis: ResynthesisConfig,
     /// The reverse-loop effect after resynthesis.
     ///
@@ -209,5 +224,5 @@ impl ProcessorConfig {
 ///
 /// `ProcessorConfig` and `ControlEvent::OutputGain` use the same range.
 pub(crate) fn validate_output_gain(gain: f32) -> Result<(), Error> {
-    check_range("output_gain", gain, 0.0, 64.0)
+    check_range(ConfigField::OutputGain, gain, 0.0, 64.0)
 }

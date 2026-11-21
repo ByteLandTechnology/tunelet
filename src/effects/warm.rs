@@ -4,7 +4,7 @@ use crate::error::check_range;
 use crate::filter::{Biquad, Design};
 use crate::numeric::db_to_gain;
 use crate::numeric::fixed::{Fixed, Q12, Q14, Q8};
-use crate::{Error, SampleRate};
+use crate::{ConfigField, Error, SampleRate};
 
 /// The update interval of the peak follower, in frames.
 const WINDOW_FRAMES: usize = 100;
@@ -48,10 +48,10 @@ impl WarmConfig {
     ///
     /// # Errors
     ///
-    /// Returns the first [`Error::InvalidConfig`] with its dotted field path
-    /// and the problem.
+    /// Returns the first [`Error::InvalidConfig`] with its [`ConfigField`] and
+    /// the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("warm.drive_db", self.drive_db, 0.0, 6.0)
+        check_range(ConfigField::WarmDriveDb, self.drive_db, 0.0, 6.0)
     }
 }
 

@@ -39,7 +39,7 @@ use crate::numeric::{ring, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
-use crate::{Error, SampleRate};
+use crate::{ConfigField, Error, SampleRate};
 use history::prepare_history;
 
 /// The method that resynthesis uses to render its voices.
@@ -88,13 +88,25 @@ pub enum MultiVoiceMode {
 )]
 pub struct CorrectionConfig {
     /// Enables the selection of correction targets. The default is `true`.
-    ///
-    /// If you disable correction, the ratio moves toward 1.0 with `retune_ms`
-    /// at the next tracking updates. The ratio does not change to 1.0
-    /// immediately.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = "",
+        doc = " If you disable correction, the ratio moves toward 1.0 with `retune_ms` at the next tracking updates. The ratio does not change to 1.0 immediately."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = "",
+        doc = " If you disable correction, the ratio moves toward 1.0 with `retuneMs` at the next tracking updates. The ratio does not change to 1.0 immediately."
+    )]
     pub enabled: bool,
-    /// The configured target pitch classes. The default is
-    /// [`NoteMask::CHROMATIC`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The configured target pitch classes. The default is [`NoteMask::CHROMATIC`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The configured target pitch classes. By default, all 12 pitch classes are enabled."
+    )]
     ///
     /// All boolean masks are valid. MIDI can replace the active table. This
     /// replacement stays until this mask or `enabled` changes.
@@ -127,11 +139,12 @@ impl CorrectionConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidConfig`], with the dotted path of the field and
-    /// the problem, if `retune_ms` is not valid.
+    /// Returns [`Error::InvalidConfig`] with
+    /// [`ConfigField::ResynthesisCorrectionRetuneMs`] and the problem if
+    /// `retune_ms` is not valid.
     pub fn validate(self) -> Result<(), Error> {
         check_range(
-            "resynthesis.correction.retune_ms",
+            ConfigField::ResynthesisCorrectionRetuneMs,
             self.retune_ms,
             0.0,
             400.0,
@@ -166,8 +179,14 @@ impl CorrectionConfig {
     tsify(large_number_types_as_bigints)
 )]
 pub struct ResynthesisConfig {
-    /// The acquisition sensitivity and the reporting bounds. The
-    /// default is [`PitchConfig::default`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The acquisition sensitivity and the reporting bounds. The default is [`PitchConfig::default`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The acquisition sensitivity and the reporting bounds."
+    )]
     pub pitch: PitchConfig,
     /// The target notes and the retune time. The default is enabled
     /// chromatic correction with a retune time of zero.
@@ -181,7 +200,14 @@ pub struct ResynthesisConfig {
     pub pitch_ratio: f32,
     /// The vocal-tract changes and aspiration. They are disabled by default.
     pub formant: FormantConfig,
-    /// The voice arrangement. The default is [`MultiVoiceMode::Choir`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The voice arrangement. The default is [`MultiVoiceMode::Choir`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The voice arrangement. The default is `'choir'`."
+    )]
     ///
     /// Harmony renders the lead voice and a maximum of four harmony voices.
     pub mode: MultiVoiceMode,
@@ -207,15 +233,28 @@ pub struct ResynthesisConfig {
     /// settings.
     pub choir_delay: f32,
     /// The stereo width of the choir, 0..=100%. The default is 100%.
-    ///
-    /// The code uses this value only if `stereo_output` enables the voice pan
-    /// and the choir has more than one voice.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = "",
+        doc = " The code uses this value only if `stereo_output` enables the voice pan and the choir has more than one voice."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = "",
+        doc = " The code uses this value only if `stereoOutput` enables the voice pan and the choir has more than one voice."
+    )]
     pub choir_spread_percent: f32,
     /// Enables a stereo pan for each voice. The default is `false`.
-    ///
-    /// This value is independent of the buffer layout of the process method.
-    /// A change to this value resets some audio histories and the feedback.
-    /// [`crate::Processor::set_config`] gives the details.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = "",
+        doc = " This value is independent of the buffer layout of the process method. A change to this value resets some audio histories and the feedback. [`crate::Processor::set_config`] gives the details."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = "",
+        doc = " This value is independent of the buffer layout of the process method. A change to this value resets some audio histories and the feedback. `Tunelet.setConfig` gives the details."
+    )]
     pub stereo_output: bool,
     /// The controls for the four harmony voices. The default is MIDI-channel
     /// allocation.
@@ -224,10 +263,16 @@ pub struct ResynthesisConfig {
     /// while Choir is selected.
     pub harmony: HarmonyConfig,
     /// The pan gain of the harmony voices, 0..=1. The default is 0.5.
-    ///
-    /// The code applies this gain only if `stereo_output` is `true`. The
-    /// harmony path without pan does not use this control. It does not scale
-    /// the lead voice.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = "",
+        doc = " The code applies this gain only if `stereo_output` is `true`. The harmony path without pan does not use this control. It does not scale the lead voice."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = "",
+        doc = " The code applies this gain only if `stereoOutput` is `true`. The harmony path without pan does not use this control. It does not scale the lead voice."
+    )]
     pub harmony_gain: f32,
     /// The modulation depth, 0..=24, without a unit. The default is 0 (off).
     ///
@@ -285,26 +330,54 @@ impl ResynthesisConfig {
     ///
     /// # Errors
     ///
-    /// Returns the first [`Error::InvalidConfig`], with the dotted path of the
-    /// field and the problem. For an array control in `harmony`, the error
-    /// identifies the array field, not the index of an element.
+    /// Returns the first [`Error::InvalidConfig`] with its field and the
+    /// problem. For an interval array control in `harmony`, `voice` holds
+    /// `Some(0..=3)` for the rejected slot.
     pub fn validate(self) -> Result<(), Error> {
         self.pitch.validate()?;
         self.correction.validate()?;
         self.formant.validate()?;
         self.harmony.validate()?;
-        check_range("resynthesis.pitch_ratio", self.pitch_ratio, 0.25, 4.0)?;
-        check_range("resynthesis.choir_detune", self.choir_detune, 10.0, 100.0)?;
-        check_range("resynthesis.choir_delay", self.choir_delay, 20.0, 200.0)?;
-        let field = "resynthesis.choir_spread_percent";
-        check_range(field, self.choir_spread_percent, 0.0, 100.0)?;
-        check_range("resynthesis.harmony_gain", self.harmony_gain, 0.0, 1.0)?;
-        let field = "resynthesis.harmonic_modulation";
-        check_range(field, self.harmonic_modulation, 0.0, 24.0)?;
-        check_range("resynthesis.dry_mix", self.dry_mix, 0.0, 1.0)?;
+        check_range(
+            ConfigField::ResynthesisPitchRatio,
+            self.pitch_ratio,
+            0.25,
+            4.0,
+        )?;
+        check_range(
+            ConfigField::ResynthesisChoirDetune,
+            self.choir_detune,
+            10.0,
+            100.0,
+        )?;
+        check_range(
+            ConfigField::ResynthesisChoirDelay,
+            self.choir_delay,
+            20.0,
+            200.0,
+        )?;
+        check_range(
+            ConfigField::ResynthesisChoirSpreadPercent,
+            self.choir_spread_percent,
+            0.0,
+            100.0,
+        )?;
+        check_range(
+            ConfigField::ResynthesisHarmonyGain,
+            self.harmony_gain,
+            0.0,
+            1.0,
+        )?;
+        check_range(
+            ConfigField::ResynthesisHarmonicModulation,
+            self.harmonic_modulation,
+            0.0,
+            24.0,
+        )?;
+        check_range(ConfigField::ResynthesisDryMix, self.dry_mix, 0.0, 1.0)?;
         check_count(
-            "resynthesis.choir_voices",
-            i64::from(self.choir_voices),
+            ConfigField::ResynthesisChoirVoices,
+            i128::from(self.choir_voices),
             1,
             16,
         )

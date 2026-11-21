@@ -2,7 +2,7 @@
 
 use crate::error::check_count;
 use crate::numeric::fixed::{Fixed, Q14};
-use crate::Error;
+use crate::{ConfigField, Error};
 
 /// The number of history frames that the loop reads from.
 const HISTORY_FRAMES: usize = 192_000;
@@ -50,10 +50,15 @@ impl AlienConfig {
     ///
     /// # Errors
     ///
-    /// Returns the first [`Error::InvalidConfig`] with its dotted field path
-    /// and the problem.
+    /// Returns the first [`Error::InvalidConfig`] with its [`ConfigField`] and
+    /// the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_count("alien.loop_frames", i64::from(self.loop_frames), 1, 96_000)
+        check_count(
+            ConfigField::AlienLoopFrames,
+            i128::from(self.loop_frames),
+            1,
+            96_000,
+        )
     }
 }
 

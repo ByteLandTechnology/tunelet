@@ -23,7 +23,7 @@ use crate::filter::{Biquad, Design};
 use crate::lpc;
 use crate::numeric::fixed::{Q14, Q6};
 use crate::numeric::{db_to_gain, fast_sinc, mul14, round_q14, NumericContext};
-use crate::{Error, SampleRate};
+use crate::{ConfigField, Error, SampleRate};
 
 /// The controls for vocal-tract changes and synthesized aspiration during
 /// resynthesis.
@@ -92,15 +92,28 @@ impl FormantConfig {
     ///
     /// # Errors
     ///
-    /// Returns the first [`Error::InvalidConfig`], with the dotted path of the
-    /// field and the problem.
+    /// Returns the first [`Error::InvalidConfig`], with the [`ConfigField`] and
+    /// the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("resynthesis.formant.width", self.width, 0.5, 2.0)?;
-        check_range("resynthesis.formant.stretch", self.stretch, 0.5, 2.0)?;
-        let field = "resynthesis.formant.aspiration_mix";
-        check_range(field, self.aspiration_mix, 0.0, 1.0)?;
-        let field = "resynthesis.formant.aspiration_cutoff_hz";
-        check_range(field, self.aspiration_cutoff_hz, 500.0, 10000.0)
+        check_range(ConfigField::ResynthesisFormantWidth, self.width, 0.5, 2.0)?;
+        check_range(
+            ConfigField::ResynthesisFormantStretch,
+            self.stretch,
+            0.5,
+            2.0,
+        )?;
+        check_range(
+            ConfigField::ResynthesisFormantAspirationMix,
+            self.aspiration_mix,
+            0.0,
+            1.0,
+        )?;
+        check_range(
+            ConfigField::ResynthesisFormantAspirationCutoffHz,
+            self.aspiration_cutoff_hz,
+            500.0,
+            10000.0,
+        )
     }
 }
 

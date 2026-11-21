@@ -9,13 +9,16 @@ use crate::midi::MidiEvent;
 use crate::{Error, EventProblem, ProcessorConfig, ResynthesisConfig};
 
 /// A configuration or MIDI control that applies before a frame in the block.
-///
-/// Give controls to a process call as [`TimedEvent`] values. The call borrows
-/// the slice only for that call. There is no heap allocation and no deferred
-/// queue. A stage event replaces all settings of that stage. To change one
-/// field, start from the current configuration of the processor.
-/// Configuration changes have the same effects on state as
-/// [`crate::Processor::set_config`].
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = "",
+    doc = " Give controls to a process call as [`TimedEvent`] values. The call borrows the slice only for that call. There is no heap allocation and no deferred queue. A stage event replaces all settings of that stage. To change one field, start from the current configuration of the processor. Configuration changes have the same effects on state as [`crate::Processor::set_config`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = "",
+    doc = " Give controls to a process call as `TimedEvent` values. A stage event replaces all settings of that stage. To change one field, start from `Tunelet.config()`. Configuration changes have the same effects on state as `Tunelet.setConfig`."
+)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -36,12 +39,25 @@ pub enum ControlEvent {
     /// This event replaces the reverb configuration.
     Reverb(ReverbConfig),
     /// This event sets the final linear gain, 0..=64.
-    ///
-    /// The quantization and the mute behavior are the same as for
-    /// [`ProcessorConfig::output_gain`]. The value must be finite.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = "",
+        doc = " The quantization and the mute behavior are the same as for [`ProcessorConfig::output_gain`]. The value must be finite."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = "",
+        doc = " The quantization and the mute behavior are the same as for `ProcessorConfig.outputGain`. The value must be finite."
+    )]
     OutputGain(f32),
-    /// This event sends a note control to the harmony source that
-    /// [`crate::HarmonyConfig`] selects.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " This event sends a note control to the harmony source that [`crate::HarmonyConfig`] selects."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " This event sends a note control to the harmony source that `HarmonyConfig` selects."
+    )]
     ///
     /// MIDI-channel mode uses channels 0..=3. Omni mode and MIDI-chord mode
     /// combine channels.
@@ -54,8 +70,14 @@ pub enum ControlEvent {
     /// correction table. If a later change sets new configured notes, or
     /// enables or disables correction, the configured mask loads again.
     CorrectionMidi(MidiEvent),
-    /// This event resets immediately before the event frame, with the semantics of
-    /// [`crate::Processor::reset`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " This event resets immediately before the event frame, with the semantics of [`crate::Processor::reset`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " This event resets immediately before the event frame, with the semantics of `Tunelet.reset`."
+    )]
     ///
     /// Later events in the same block still run. The processor continues to
     /// render from this frame.
@@ -143,23 +165,35 @@ impl<'a> ValidatedEvents<'a> {
     pub(crate) fn new(events: &'a [TimedEvent], frames: usize) -> Result<Self, Error> {
         let mut previous = 0;
         for (index, event) in events.iter().enumerate() {
-            let problem = if event.offset >= frames {
-                Some(EventProblem::OffsetOutsideBlock)
-            } else if event.offset < previous {
-                Some(EventProblem::OffsetDecreasing)
+            let offset = event.offset;
+            let problem = if offset >= frames {
+                Some(EventProblem::OffsetOutsideBlock { offset, frames })
+            } else if offset < previous {
+                Some(EventProblem::OffsetDecreasing { offset, previous })
             } else {
                 match event.event.validate() {
                     Ok(()) => None,
-                    Err(Error::InvalidConfig { field, problem }) => {
-                        Some(EventProblem::Config { field, problem })
-                    }
-                    Err(_) => Some(EventProblem::Midi),
+                    Err(Error::InvalidConfig {
+                        field,
+                        voice,
+                        problem,
+                    }) => Some(EventProblem::Config {
+                        field,
+                        voice,
+                        problem,
+                    }),
+                    Err(Error::InvalidMidi { problem }) => Some(EventProblem::Midi { problem }),
+                    Err(_) => unreachable!("control event validation returns config or MIDI error"),
                 }
             };
             if let Some(problem) = problem {
-                return Err(Error::InvalidEvent { index, problem });
+                return Err(Error::InvalidEvent {
+                    index,
+                    offset,
+                    problem,
+                });
             }
-            previous = event.offset;
+            previous = offset;
         }
         Ok(Self { remaining: events })
     }
