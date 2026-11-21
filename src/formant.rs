@@ -296,6 +296,24 @@ pub(crate) struct Formant {
     generation: u32,
 }
 
+/// Multiplies `coefficients` with the samples before `index` in `ring`.
+///
+/// If the span crosses index zero, the function splits `ring` into two
+/// slices. The function adds each `i64` product with saturation in tap order.
+#[inline]
+fn ring_sum(ring: &[i32], index: usize, coefficients: &[i32]) -> i64 {
+    let (head, tail) = ring.split_at(index);
+    let (first, second) = coefficients.split_at(coefficients.len().min(head.len()));
+    let mut sum = 0_i64;
+    for (&sample, &coefficient) in head.iter().rev().zip(first) {
+        sum = sum.saturating_add(i64::from(sample) * i64::from(coefficient));
+    }
+    for (&sample, &coefficient) in tail.iter().rev().zip(second) {
+        sum = sum.saturating_add(i64::from(sample) * i64::from(coefficient));
+    }
+    sum
+}
+
 impl Formant {
     /// Creates the stage, allocates the memory for audio, models and
     /// intermediate values, and prepares the controls for the sample rate.
@@ -496,9 +514,10 @@ impl Formant {
     /// Tries a model that uses the pitch each ANALYSIS_FRAMES, and stamps
     /// each frame.
     ///
-    /// If a pitch is available, the segment folds adjacent cycles. If not,
-    /// the segment is a window of approximately 10 ms. Before the Durbin
-    /// analysis, the function does these steps on the correlations:
+    /// If a pitch is available, the segment folds adjacent cycles and clamps
+    /// the period to `rate / 40`. If not, the segment is a window of
+    /// approximately 10 ms. Before the Durbin analysis, the function does
+    /// these steps on the correlations:
     /// 1. It rescales them during the sum.
     /// 2. It applies sinc weights.
     /// 3. It calculates their average.
@@ -512,7 +531,8 @@ impl Formant {
     /// If the Durbin analysis fails, smoothing starts again. The selected
     /// bank keeps the inverse coefficients that the analysis wrote.
     fn design(&mut self, periods: &[Q6], position: usize, output_period_q6: i32) {
-        let period = output_period_q6.wrapping_shr(6).max(0) as usize;
+        let max_period = (self.rate.as_u32() as usize / 40).max(1);
+        let period = (output_period_q6.wrapping_shr(6).max(0) as usize).min(max_period);
         let design_now = self.design_counter == 0;
         self.design_counter += 1;
         let one = 16384;
@@ -522,8 +542,10 @@ impl Formant {
             if period == 0 {
                 count = (self.rate.as_u32() as usize + 50) / 100;
                 for i in 0..count {
-                    self.temporary[i] =
-                        self.input[(position + HISTORY_FRAMES - i) % HISTORY_FRAMES];
+                    let index = (position as i32)
+                        .wrapping_sub(i as i32)
+                        .rem_euclid(HISTORY_FRAMES as i32) as usize;
+                    self.temporary[i] = self.input[index];
                 }
                 self.temporary[count..count + ORDER].fill(0_i32);
             } else {
@@ -535,12 +557,18 @@ impl Formant {
                 let extra = (period / 10).max(1);
                 if periods[position] == Q6::ZERO {
                     for i in 0..count + extra {
-                        self.temporary[i] =
-                            self.input[(position + HISTORY_FRAMES - i) % HISTORY_FRAMES];
+                        let index = (position as i32)
+                            .wrapping_sub(i as i32)
+                            .rem_euclid(HISTORY_FRAMES as i32)
+                            as usize;
+                        self.temporary[i] = self.input[index];
                     }
                 } else {
                     for i in 0..count + extra {
-                        let index = (position + HISTORY_FRAMES - i) % HISTORY_FRAMES;
+                        let index = (position as i32)
+                            .wrapping_sub(i as i32)
+                            .rem_euclid(HISTORY_FRAMES as i32)
+                            as usize;
                         let mut accumulator = (index as i32) << 6;
                         let mut sum = 0_i32;
                         let mut reads = 0;
@@ -724,30 +752,7 @@ impl Formant {
         } else {
             &self.inverse[self.current][..ORDER]
         };
-        let mut sum = 0_i64;
-        if read >= ORDER {
-            for (&sample, &coefficient) in self.input[read - ORDER..read]
-                .iter()
-                .rev()
-                .zip(coefficients)
-            {
-                sum = sum.saturating_add(i64::from(sample) * i64::from(coefficient));
-            }
-        } else {
-            for (&sample, &coefficient) in
-                self.input[..read].iter().rev().zip(&coefficients[..read])
-            {
-                sum = sum.saturating_add(i64::from(sample) * i64::from(coefficient));
-            }
-            let tail = ORDER - read;
-            for (&sample, &coefficient) in self.input[HISTORY_FRAMES - tail..]
-                .iter()
-                .rev()
-                .zip(&coefficients[read..])
-            {
-                sum = sum.saturating_add(i64::from(sample) * i64::from(coefficient));
-            }
-        }
+        let sum = ring_sum(&self.input, read, coefficients);
         self.input[read].saturating_sub(round_q14(sum))
     }
     /// Blends random aspiration into a Q14 sample word. The signal modulates
@@ -770,28 +775,37 @@ impl Formant {
         mul14(sample, 16384_i32.saturating_sub(self.noise_gain))
             .saturating_add(mul14(noise, self.noise_gain))
     }
-    /// Returns the synthesis slice of the stamp at a signed history frame
-    /// without a change to the stage.
+    /// Finds the synthesis model of the stamp at a signed history frame.
     ///
-    /// On a steady frame, the function borrows `self.models`. On a transition
-    /// frame, it borrows the cache on a hit or writes the blend into
-    /// `scratch`. Negative positions wrap in the ring.
-    fn coefficients<'a>(&'a self, position: i32, scratch: &'a mut [i32; MAX_ORDER]) -> &'a [i32] {
+    /// If `stamp.blend` is 16384 or the previous bank has order zero, the
+    /// function borrows the current bank. If the cache holds `stamp`, the
+    /// function borrows the cache. If not, the function returns `None`.
+    /// Negative positions wrap in the ring.
+    #[inline]
+    fn coefficients(&self, position: i32) -> Option<&[i32]> {
         let stamp = self.stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
-        let mut order = self.orders[stamp.current];
         if stamp.blend < 16384 && self.orders[stamp.previous] != 0 {
             if self.synthesis_cache.stamp == Some(stamp) {
-                return &self.synthesis_cache.coefficients[..self.synthesis_cache.order];
+                Some(&self.synthesis_cache.coefficients[..self.synthesis_cache.order])
+            } else {
+                None
             }
-            order = order.max(self.orders[stamp.previous]);
-            for (i, value) in scratch[..order].iter_mut().enumerate() {
-                *value = mul14(16384 - stamp.blend, self.models[stamp.previous][i])
-                    .saturating_add(mul14(stamp.blend, self.models[stamp.current][i]));
-            }
-            &scratch[..order]
         } else {
-            &self.models[stamp.current][..order]
+            Some(&self.models[stamp.current][..self.orders[stamp.current]])
         }
+    }
+    /// Blends the two synthesis banks at a signed history frame into `output`.
+    ///
+    /// Returns the active prefix of `output`. Negative positions wrap in the
+    /// ring.
+    fn blend_coefficients<'a>(&self, position: i32, output: &'a mut [i32; MAX_ORDER]) -> &'a [i32] {
+        let stamp = self.stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
+        let order = self.orders[stamp.current].max(self.orders[stamp.previous]);
+        for (i, value) in output[..order].iter_mut().enumerate() {
+            *value = mul14(16384 - stamp.blend, self.models[stamp.previous][i])
+                .saturating_add(mul14(stamp.blend, self.models[stamp.current][i]));
+        }
+        &output[..order]
     }
     /// Returns the wrapping count of model designs that the stage tried.
     pub(crate) fn generation(&self) -> u32 {
@@ -832,8 +846,13 @@ impl Formant {
         input: &mut [f32],
         output: &mut [f32],
     ) -> bool {
-        let mut scratch = [0; MAX_ORDER];
-        let synthesis = self.coefficients(position, &mut scratch);
+        let mut blended;
+        let synthesis = if let Some(slice) = self.coefficients(position) {
+            slice
+        } else {
+            blended = [0; MAX_ORDER];
+            self.blend_coefficients(position, &mut blended)
+        };
         if synthesis.is_empty() {
             input.fill(0.0);
             output.fill(0.0);
