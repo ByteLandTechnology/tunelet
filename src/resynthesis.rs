@@ -35,7 +35,7 @@ use crate::formant::{Formant, FormantConfig, ANALYSIS_FRAMES};
 use crate::harmony::{HarmonyConfig, HarmonyState, HARMONY_VOICES};
 use crate::midi::MidiEvent;
 use crate::numeric::fixed::{Q12, Q14, Q6, Q8};
-use crate::numeric::{ring, NumericContext, HISTORY};
+use crate::numeric::{ring, AtanQ14, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
@@ -189,9 +189,9 @@ pub struct ResynthesisConfig {
     /// default is 1.
     ///
     /// The other voices read the delayed lead history with random pitch
-    /// drift. The code adds the voices and does not divide the sum by the
-    /// number of voices. Thus, more voices can increase the output level and
-    /// the clipping. Harmony does not use this value.
+    /// drift. The code scales the voice sum by `1 / sqrt(choir_voices)`. A
+    /// soft limiter shapes wet peaks above -3 dBFS. Harmony does not use this
+    /// value.
     pub choir_voices: u8,
     /// The drift control for secondary voices, 10..=100, without a unit. The
     /// default is 50.
@@ -223,11 +223,11 @@ pub struct ResynthesisConfig {
     /// Validation applies to these controls, and they can receive MIDI, also
     /// while Choir is selected.
     pub harmony: HarmonyConfig,
-    /// The pan gain of the harmony voices, 0..=1. The default is 0.5.
+    /// The level of the harmony voices, 0..=1. The default is 0.5.
     ///
-    /// The code applies this gain only if `stereo_output` is `true`. The
-    /// harmony path without pan does not use this control. It does not scale
-    /// the lead voice.
+    /// This control scales the four harmony voices in mono and in stereo. It
+    /// does not scale the lead voice directly. Harmony also normalizes the
+    /// mix headroom from the active voice gains before the soft limiter.
     pub harmony_gain: f32,
     /// The modulation depth, 0..=24, without a unit. The default is 0 (off).
     ///
@@ -345,6 +345,14 @@ const CONTROL_DUE: i32 = 100;
 const DRIFT_LIMIT: Q14 = Q14::from_bits(3276);
 /// The step for each frame of the crossfade after a reader jump.
 const FADE_STEP: Q14 = Q14::from_bits(0x333);
+/// The Q14 soft-limiter knee at -3 dBFS.
+const SOFT_KNEE: Q14 = Q14::from_bits(11_599);
+/// The Q14 headroom from the -3 dBFS knee to 0 dBFS.
+const KNEE_HEADROOM: Q14 = Q14::from_bits(4_785);
+/// The Q14 drive `pi / (2 * headroom)` that gives unit slope at the knee.
+const KNEE_DRIVE: Q14 = Q14::from_bits(88_121);
+/// The 2/pi factor in Q14 that normalizes the arctangent output.
+const TWO_OVER_PI: Q14 = Q14::from_bits(10_430);
 
 /// Returns the reader position at the start of the history frame `frame`.
 #[inline]
@@ -482,6 +490,14 @@ pub(crate) struct Resynthesis {
     /// The previous Q14 synthesized output for each channel. The glottal
     /// envelope uses it.
     previous_output: [Q14; 2],
+    /// The Q14 headroom scale `1 / sqrt(choir_voices)` for Choir.
+    choir_scale: Q14,
+    /// The Q14 level of the harmony voices for mono output.
+    harmony_gain: Q14,
+    /// The Q14 headroom scale from the active harmony voice gains.
+    harmony_scale: Q14,
+    /// The per-channel arctangent lookup cursors for the wet soft limiter.
+    atan_q14: [AtanQ14; 2],
 }
 
 impl Resynthesis {
@@ -548,6 +564,10 @@ impl Resynthesis {
             drift_decay: Q14::ZERO,
             drift_amount: Q14::ZERO,
             previous_output: [Q14::ZERO; 2],
+            choir_scale: Q14::ONE,
+            harmony_gain: Q14::ZERO,
+            harmony_scale: Q14::ONE,
+            atan_q14: [AtanQ14::default(), AtanQ14::default()],
         };
         result.configure_coefficients();
         result.configure_shift_filters();
@@ -555,13 +575,11 @@ impl Resynthesis {
         result
     }
 
-    /// Quantizes the controls and calculates the decay coefficients and the
-    /// voice pan gains again.
+    /// Quantizes the controls and calculates the decay coefficients, the
+    /// headroom scales and the voice pan gains again.
     ///
     /// The coefficients are the correction decay, the drift decay and the
     /// drift amount. The histories and the controller phase do not change.
-    /// The harmony level is part of the stereo pan gains. Thus, the path
-    /// without pan never applies that control.
     fn configure_coefficients(&mut self) {
         self.shift = Q14::from_f64(self.config.pitch_ratio as f64);
         self.modulation = (self.config.harmonic_modulation as f64 / 8.0 * 16.0) as i32;
@@ -576,6 +594,11 @@ impl Resynthesis {
         let decay = (-std::f64::consts::LN_2 / base).exp();
         self.drift_decay = Q14::from_f64(decay);
         self.drift_amount = Q14::from_f64((1.0 - decay) * 0.008 * self.config.choir_detune as f64);
+        self.choir_scale = if self.config.choir_voices > 1 {
+            Q14::from_f64(1.0 / f64::from(self.config.choir_voices).sqrt())
+        } else {
+            Q14::ONE
+        };
         for voice in 0..self.config.choir_voices as usize {
             if self.config.choir_voices > 1 {
                 let normalized =
@@ -598,6 +621,37 @@ impl Resynthesis {
                 Q14::from_f64(gain * angle.cos()),
                 Q14::from_f64(gain * angle.sin()),
             ];
+        }
+        self.harmony_gain = Q14::from_f64(f64::from(self.config.harmony_gain));
+        self.update_harmony_scale();
+    }
+
+    /// Updates the Q14 harmony headroom scale from the active voice gains.
+    fn update_harmony_scale(&mut self) {
+        let mut power = 1_u64 << 28;
+        for &gain in &self.harmony_gains {
+            let voice_gain: Q14 = self.harmony_gain.mul(gain.max(Q12::ZERO));
+            let bits = voice_gain.to_bits() as u64;
+            power += bits * bits;
+        }
+        let rms_q14 = power.isqrt();
+        self.harmony_scale = Q14::from_bits(((1_u64 << 28) / rms_q14) as i32);
+    }
+
+    /// Shapes one wet Q14 channel with a soft knee above -3 dBFS.
+    fn soft_limit(&mut self, channel: usize, sample: Q14) -> Q14 {
+        let magnitude = sample.abs();
+        if magnitude <= SOFT_KNEE {
+            return sample;
+        }
+        let excess = magnitude - SOFT_KNEE;
+        let driven: Q14 = excess.mul(KNEE_DRIVE);
+        let angle = Q14::from_bits(self.atan_q14[channel].process(driven.to_bits(), 0));
+        let shaped = SOFT_KNEE + KNEE_HEADROOM.mul(TWO_OVER_PI.mul::<14, 14>(angle));
+        if sample < Q14::ZERO {
+            -shaped
+        } else {
+            shaped
         }
     }
 
@@ -707,6 +761,10 @@ impl Resynthesis {
         for filter in &mut self.post {
             filter.reset();
         }
+        for cursor in &mut self.atan_q14 {
+            cursor.reset();
+        }
+        self.update_harmony_scale();
         self.create_delays();
         self.drift_ratio.fill(Q14::ONE);
         self.old_position = self.positions[0];
@@ -1198,9 +1256,8 @@ impl Resynthesis {
                     }
                 }
             }
-            // The multiplication by 1.0 keeps the wrap of the product.
             for sum in &mut mix {
-                *sum = Q14::ONE.mul(*sum);
+                *sum = self.choir_scale.mul(*sum);
             }
         } else {
             let (period, ratio) = self.period_for(delayed, write);
@@ -1219,6 +1276,7 @@ impl Resynthesis {
                     self.harmony_ratios[voice] = ratio;
                     self.harmony_gains[voice] = gain;
                 }
+                self.update_harmony_scale();
             }
             for slot in 0..5 {
                 let mut current: Q14 = if slot == 0 {
@@ -1236,6 +1294,9 @@ impl Resynthesis {
                 let (mut value, _) = history::interpolation(&self.filtered, position);
                 if slot > 0 {
                     value = value.mul(self.harmony_gains[slot - 1]);
+                    if !self.config.stereo_output {
+                        value = value.mul(self.harmony_gain);
+                    }
                 }
                 for (channel, sum) in mix.iter_mut().enumerate() {
                     *sum = *sum
@@ -1245,6 +1306,9 @@ impl Resynthesis {
                             value
                         };
                 }
+            }
+            for sum in &mut mix {
+                *sum = self.harmony_scale.mul(*sum);
             }
             if self.config.formant.enabled {
                 self.formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
@@ -1293,10 +1357,13 @@ impl Resynthesis {
                 *sum = sum.mul(cosine);
             }
         }
+        for (channel, sum) in mix.iter_mut().enumerate() {
+            *sum = self.soft_limit(channel, *sum);
+        }
         // The dry branch is the delayed raw input. It bypasses the shift
-        // filters, the voice readers, the formant stages and the harmonic
-        // modulation. Keep the two products in Q22. Rescale their wrapping sum
-        // to Q14 one time only.
+        // filters, the voice readers, the formant stages, the harmonic
+        // modulation and the wet soft limiter. Keep the two products in Q22.
+        // Rescale their sum to Q14 one time only.
         let wet = Q8::ONE - self.dry_mix;
         for sum in &mut mix {
             *sum = (dry.mul::<8, 22>(self.dry_mix) + sum.mul::<8, 22>(wet)).rescale();

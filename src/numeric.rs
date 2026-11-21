@@ -8,6 +8,7 @@
 pub(crate) mod fixed;
 pub(crate) mod rng;
 mod tables;
+use fixed::saturate_i32;
 use rng::RandomStream;
 use tables::{SINC, TAN};
 
@@ -106,17 +107,22 @@ impl Default for AtanQ14 {
     }
 }
 impl AtanQ14 {
+    /// Resets the search cursor to its initial table index.
+    pub(crate) fn reset(&mut self) {
+        self.index = 1;
+    }
+
     /// Returns the interpolated arctangent of the input as Q14 radians.
     ///
-    /// The function shifts the input word into Q14 and finds the two adjacent
-    /// tangent entries. The caller selects the shift for the input format.
-    /// For example, Punch uses Q8 and a shift of 6. If the magnitude is
-    /// larger than the last entry, the function uses a fixed terminal angle.
-    /// The signed arithmetic wraps.
+    /// The function shifts the input word into Q14 with `i32` saturation and
+    /// finds the two adjacent tangent entries. The caller selects the shift
+    /// for the input format. For example, Punch uses Q8 and a shift of 6. If
+    /// the magnitude is larger than the last entry, the function uses a fixed
+    /// terminal angle.
     pub(crate) fn process(&mut self, input: i32, shift: u32) -> i32 {
-        let value = input.wrapping_shl(shift);
+        let value = saturate_i32(i64::from(input) << shift);
         let negative = value < 0;
-        let value = value.wrapping_abs();
+        let value = value.saturating_abs();
         if TAN[self.index] > value {
             while TAN[self.index - 1] > value {
                 self.index -= 1;
@@ -128,15 +134,17 @@ impl AtanQ14 {
         }
         let index = self.index;
         let angle = if TAN[index] >= value {
-            let fraction = value.wrapping_sub(TAN[index - 1]).wrapping_mul(64)
-                / TAN[index].wrapping_sub(TAN[index - 1]);
-            ((index as i32 - 1) * 16384) / 300 + fraction.wrapping_shl(8) / 300
+            let fraction = saturate_i32(
+                (i64::from(value) - i64::from(TAN[index - 1])) * 64
+                    / (i64::from(TAN[index]) - i64::from(TAN[index - 1])),
+            );
+            ((index as i32 - 1) * 16384) / 300 + saturate_i32(i64::from(fraction) << 8) / 300
         } else {
             0x3fc9
         };
         let result = mul_shift(angle, 25722, 14);
         if negative {
-            result.wrapping_neg()
+            result.saturating_neg()
         } else {
             result
         }

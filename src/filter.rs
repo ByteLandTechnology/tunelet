@@ -4,7 +4,7 @@
 //! The floating-point casts and the order of operations set the quantized
 //! coefficients.
 
-use crate::numeric::fixed::{Fixed, Q14};
+use crate::numeric::fixed::Q14;
 
 /// The biquad coefficients in single precision, before normalization by
 /// `a[0]`.
@@ -101,7 +101,7 @@ impl Design {
 /// A direct-form Q14 filter that keeps two input samples and two output
 /// samples.
 ///
-/// Each product and each sum wraps at 32 bits before the signed rounding.
+/// An `i64` Q28 sum holds all products, then rounds and saturates to `i32`.
 #[derive(Clone, Debug)]
 pub(crate) struct Biquad {
     /// The normalized Q14 feed-forward coefficients for the current input and
@@ -155,15 +155,16 @@ impl Biquad {
     /// Filters one sample with the direct-form recurrence and advances the
     /// two-sample history.
     ///
-    /// The products stay in Q28 format until one final signed half-unit
-    /// rounding. Do not round each product. Do not widen the accumulator.
+    /// An `i64` Q28 sum holds all products until one final signed half-unit
+    /// shift and `i32` saturation. Do not round each product separately.
     #[inline]
     pub(crate) fn process_sample(&mut self, input: Q14) -> Q14 {
-        let sum: Fixed<28> =
-            self.b[0].mul(input) + self.b[1].mul(self.x[0]) + self.b[2].mul(self.x[1])
-                - self.a[0].mul(self.y[0])
-                - self.a[1].mul(self.y[1]);
-        let output = sum.round();
+        let sum = i64::from(self.b[0].to_bits()) * i64::from(input.to_bits())
+            + i64::from(self.b[1].to_bits()) * i64::from(self.x[0].to_bits())
+            + i64::from(self.b[2].to_bits()) * i64::from(self.x[1].to_bits())
+            - i64::from(self.a[0].to_bits()) * i64::from(self.y[0].to_bits())
+            - i64::from(self.a[1].to_bits()) * i64::from(self.y[1].to_bits());
+        let output = Q14::round_from::<28>(sum);
         self.x[1] = self.x[0];
         self.x[0] = input;
         self.y[1] = self.y[0];

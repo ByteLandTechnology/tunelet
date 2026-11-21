@@ -159,20 +159,22 @@ The processor sends each sample through these stages, in this order. The
 default configuration enables chromatic pitch correction and one choir
 voice. It disables the effects and the formant stage.
 
-| Stage          | Function                                                    | Default        | Configuration field      |
-| -------------- | ----------------------------------------------------------- | -------------- | ------------------------ |
-| Punch          | Input gain and transient enhancement                        | Disabled       | `punch`                  |
-| Warm           | Asymmetric saturation and a 50 Hz high-pass filter          | Disabled       | `warm`                   |
-| Pitch tracking | Finds the pitch of the voice                                | Enabled        | `resynthesis.pitch`      |
-| Correction     | Moves the pitch to the nearest permitted note               | Chromatic      | `resynthesis.correction` |
-| Voices         | Renders a choir (1 to 16 voices) or harmony (lead and 0–4)  | Choir, 1 voice | `resynthesis.mode`       |
-| Formant        | Changes the vocal tract with an LPC model and aspiration    | Disabled       | `resynthesis.formant`    |
-| Alien          | Plays recent audio in reverse loops                         | Disabled       | `alien`                  |
-| Reverb         | Echo, Schroeder, SmallRoom, Binaural, MediumHall, LargeHall | Disabled       | `reverb`                 |
-| Output gain    | Linear gain, 0..=64                                         | 1              | `output_gain`            |
+| Stage          | Function                                                                        | Default        | Configuration field      |
+| -------------- | ------------------------------------------------------------------------------- | -------------- | ------------------------ |
+| Punch          | Input gain and transient enhancement                                            | Disabled       | `punch`                  |
+| Warm           | Asymmetric saturation and a 50 Hz high-pass filter                              | Disabled       | `warm`                   |
+| Pitch tracking | Finds the pitch of the voice                                                    | Enabled        | `resynthesis.pitch`      |
+| Correction     | Moves the pitch to the nearest permitted note                                   | Chromatic      | `resynthesis.correction` |
+| Voices         | Renders a choir (1 to 16 voices) or harmony (lead and 0–4) with a soft limiter | Choir, 1 voice | `resynthesis.mode`       |
+| Formant        | Changes the vocal tract with an LPC model and aspiration                        | Disabled       | `resynthesis.formant`    |
+| Alien          | Plays recent audio in reverse loops                                             | Disabled       | `alien`                  |
+| Reverb         | Echo, Schroeder, SmallRoom, Binaural, MediumHall, LargeHall                     | Disabled       | `reverb`                 |
+| Output gain    | Linear gain with symmetric PCM saturation, 0..=64                               | 1              | `output_gain`            |
 
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+dry path starts after Warm and has a delay of 1,543 frames. Choir and
+harmony normalize the voice headroom. A soft limiter shapes wet peaks
+above -3 dBFS before this dry mix.
 
 ### Harmony sources
 
