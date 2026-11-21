@@ -382,6 +382,10 @@ impl PitchTracker {
         }
         let maximum = ((self.detection_count - 6) / 2).min(acq_lags as i32 - 1) as usize;
         self.normalized[..maximum].fill(0);
+        #[allow(
+            clippy::needless_range_loop,
+            reason = "one lag index drives three tables in the hot loop"
+        )]
         for lag in 1..maximum {
             let mut energy = self.energy[lag];
             let mut cross = self.cross[lag];
