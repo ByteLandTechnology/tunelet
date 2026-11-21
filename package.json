@@ -30,11 +30,23 @@
   "scripts": {
     "build": "npm run build:wasm && npm run build:ts",
     "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-opt --features wasm --locked",
-    "build:ts": "tsc",
+    "build:ts": "node ./node_modules/typescript-native/bin/tsc",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "typecheck": "node ./node_modules/typescript-native/bin/tsc --noEmit",
     "prepack": "npm run build"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@eslint/json": "^2.1.1",
+    "@eslint/markdown": "^9.0.0",
     "@types/node": "^22.20.5",
-    "typescript": "^7.0.2"
+    "eslint": "^10.15.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-yml": "^3.10.0",
+    "prettier": "^3.10.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.73.0",
+    "typescript-native": "npm:typescript@^7.0.2"
   }
 }

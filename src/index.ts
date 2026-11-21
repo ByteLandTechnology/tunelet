@@ -71,9 +71,9 @@ async function initialize(
     // removes the type-only import. The runtime import runs only for `file:`
     // URLs.
     const moduleName = "node:fs/promises";
-    const fs: typeof import("node:fs/promises") = await import(
+    const fs = (await import(
       /* webpackIgnore: true */ /* @vite-ignore */ moduleName
-    );
+    )) as typeof import("node:fs/promises");
     return initSync({ module: await fs.readFile(input) });
   }
 
