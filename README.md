@@ -50,8 +50,8 @@ browsers and Node.js.
 - **No dependencies**: The default Rust build has no dependencies and uses
   only safe Rust.
 
-The input is mono signed 16-bit PCM at 44.1 kHz or 48 kHz. The output is
-stereo or mono 16-bit PCM.
+The input is mono signed 16-bit PCM or 32-bit float audio at 44.1 kHz or
+48 kHz. The output is stereo or mono 16-bit PCM or 32-bit float audio.
 
 ## Installation
 
@@ -143,14 +143,29 @@ const config = defaultConfig();
 config.resynthesis.pitchRatio = 1.25;
 const processor = new Tunelet(48000, 1024, config);
 
-const input = new Int16Array(1024);
-const left = new Int16Array(1024);
-const right = new Int16Array(1024);
-// Fill input with mono PCM before each call; reuse all three arrays.
-processor.process(input, left, right);
+const input = new Float32Array(1024);
+const left = new Float32Array(1024);
+const right = new Float32Array(1024);
+// Fill input with mono samples in -1..=1; reuse all three arrays.
+processor.processF32(input, left, right);
 
-// After all processing and optional drain calls:
+// After all blocks and optional drainF32 calls:
 processor.free();
+```
+
+### Web Audio
+
+```ts
+import { defaultConfig, loadTunelet } from "tunelet";
+import { createTuneletWorkletNode } from "tunelet/worklet";
+
+const context = new AudioContext({ sampleRate: 48000 });
+await loadTunelet();
+const config = defaultConfig();
+config.resynthesis.correction.retuneMs = 20;
+
+const node = await createTuneletWorkletNode(context, { config });
+sourceNode.connect(node).connect(context.destination);
 ```
 
 ## Signal chain
@@ -209,11 +224,19 @@ processor.
 
 Select the process function for your output layout:
 
-| Output layout                  | Function for input      | Function for the tail |
-| ------------------------------ | ----------------------- | --------------------- |
-| `[[i16; 2]]` stereo frames     | `process`               | `drain`               |
-| Separate left and right slices | `process_planar`        | `drain_planar`        |
-| Mono slice                     | `process_mono_in_place` | `drain_mono`          |
+| Output layout                     | Function for input          | Function for the tail |
+| --------------------------------- | --------------------------- | --------------------- |
+| `[[i16; 2]]` stereo frames        | `process`                   | `drain`               |
+| `[[f32; 2]]` stereo frames        | `process_f32`               | `drain_f32`           |
+| Separate `i16` left/right slices  | `process_planar`            | `drain_planar`        |
+| Separate `f32` left/right slices  | `process_planar_f32`        | `drain_planar_f32`    |
+| Mono `i16` slice                  | `process_mono_in_place`     | `drain_mono`          |
+| Mono `f32` slice                  | `process_mono_in_place_f32` | `drain_mono_f32`      |
+
+Each `f32` input sample maps `NaN` to zero, clamps to `-1.0..=1.0` and
+quantizes into the fixed-point chain. Each rendered `i16` sample scales by
+`1.0 / 32768.0` into `f32` output, and unused `f32` drain frames contain
+`0.0`.
 
 These rules apply to each call:
 
@@ -352,21 +375,28 @@ For `wasm32-unknown-unknown`, the optional `wasm` feature of the crate gives
 JavaScript bindings and generated TypeScript declarations. The npm package
 contains these bindings.
 
-The npm package is one ES module for both browsers and Node.js. It contains
-these items:
+The npm package has zero runtime dependencies and uses ES modules for both
+browsers and Node.js. It contains these items:
 
 - One Wasm binary.
-- The generated bindings.
-- A shared `loadTunelet` entry point.
+- The generated bindings (`tunelet` and `tunelet/wasm`).
+- The main-thread loaders (`loadTunelet` and `loadTuneletModule`).
+- The `AudioWorklet` node and processor (`tunelet/worklet` and
+  `tunelet/worklet-processor`).
 
 ### Load the module
 
-Both environments use the same imports and the same initialization call. An
-import of the package does not load the binary. Call `loadTunelet()` before
-you use `Tunelet` or `defaultConfig()`.
+An import of the package does not load the binary. Call `loadTunelet()` before
+you use `Tunelet` or `defaultConfig()`. To compile a `WebAssembly.Module` on
+the main thread for `AudioWorklet` or custom instantiation, call
+`loadTuneletModule()`.
 
 - Node.js reads the packaged binary from a file URL relative to the module.
-- Browsers fetch the served Wasm asset.
+- Browsers fetch and compile the served Wasm asset on the main thread.
+- In `AudioWorkletGlobalScope`, a call to `loadTunelet()` or
+  `loadTuneletModule()` with no source rejects with an `Error` and does not
+  call `fetch()`. Give a `WebAssembly.Module` or `BufferSource`, or call
+  `initSync({ module })`.
 
 Concurrent calls share one initialization promise. The package keeps the
 result of a successful initialization. If a load fails, the promise rejects,
@@ -406,33 +436,59 @@ page that opens the JavaScript.
 
 ### TypeScript API
 
-| Operation                         | TypeScript API                                           |
-| --------------------------------- | -------------------------------------------------------- |
-| Shared initialization             | `loadTunelet(source?)`                                   |
-| Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
-| In-place mono downmix             | `processMono(audio, events?)`                            |
-| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
-| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
-| Feedback                          | `feedback()`, `takeFeedback()`                           |
-| Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
-| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`         |
-| Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)` |
-| Configured tail budget            | `tailFrames()`                                           |
-| Reset or release memory           | `reset()`, `free()`                                      |
+| Operation                         | TypeScript API                                                   |
+| --------------------------------- | ---------------------------------------------------------------- |
+| Shared initialization             | `loadTunelet(source?)`, `loadTuneletModule(source?)`             |
+| Web Audio worklet node            | `createTuneletWorkletNode(context, options?)`                    |
+| Mono PCM to planar stereo         | `process(input, left, right, events?)`                           |
+| Mono Float32 to planar stereo     | `processF32(input, left, right, events?)`                        |
+| In-place mono downmix             | `processMono(audio, events?)`, `processMonoF32(audio, events?)`  |
+| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`               |
+| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`                  |
+| Feedback                          | `feedback()`, `takeFeedback()`                                   |
+| Telemetry                         | `telemetry()`, `takeTelemetry()`                                 |
+| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`                 |
+| Finite PCM tail                   | `beginDrain()`, `drain(left, right)`, `drainMono(audio)`         |
+| Finite Float32 tail               | `beginDrain()`, `drainF32(left, right)`, `drainMonoF32(audio)`   |
+| Configured tail budget            | `tailFrames()`                                                   |
+| Reset or release memory           | `reset()`, `free()`                                              |
 
 ### Audio buffers
 
-All audio buffers are `Int16Array` buffers, and they must fit in the prepared
-frame limit. These rules apply:
+Audio buffers are `Int16Array` or `Float32Array` buffers, and they must fit in
+the prepared frame limit. `Float32Array` inputs map `NaN` to zero, clamp values
+to `-1.0..=1.0` and quantize into the fixed-point chain. `Float32Array` outputs
+scale each rendered `i16` sample by `1.0 / 32768.0`, and unused drain frames
+contain `0.0`.
+
+These rules apply to all audio buffers:
 
 - Stereo output arrays must not overlap.
 - The input can overlap an output, because the binding copies the input
   first.
-- Buffers must stay attached during each call.
+- Buffers must stay attached until each call is complete.
 
-Web Audio uses Float32 samples, which you must convert to and from 16-bit
-PCM. This package does not install an AudioWorklet or an integration with an
-audio device.
+### AudioWorklet
+
+`tunelet/worklet` exports `createTuneletWorkletNode` and `TuneletWorkletNode`.
+`tunelet/worklet-processor` exports `TuneletWorkletProcessor` and registers
+`"tunelet-processor"` in `AudioWorkletGlobalScope`.
+
+`createTuneletWorkletNode(context, options?)` checks that `context.sampleRate`
+is `44100` or `48000` before it loads Wasm or registers the worklet module. It
+compiles the Wasm binary on the main thread, registers the worklet module one
+time on `context` and passes the `WebAssembly.Module` in `processorOptions`.
+Inside the worklet, `TuneletWorkletProcessor` initializes synchronously with
+`initSync` and processes `Float32Array` inputs in chunks of at most
+`maxBlockFrames` frames (128 by default).
+
+Mono inputs go directly to the processor, stereo inputs mix to mono with equal
+weights and disconnected inputs write zeros. `TuneletWorkletNode` provides
+Promise methods over `MessagePort`: `config()`, `setConfig(config)`,
+`sendMidi(event, offset?)`, `sendCorrectionMidi(event, offset?)`,
+`sendEvents(events)`, `beginDrain()`, `tailFrames()`, `feedback()`,
+`takeFeedback()`, `telemetry()`, `takeTelemetry()`,
+`formantEnvelope(maxFrequencyHz, points)`, `reset()` and `dispose()`.
 
 ### Configuration objects
 
@@ -495,10 +551,10 @@ call with more points than before reserve memory.
 
 ### Memory allocation
 
-The constructor allocates reusable PCM buffers. A successful call that
-processes audio without events does not allocate new Rust PCM storage.
-However, the call copies the audio across the boundary between JavaScript and
-Wasm. These items can allocate:
+The constructor allocates reusable `Vec<i16>` and `Vec<f32>` buffers in Wasm
+memory. A successful call that processes audio without events does not allocate
+new Rust audio storage. However, the call copies the audio across the boundary
+between JavaScript and Wasm. These items can allocate:
 
 - Object conversion.
 - Supplied events.
@@ -506,10 +562,11 @@ Wasm. These items can allocate:
 - Feedback and telemetry.
 - The formant envelopes.
 
-The generated glue can also make temporary views. This binding is for general
-use, and it does not guarantee hard real-time behavior for allocation or
-scheduling. Drain completion and reset keep the same state as the equivalent
-Rust functions.
+The generated JavaScript glue can also make temporary views when it copies
+data. Thus, this generic binding does not guarantee an `AudioWorklet` callback
+that is free of JavaScript allocation. Drain completion and reset keep the same
+state as the equivalent Rust functions. When you do not need a processor any
+more, call `free()` on `Tunelet` or `dispose()` on `TuneletWorkletNode`.
 
 ## Build from source
 

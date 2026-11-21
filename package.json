@@ -15,6 +15,14 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./worklet": {
+      "types": "./dist/worklet.d.ts",
+      "import": "./dist/worklet.js"
+    },
+    "./worklet-processor": {
+      "types": "./dist/worklet-processor.d.ts",
+      "import": "./dist/worklet-processor.js"
+    },
     "./wasm": {
       "types": "./pkg/tunelet.d.ts",
       "import": "./pkg/tunelet.js"
@@ -26,7 +34,10 @@
     "pkg/tunelet.d.ts",
     "pkg/tunelet_bg.wasm"
   ],
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/text-codec.js",
+    "./dist/worklet-processor.js"
+  ],
   "scripts": {
     "build": "npm run build:wasm && npm run build:ts",
     "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-opt --features wasm --locked",

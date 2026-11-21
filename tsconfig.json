@@ -11,5 +11,10 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "include": ["src/index.ts"]
+  "include": [
+    "src/index.ts",
+    "src/text-codec.ts",
+    "src/worklet.ts",
+    "src/worklet-processor.ts"
+  ]
 }
