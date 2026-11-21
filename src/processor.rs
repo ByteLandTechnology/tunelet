@@ -878,10 +878,12 @@ pub struct Telemetry {
     /// The reverse reader is two times this number of frames behind the
     /// recording position. The value advances also while Alien is disabled.
     pub alien_phase_frames: u32,
-    /// The wrapping count of formant analyses since construction.
+    /// The wrapping generation of the formant model at the synthesis
+    /// position.
     ///
-    /// The count increases every 441 frames while the formant stage is
-    /// enabled. Compare two values to find if
-    /// [`Processor::formant_envelope`] can give a new result.
+    /// If the formant stage is disabled or has no synthesis model at the read
+    /// position, the value is zero. If a new analysis reaches that position
+    /// or width or stretch changes, the value increases. Compare two values
+    /// to find if [`Processor::formant_envelope`] has a new result.
     pub formant_generation: u32,
 }

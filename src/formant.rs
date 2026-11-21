@@ -163,12 +163,19 @@ pub(crate) struct Formant {
     /// The Q14 coefficient banks for the inverse filter. Only the first ORDER
     /// coefficients are used.
     inverse: Vec<[i32; MAX_ORDER]>,
+    /// The Q14 reflection coefficients for each bank. A configuration change
+    /// uses them to build the forward filter again.
+    parcor: Vec<[i32; ORDER]>,
+    /// `true` for each bank that holds valid reflection coefficients.
+    valid_parcor: [bool; BANKS],
     /// The Q14 coefficient banks for the forward filter. `orders` holds the
     /// active lengths.
     models: Vec<[i32; MAX_ORDER]>,
     /// The valid synthesis order for each bank. Zero means that there is no
     /// feedback model.
     orders: [usize; BANKS],
+    /// The wrapping design count for each bank.
+    bank_generation: [u32; BANKS],
     /// One record of a bank pair and a blend for each frame of input history.
     stamps: Vec<Stamp>,
     /// The index of the current coefficient bank.
@@ -230,9 +237,10 @@ pub(crate) struct Formant {
     /// The Q14 compensation, from the aspiration cutoff divided by the
     /// sample rate.
     noise_amplitude: i32,
-    /// The wrapping count of model designs that the stage tried. Only the
-    /// telemetry reads it.
+    /// The wrapping count of valid model designs.
     generation: u32,
+    /// The wrapping count of configuration rebuilds of active models.
+    config_generation: u32,
 }
 
 impl Formant {
@@ -251,8 +259,11 @@ impl Formant {
             input: vec![0; HISTORY_FRAMES],
             temporary: vec![0_i32; (2 * (rate.as_u32() as usize / 40) + MAX_ORDER + 256).max(2865)],
             inverse: vec![[0; MAX_ORDER]; BANKS],
+            parcor: vec![[0; ORDER]; BANKS],
+            valid_parcor: [false; BANKS],
             models: vec![[0; MAX_ORDER]; BANKS],
             orders: [0; BANKS],
+            bank_generation: [0; BANKS],
             stamps: vec![Stamp::default(); HISTORY_FRAMES],
             current: BANKS - 1,
             previous: 0,
@@ -277,18 +288,21 @@ impl Formant {
             noise_gain: 0_i32,
             noise_amplitude: 0_i32,
             generation: 0,
+            config_generation: 0,
         };
         result.set_config(config);
         result.reset();
         result
     }
     /// Quantizes the validated controls, prepares the Q7 map for the area
-    /// interpolation and updates the coefficients of the aspiration filter.
+    /// interpolation, rebuilds active models and updates the aspiration
+    /// filter.
     ///
-    /// The histories do not change. A valid stretch gives a model with 25 to
-    /// 99 entries. Thus, the last point of the map and the denominators of
-    /// the interpolation are always defined.
+    /// The audio histories do not change. A valid stretch gives a model with
+    /// 25 to 99 entries. Thus, the last point of the map and the denominators
+    /// of the interpolation are always defined.
     pub(crate) fn set_config(&mut self, config: FormantConfig) {
+        let rebuild = self.config.width != config.width || self.config.stretch != config.stretch;
         self.config = config;
         self.width = (config.width as f64 * 16384.0) as i32;
         self.width_squared = (config.width as f64 * config.width as f64 * 16384.0) as i32;
@@ -300,6 +314,18 @@ impl Formant {
             self.stretch_map[i] = ((ORDER - 1) as f64 * fraction * 128.0) as i32;
         }
         self.stretch_map[self.stretch_count - 1] = ((ORDER - 1) * 128) as i32;
+        if rebuild {
+            let mut changed = false;
+            for bank in 0..BANKS {
+                if self.valid_parcor[bank] {
+                    self.build_model(bank);
+                    changed = true;
+                }
+            }
+            if changed {
+                self.config_generation = self.config_generation.wrapping_add(1);
+            }
+        }
         self.noise_gain = (config.aspiration_mix as f64 * 16384.0) as i32;
         let frequency = (config.aspiration_cutoff_hz as i32)
             .min((self.rate.hz() as f64 * 0.48) as i32)
@@ -384,9 +410,53 @@ impl Formant {
         }
         self.blend = 0;
         self.inverse[self.current].fill(0_i32);
-
+        self.parcor[self.current].fill(0_i32);
+        self.valid_parcor[self.current] = false;
         self.models[self.current].fill(0_i32);
         self.orders[self.current] = 0;
+        self.bank_generation[self.current] = 0;
+    }
+    /// Builds the synthesis model of `bank` from its cached reflection
+    /// coefficients and the active width and stretch controls.
+    fn build_model(&mut self, bank: usize) {
+        let one = 16384;
+        self.models[bank].fill(0_i32);
+        self.orders[bank] = 0;
+        if self.width != one || self.stretch != one {
+            if let Some(scale) = lpc::parcor_to_areas(&self.parcor[bank], &mut self.areas) {
+                for i in 0..self.stretch_count {
+                    let map = self.stretch_map[i];
+                    let index = map.wrapping_shr(7).min((ORDER - 2) as i32) as usize;
+                    let fraction = map.wrapping_sub((index as i32) << 7).wrapping_shl(7);
+                    self.stretched_areas[i] = mul14(
+                        mul14(one.wrapping_sub(fraction), self.areas[index])
+                            .wrapping_add(mul14(fraction, self.areas[index + 1])),
+                        self.width_squared,
+                    );
+                    if self.stretched_areas[i] == 0_i32 {
+                        self.stretched_areas[i] = 1;
+                    }
+                }
+                let mut parcor = [0; MAX_ORDER];
+                let mut scratch = [0; 112];
+                if lpc::areas_to_parcor(
+                    &self.stretched_areas[..self.stretch_count],
+                    &mut parcor,
+                    scale,
+                ) {
+                    lpc::parcor_to_pef(
+                        &parcor[..self.stretch_count],
+                        &mut self.models[bank],
+                        &mut scratch,
+                        14,
+                    );
+                    self.orders[bank] = self.stretch_count;
+                }
+            }
+        } else {
+            self.models[bank][..ORDER].copy_from_slice(&self.inverse[bank][..ORDER]);
+            self.orders[bank] = ORDER;
+        }
     }
     /// Calculates the average of a maximum of two autocorrelation vectors. It
     /// does not allocate memory.
@@ -564,54 +634,22 @@ impl Formant {
             // inverse coefficients can stay in the bank. But the synthesis
             // order stays zero until all necessary model changes complete.
             self.next_filter();
-            self.generation = self.generation.wrapping_add(1);
             let design_gain = ((db_to_gain(-60.0) + 1.0) * 16384.0) as i32;
             correlations[0] = mul14(correlations[0], design_gain).wrapping_add(200);
-            let mut parcor = [0; MAX_ORDER];
             let mut scratch = [0; 112];
 
             let valid = lpc::durbin(
                 &correlations,
                 &mut self.inverse[self.current][..ORDER],
-                &mut parcor,
+                &mut self.parcor[self.current],
                 &mut scratch,
             );
 
             if valid {
-                if self.width != one || self.stretch != one {
-                    if let Some(scale) = lpc::parcor_to_areas(&parcor[..ORDER], &mut self.areas) {
-                        for i in 0..self.stretch_count {
-                            let map = self.stretch_map[i];
-                            let index = map.wrapping_shr(7).min((ORDER - 2) as i32) as usize;
-                            let fraction = map.wrapping_sub((index as i32) << 7).wrapping_shl(7);
-                            self.stretched_areas[i] = mul14(
-                                mul14(one.wrapping_sub(fraction), self.areas[index])
-                                    .wrapping_add(mul14(fraction, self.areas[index + 1])),
-                                self.width_squared,
-                            );
-                            if self.stretched_areas[i] == 0_i32 {
-                                self.stretched_areas[i] = 1;
-                            }
-                        }
-                        if lpc::areas_to_parcor(
-                            &self.stretched_areas[..self.stretch_count],
-                            &mut parcor,
-                            scale,
-                        ) {
-                            lpc::parcor_to_pef(
-                                &parcor[..self.stretch_count],
-                                &mut self.models[self.current],
-                                &mut scratch,
-                                14,
-                            );
-                            self.orders[self.current] = self.stretch_count;
-                        }
-                    }
-                } else {
-                    self.models[self.current][..ORDER]
-                        .copy_from_slice(&self.inverse[self.current][..ORDER]);
-                    self.orders[self.current] = ORDER;
-                }
+                self.valid_parcor[self.current] = true;
+                self.generation = self.generation.wrapping_add(1);
+                self.bank_generation[self.current] = self.generation;
+                self.build_model(self.current);
             } else {
                 self.smooth_reset = true;
             }
@@ -697,9 +735,17 @@ impl Formant {
         }
         order
     }
-    /// Returns the wrapping count of model designs that the stage tried.
-    pub(crate) fn generation(&self) -> u32 {
-        self.generation
+    /// Returns the generation of the synthesis model at a signed history
+    /// frame. If the stamp has no synthesis model, the result is zero.
+    pub(crate) fn generation(&self, position: i32) -> u32 {
+        let stamp = self.stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
+        if self.orders[stamp.current] != 0 {
+            self.bank_generation[stamp.current].wrapping_add(self.config_generation)
+        } else if stamp.blend < 16384 && self.orders[stamp.previous] != 0 {
+            self.bank_generation[stamp.previous].wrapping_add(self.config_generation)
+        } else {
+            0
+        }
     }
     /// Finds and blends the analysis coefficients of the stamp at a signed
     /// history frame, in the same way as [`Self::coefficients`].

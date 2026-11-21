@@ -300,7 +300,8 @@ The telemetry includes these items:
 - The peaks of the input, of the two output channels and of the reverb wet
   signal.
 - The pitch clarity, which is a confidence score from 0 to 1.
-- The current gains of Punch and Warm, and the position in the Alien loop.
+- The current gains of Punch and Warm, the position in the Alien loop and
+  the formant generation.
 
 The peak windows of the telemetry are independent of the peak window of the
 feedback. The latency is nominal. Dry mixes, resampled voices and effects
@@ -312,8 +313,10 @@ have different timing.
 - The envelope after the width and stretch controls.
 
 The values are linear and have no absolute level. The formant stage must be
-enabled. The envelopes are those of the model that the audio used for the
-last frame. The method returns `Result<bool, Error>`:
+enabled. The envelopes come from the model at the synthesis position of the
+last frame. If `resynthesis.formant.width` or `resynthesis.formant.stretch`
+changes, active models rebuild immediately and `formant_generation`
+increases. The method returns `Result<bool, Error>`:
 
 | Result      | Description                                                      |
 | ----------- | ---------------------------------------------------------------- |
