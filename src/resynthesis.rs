@@ -1044,12 +1044,12 @@ impl Resynthesis {
         }
     }
 
-    /// Advances one Q14 reader by its ratio and keeps it near the writer.
+    /// Returns the upper limit, the lower limit and the Q14 period jump for a
+    /// reader.
     ///
-    /// If the reader gets to one of the two limits, it jumps by one Q6 pitch
-    /// period, saves the old position and starts the crossfade of that voice.
-    fn move_reader(&mut self, voice: usize, ratio: Q14, period: Q6, offset: i32) -> Q14 {
-        let mut position = self.positions[voice] + ratio;
+    /// `offset` is an integer voice delay behind the writer.
+    #[inline]
+    fn reader_bounds(&self, period: Q6, offset: i32) -> (Q14, Q14, Q14) {
         let write = self.write as i32;
         let upper = position_of(write - 40 - offset);
         let span = (period.to_bits() >> 6).wrapping_mul(12).wrapping_div(10);
@@ -1059,21 +1059,60 @@ impl Resynthesis {
                 .wrapping_sub(40)
                 .wrapping_sub(offset),
         );
+        (upper, lower, period.rescale())
+    }
+
+    /// Advances one Q14 reader by its ratio and keeps it in `bounds`.
+    ///
+    /// `bounds` holds the upper limit, the lower limit and the Q14 period
+    /// jump. `voice` must identify an allocated reader slot. If the reader
+    /// jumps, the function saves the old position and starts the crossfade of
+    /// that voice.
+    #[inline]
+    fn step_reader(&mut self, voice: usize, ratio: Q14, bounds: (Q14, Q14, Q14)) -> Q14 {
+        let (upper, lower, jump) = bounds;
+        let mut position = self.positions[voice] + ratio;
         if position >= upper {
-            if period != Q6::ZERO || self.old_positions[voice] == position {
+            if jump != Q14::ZERO || self.old_positions[voice] == position {
                 self.old_positions[voice] = position;
                 self.fades[voice] = Q14::ZERO;
             }
-            position = position - period.rescale();
+            position = position - jump;
         } else if position <= lower {
-            if period != Q6::ZERO || self.old_positions[voice] == position {
+            if jump != Q14::ZERO || self.old_positions[voice] == position {
                 self.old_positions[voice] = position;
                 self.fades[voice] = Q14::ZERO;
             }
-            position = position + period.rescale();
+            position = position + jump;
         }
         self.positions[voice] = position;
         position
+    }
+
+    /// Advances one Q14 reader by its ratio and keeps it near the writer.
+    ///
+    /// If the reader gets to one of the two limits, it jumps by one Q6 pitch
+    /// period, saves the old position and starts the crossfade of that voice.
+    fn move_reader(&mut self, voice: usize, ratio: Q14, period: Q6, offset: i32) -> Q14 {
+        let bounds = self.reader_bounds(period, offset);
+        self.step_reader(voice, ratio, bounds)
+    }
+
+    /// Returns `true` if harmony `voice` adds zero to the two stereo channels.
+    #[inline]
+    fn is_harmony_voice_silent(&self, voice: usize, stereo_fade: Q14) -> bool {
+        if self.harmony_gains[voice] == Q12::ZERO {
+            return true;
+        }
+        let pan = self.harmony_pan[voice];
+        let pan_zero = (pan[0].to_bits() | pan[1].to_bits()) == 0;
+        if stereo_fade == Q14::ONE {
+            pan_zero
+        } else if stereo_fade == Q14::ZERO {
+            self.harmony_gain == Q14::ZERO
+        } else {
+            self.harmony_gain == Q14::ZERO && pan_zero
+        }
     }
 
     /// Returns `true` if all taps at and after `min_center` in `filtered` match
@@ -1434,17 +1473,18 @@ impl Resynthesis {
             self.control_counter += 1;
             if counter == CONTROL_DUE {
                 self.control_counter = 0;
+                let corrected_period = if ratio == Q14::ZERO {
+                    Q6::ZERO
+                } else {
+                    period.div(ratio)
+                };
                 for voice in 0..HARMONY_VOICES {
-                    let corrected_period = if ratio == Q14::ZERO {
-                        Q6::ZERO
-                    } else {
-                        period.div(ratio)
-                    };
-                    let (ratio, gain) = self.harmony.advance_voice(corrected_period, voice);
-                    self.harmony_ratios[voice] = ratio;
+                    let (voice_ratio, gain) = self.harmony.advance_voice(corrected_period, voice);
+                    self.harmony_ratios[voice] = voice_ratio;
                     self.harmony_gains[voice] = gain;
                 }
             }
+            let bounds = self.reader_bounds(period, 0);
             let mut slot_positions = [Q14::ZERO; 5];
             let mut slot_fades = [Q14::ONE; 5];
             let mut min_center = i32::MAX;
@@ -1461,13 +1501,24 @@ impl Resynthesis {
                 final_ratio = current;
                 self.voice_ratios[slot] = current;
                 self.old_positions[slot] = self.old_positions[slot] + current;
-                let position = self.move_reader(slot, current, period, 0);
+                let position = self.step_reader(slot, current, bounds);
                 let fade = self.fades[slot];
                 if fade < Q14::ONE {
                     self.fades[slot] = (fade + FADE_STEP).min(Q14::ONE);
                 }
                 slot_positions[slot] = position;
                 slot_fades[slot] = fade;
+                // If the voice adds zero to the two channels, do not read the
+                // audio history.
+                if slot > 0 && self.is_harmony_voice_silent(slot - 1, stereo_fade) {
+                    if (self.filtered_valid as usize) < HISTORY {
+                        min_center = min_center.min(history::center(position));
+                        if fade < Q14::ONE {
+                            min_center = min_center.min(history::center(self.old_positions[slot]));
+                        }
+                    }
+                    continue;
+                }
                 let (mut value, center) = history::interpolation(&self.filtered, position);
                 min_center = min_center.min(center);
                 if fade < Q14::ONE {
@@ -1515,6 +1566,9 @@ impl Resynthesis {
                 let raw_shift = position_of(OVERLAP_FRAMES as i32);
                 let mut raw_mix = [Q14::ZERO; 2];
                 for slot in 0..5 {
+                    if slot > 0 && self.is_harmony_voice_silent(slot - 1, stereo_fade) {
+                        continue;
+                    }
                     let (mut value, _) =
                         history::interpolation(&self.raw, slot_positions[slot] - raw_shift);
                     let fade = slot_fades[slot];
