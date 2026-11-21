@@ -65,6 +65,8 @@ pub(crate) struct PitchTracker {
     /// A request to clear the acquisition tables at the next decimated input
     /// sample.
     first: bool,
+    /// The number of frames in `raw` since construction or the last reset.
+    written: u16,
     /// Low-pass filtered and decimated Q14 audio, with space for two maximum
     /// acquisition lags.
     detection: [i32; 2 * ACQUISITION_LAGS],
@@ -120,6 +122,7 @@ impl PitchTracker {
             write: 0,
             detecting: true,
             first: true,
+            written: 0,
             detection: [0; 2 * ACQUISITION_LAGS],
             detection_index: 0,
             detection_count: 0,
@@ -148,7 +151,13 @@ impl PitchTracker {
     /// The acquisition tables clear at the next decimated call. The previous
     /// usable period stays until another tracking update replaces it.
     pub(crate) fn reset(&mut self) {
-        self.raw.fill(0);
+        let written = usize::from(self.written);
+        if written == HISTORY {
+            self.raw.fill(0);
+        } else {
+            self.raw[1..written + 1].fill(0);
+        }
+        self.written = 0;
         self.write = 0;
         self.restart();
         for pre in &mut self.pre {
@@ -329,7 +338,7 @@ impl PitchTracker {
         }
         let maximum = ((self.detection_count - 6) / 2).min(ACQUISITION_LAGS as i32 - 1) as usize;
         let mut normalized = [0_i32; ACQUISITION_LAGS];
-        #[expect(
+        #[allow(
             clippy::needless_range_loop,
             reason = "one lag index drives three tables in the hot loop"
         )]
@@ -562,6 +571,9 @@ impl PitchTracker {
         if self.write == HISTORY {
             self.write = 0;
         }
+        if usize::from(self.written) < HISTORY {
+            self.written += 1;
+        }
         self.raw[self.write] = sample;
         let mut filtered = Q14::from_bits(sample);
         for pre in &mut self.pre {
@@ -633,46 +645,55 @@ impl PitchTracker {
                             .wrapping_sub(mul14(first, first).wrapping_add(mul14(second, second)));
                         self.tracking_cross[0] = self.cross_at(self.base);
                     } else if best > 21 {
-                        self.base += 1;
-                        best -= 1;
-                        self.tracking_energy.copy_within(1..TRACKING_LAGS, 0);
-                        self.tracking_cross.copy_within(1..TRACKING_LAGS, 0);
-                        let total = self.base + TRACKING_LAGS as i32 - 1;
-                        let first = self.raw[ring(self.write as i32 - total * 2 + 2)];
-                        let second = self.raw[ring(self.write as i32 - total * 2 + 1)];
-                        self.tracking_energy[TRACKING_LAGS - 1] = self.tracking_energy
-                            [TRACKING_LAGS - 2]
-                            .wrapping_add(mul14(second, second).wrapping_add(mul14(first, first)));
-                        self.tracking_cross[TRACKING_LAGS - 1] = self.cross_at(total);
+                        let next_base = self.base + 1;
+                        if next_base + TRACKING_LAGS as i32 > (HISTORY / 2) as i32 {
+                            self.restart();
+                            step.restarted = true;
+                        } else {
+                            self.base = next_base;
+                            best -= 1;
+                            self.tracking_energy.copy_within(1..TRACKING_LAGS, 0);
+                            self.tracking_cross.copy_within(1..TRACKING_LAGS, 0);
+                            let total = self.base + TRACKING_LAGS as i32 - 1;
+                            let first = self.raw[ring(self.write as i32 - total * 2 + 2)];
+                            let second = self.raw[ring(self.write as i32 - total * 2 + 1)];
+                            self.tracking_energy[TRACKING_LAGS - 1] =
+                                self.tracking_energy[TRACKING_LAGS - 2].wrapping_add(
+                                    mul14(second, second).wrapping_add(mul14(first, first)),
+                                );
+                            self.tracking_cross[TRACKING_LAGS - 1] = self.cross_at(total);
+                        }
                     }
-                    let y0 = (self.tracking_energy[best - 1] >> 1)
-                        .wrapping_sub(self.tracking_cross[best - 1]);
-                    let y1 =
-                        (self.tracking_energy[best] >> 1).wrapping_sub(self.tracking_cross[best]);
-                    let y2 = (self.tracking_energy[best + 1] >> 1)
-                        .wrapping_sub(self.tracking_cross[best + 1]);
-                    let mut numerator = y0.wrapping_sub(y2) >> 1;
-                    let mut denominator = y1.wrapping_mul(-2).wrapping_add(y0).wrapping_add(y2);
-                    let abs = numerator.wrapping_abs();
-                    if abs > ONE {
-                        let sh0 = 31 - ((abs as u32) >> 14).leading_zeros();
-                        let sh = sh0 + u32::from((numerator >> sh0).wrapping_abs() > ONE);
-                        numerator >>= sh;
-                        denominator >>= sh;
-                    }
-                    if denominator == 0 {
-                        self.restart();
-                        step.restarted = true;
-                    } else {
-                        let fraction = numerator.wrapping_shl(14).wrapping_div(denominator);
-                        // The lag in Q8 plus the parabolic fraction
-                        // (Q14 >> 6), rounded to Q6.
-                        let lag = self.base.wrapping_add(best as i32).wrapping_shl(8);
-                        self.period =
-                            Q6::from_bits(lag.wrapping_add(fraction >> 6).wrapping_add(2) >> 2);
-                        self.previous_period = self.period;
-                        self.best = best;
-                        step.tracking_update = true;
+                    if !self.detecting {
+                        let y0 = (self.tracking_energy[best - 1] >> 1)
+                            .wrapping_sub(self.tracking_cross[best - 1]);
+                        let y1 = (self.tracking_energy[best] >> 1)
+                            .wrapping_sub(self.tracking_cross[best]);
+                        let y2 = (self.tracking_energy[best + 1] >> 1)
+                            .wrapping_sub(self.tracking_cross[best + 1]);
+                        let mut numerator = y0.wrapping_sub(y2) >> 1;
+                        let mut denominator = y1.wrapping_mul(-2).wrapping_add(y0).wrapping_add(y2);
+                        let abs = numerator.wrapping_abs();
+                        if abs > ONE {
+                            let sh0 = 31 - ((abs as u32) >> 14).leading_zeros();
+                            let sh = sh0 + u32::from((numerator >> sh0).wrapping_abs() > ONE);
+                            numerator >>= sh;
+                            denominator >>= sh;
+                        }
+                        if denominator == 0 {
+                            self.restart();
+                            step.restarted = true;
+                        } else {
+                            let fraction = numerator.wrapping_shl(14).wrapping_div(denominator);
+                            // The lag in Q8 plus the parabolic fraction
+                            // (Q14 >> 6), rounded to Q6.
+                            let lag = self.base.wrapping_add(best as i32).wrapping_shl(8);
+                            self.period =
+                                Q6::from_bits(lag.wrapping_add(fraction >> 6).wrapping_add(2) >> 2);
+                            self.previous_period = self.period;
+                            self.best = best;
+                            step.tracking_update = true;
+                        }
                     }
                 }
             }
