@@ -32,12 +32,12 @@ pub enum Error {
         /// The problem with the field.
         problem: ConfigProblem,
     },
-    /// A buffer length is not equal to the input length or to the length of
-    /// the other output channel.
+    /// A buffer length is not equal to the expected length.
     BufferLength {
-        /// The necessary slice length. For `[[i16; 2]]`, this is the number of
-        /// stereo frames. For planar or mono audio, it is the number of samples
-        /// for each channel.
+        /// The necessary slice length. For `[[i16; 2]]` or `[[f32; 2]]`, this
+        /// is the number of stereo frames. For planar or mono audio, it is the
+        /// number of samples for each channel. For meter slices, it is the
+        /// fixed field count.
         expected: usize,
         /// The actual slice length, in the same units as `expected`.
         actual: usize,
@@ -60,6 +60,7 @@ pub enum Error {
     ///
     /// The causes are:
     ///
+    /// - a byte slice whose length is not a multiple of three
     /// - a status byte below 0x80
     /// - a data byte above 127
     /// - a typed event with a channel, note or velocity out of range.

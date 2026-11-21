@@ -50,8 +50,8 @@ browsers and Node.js.
 - **No dependencies**: The default Rust build has no dependencies and uses
   only safe Rust.
 
-The input is mono signed 16-bit PCM at 44.1 kHz or 48 kHz. The output is
-stereo or mono 16-bit PCM.
+The input is mono signed 16-bit PCM or `f32` audio at 44.1 kHz or 48 kHz. The
+output is stereo or mono 16-bit PCM or `f32` audio.
 
 ## Installation
 
@@ -209,11 +209,14 @@ processor.
 
 Select the process function for your output layout:
 
-| Output layout                  | Function for input      | Function for the tail |
-| ------------------------------ | ----------------------- | --------------------- |
-| `[[i16; 2]]` stereo frames     | `process`               | `drain`               |
-| Separate left and right slices | `process_planar`        | `drain_planar`        |
-| Mono slice                     | `process_mono_in_place` | `drain_mono`          |
+| Output layout                        | Function for input          | Function for the tail |
+| ------------------------------------ | --------------------------- | --------------------- |
+| `[[i16; 2]]` stereo frames           | `process`                   | `drain`               |
+| `[[f32; 2]]` stereo frames           | `process_f32`               | `drain_f32`           |
+| Separate `i16` left and right slices | `process_planar`            | `drain_planar`        |
+| Separate `f32` left and right slices | `process_planar_f32`        | `drain_planar_f32`    |
+| Mono `i16` slice                     | `process_mono_in_place`     | `drain_mono`          |
+| Mono `f32` slice                     | `process_mono_in_place_f32` | `drain_mono_f32`      |
 
 These rules apply to each call:
 
@@ -241,8 +244,10 @@ events. A stage event replaces all settings of that stage. To change one
 field, start from `processor.config()`.
 
 Harmony MIDI uses `ControlEvent::Midi`. MIDI for the correction keyboard uses
-`ControlEvent::CorrectionMidi`. For example, this event starts a harmony note
-at frame 256:
+`ControlEvent::CorrectionMidi`. To apply packed 3-byte MIDI messages directly
+between blocks, call `processor.apply_midi(bytes)` or
+`processor.apply_correction_midi(bytes)`. For example, this event starts a
+harmony note at frame 256:
 
 ```rust
 use tunelet::{ControlEvent, MidiEvent, TimedEvent};
@@ -290,8 +295,10 @@ These calls read the state of the processor. They do not change the audio.
 | -------------------- | ----------------------------------------------------------------- |
 | `feedback()`         | The pitch, the stereo peak, the correction ratio, the frame count |
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
+| `write_feedback()`   | Writes the eight feedback fields into an `f32` slice              |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
+| `write_telemetry()`  | Writes the 45 telemetry fields into an `f32` slice                |
 | `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
 
@@ -352,12 +359,12 @@ For `wasm32-unknown-unknown`, the optional `wasm` feature of the crate gives
 JavaScript bindings and generated TypeScript declarations. The npm package
 contains these bindings.
 
-The npm package is one ES module for both browsers and Node.js. It contains
-these items:
+The npm package is one ES module for browsers, `AudioWorkletGlobalScope` and
+Node.js. It contains these items:
 
 - One Wasm binary.
-- The generated bindings.
-- A shared `loadTunelet` entry point.
+- The generated bindings and an internal UTF-8 fallback.
+- The `loadTunelet` and `initTuneletSync` entry points.
 
 ### Load the module
 
@@ -386,11 +393,14 @@ rules. The first concurrent call selects the source. Later arguments do not
 replace an initialized module. A custom binary must match the generated
 bindings.
 
-The package root also exports `loadTunelet` as its default export. For direct
-control of Wasm initialization, `tunelet/wasm` gives the generated default
-initializer and `initSync`. The package root re-exports `initSync` too. Use
-only one initialization entry point for each module instance. The package
-gives only ESM exports. CommonJS applications can use `await import("tunelet")`.
+The package root also exports `loadTunelet` as its default export. In
+`AudioWorkletGlobalScope`, compile a `WebAssembly.Module` on the main thread,
+transfer it to the worklet and call `initTuneletSync(module)`. If `TextDecoder`
+or `TextEncoder` is undefined, the package installs an internal UTF-8 fallback
+before the Wasm glue runs. For direct control of Wasm initialization,
+`tunelet/wasm` gives the generated default initializer and `initSync`. Use only
+one initialization entry point for each module instance. CommonJS applications
+can use `await import("tunelet")`.
 
 ### Deployment
 
@@ -406,33 +416,40 @@ page that opens the JavaScript.
 
 ### TypeScript API
 
-| Operation                         | TypeScript API                                           |
-| --------------------------------- | -------------------------------------------------------- |
-| Shared initialization             | `loadTunelet(source?)`                                   |
-| Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
-| In-place mono downmix             | `processMono(audio, events?)`                            |
-| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
-| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
-| Feedback                          | `feedback()`, `takeFeedback()`                           |
-| Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
-| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`         |
-| Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)` |
-| Configured tail budget            | `tailFrames()`                                           |
-| Reset or release memory           | `reset()`, `free()`                                      |
+| Operation                         | TypeScript API                                                          |
+| --------------------------------- | ----------------------------------------------------------------------- |
+| Shared initialization             | `loadTunelet(source?)`, `initTuneletSync(module)`                       |
+| Mono PCM to planar stereo         | `process(input, left, right, events?)`                                  |
+| Mono Float32 to planar stereo     | `processFloat32(input, left, right, events?)`                           |
+| In-place mono downmix             | `processMono(audio, events?)`, `processMonoFloat32(audio, events?)`     |
+| Packed 3-byte MIDI                | `applyMidi(bytes)`, `applyCorrectionMidi(bytes)`                        |
+| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`                      |
+| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`                         |
+| Feedback                          | `feedback()`, `takeFeedback()`, `writeFeedback(output, clearPeak?)`     |
+| Telemetry                         | `telemetry()`, `takeTelemetry()`, `writeTelemetry(output, clearPeaks?)` |
+| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`                        |
+| Finite PCM tail                   | `beginDrain()`, `drain(left, right)`, `drainMono(audio)`                |
+| Finite Float32 tail               | `drainFloat32(left, right)`, `drainMonoFloat32(audio)`                  |
+| Configured tail budget            | `tailFrames()`                                                          |
+| Reset or release memory           | `reset()`, `free()`                                                     |
 
 ### Audio buffers
 
-All audio buffers are `Int16Array` buffers, and they must fit in the prepared
-frame limit. These rules apply:
+Audio buffers are `Int16Array` or `Float32Array` buffers, and they must fit in
+the prepared frame limit. `Float32Array` inputs scale by 32,768 and saturate to
+`-32768..=32767`, and `NaN` becomes zero. `Float32Array` outputs divide the
+rendered 16-bit PCM samples by 32,768. These rules apply:
 
 - Stereo output arrays must not overlap.
 - The input can overlap an output, because the binding copies the input
   first.
 - Buffers must stay attached during each call.
 
-Web Audio uses Float32 samples, which you must convert to and from 16-bit
-PCM. This package does not install an AudioWorklet or an integration with an
-audio device.
+Web Audio uses `Float32Array` channels, which `processFloat32` accepts
+directly. The processor supports 44.1 kHz and 48 kHz. In Web Audio, construct
+`new AudioContext({ sampleRate: 48000 })` or `{ sampleRate: 44100 }` so the
+context rate matches the processor. This package does not install an
+`AudioWorkletNode` or a sample-rate converter.
 
 ### Configuration objects
 
@@ -471,14 +488,20 @@ A harmony Note On event has this form:
 
 Use `correctionMidi` for the separate correction keyboard. The native rules
 for event order and for the validation of the whole block also apply to these
-bindings.
+bindings. For packed 3-byte MIDI messages without object conversion, pass a
+`Uint8Array` to `applyMidi(bytes)` or `applyCorrectionMidi(bytes)` before the
+block.
 
 ### Feedback, telemetry and formant envelopes
 
-`telemetry()` and `takeTelemetry()` return a `Telemetry` object.
+`telemetry()` and `takeTelemetry()` return a `Telemetry` object. For meter
+reads without object allocation, `writeFeedback(output, clearPeak?)` fills a
+`Float32Array(8)` and `writeTelemetry(output, clearPeaks?)` fills a
+`Float32Array(45)`. Pass `true` as the second argument to clear the peak
+windows after the read.
 
-In feedback, `targetMidiNote` is `undefined` in these cases, which are also
-the cases where `voiced` is `false`:
+In feedback, `targetMidiNote` is `undefined` (`NaN` in `writeFeedback`) in
+these cases, which are also the cases where `voiced` is `false`:
 
 - The kept pitch estimate is unvoiced. This includes the time before the
   first detection and after a reset or a drain completion.
@@ -495,16 +518,17 @@ call with more points than before reserve memory.
 
 ### Memory allocation
 
-The constructor allocates reusable PCM buffers. A successful call that
-processes audio without events does not allocate new Rust PCM storage.
-However, the call copies the audio across the boundary between JavaScript and
-Wasm. These items can allocate:
+The constructor allocates reusable `i16` and `f32` audio buffers. Calls to
+`process`, `processFloat32`, `applyMidi`, `writeFeedback` and `writeTelemetry`
+without `events` do not allocate on the Wasm heap. However, audio calls copy
+samples across the boundary between JavaScript and Wasm. These items can
+allocate:
 
 - Object conversion.
-- Supplied events.
+- Supplied `TimedEvent[]` arrays.
 - Errors.
-- Feedback and telemetry.
-- The formant envelopes.
+- `feedback()` and `telemetry()` objects.
+- The formant envelopes on the first call or a larger point count.
 
 The generated glue can also make temporary views. This binding is for general
 use, and it does not guarantee hard real-time behavior for allocation or

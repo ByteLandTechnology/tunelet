@@ -7,12 +7,14 @@
 //! 2. Run wasm-bindgen on the result.
 //!
 //! wasm-pack can do the two steps in one command. The npm entry point uses
-//! `loadTunelet()` to initialize these bindings in browsers and in Node.js.
+//! `loadTunelet()` in browsers and in Node.js, and `initTuneletSync(module)` in
+//! `AudioWorkletGlobalScope`.
 //!
-//! The exported `Tunelet` class owns a native [`Processor`] and three reusable
-//! PCM buffers. JavaScript gives the `Int16Array` input and output buffers. The
-//! PCM API does not give buffer pointers or long-lived memory views to
-//! JavaScript. The class copies the input before it writes the output.
+//! The exported `Tunelet` class owns a native [`Processor`] and reusable
+//! `i16` and `f32` audio buffers. JavaScript gives `Int16Array` or
+//! `Float32Array` input and output buffers. The audio API does not give buffer
+//! pointers or long-lived memory views to JavaScript. The class copies the
+//! input before it writes the output.
 //!
 //! Configuration objects obey these rules:
 //!
@@ -36,15 +38,18 @@
 //! - The buffers of the formant envelopes.
 //! - Errors.
 //!
-//! The JavaScript glue can also make temporary views when it copies data. This
-//! generic binding does not guarantee an AudioWorklet callback that is free of
-//! allocation. If you do not need a processor any more, call the generated
-//! `free()` method.
+//! The JavaScript glue can also make temporary views when it copies data. For
+//! an `AudioWorkletProcessor` callback without Wasm heap allocation, use
+//! `processFloat32`, `applyMidi`, `writeFeedback` and `writeTelemetry` with
+//! caller-owned typed arrays. If you do not need a processor any more, call
+//! the generated `free()` method.
 
+use crate::processor::{FEEDBACK_LEN, TELEMETRY_LEN};
 use crate::{
-    Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
+    Error, Feedback, MidiEvent, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry,
+    TimedEvent,
 };
-use js_sys::{Float32Array, Int16Array};
+use js_sys::{Float32Array, Int16Array, Uint8Array};
 use serde::{Deserialize, Serialize};
 use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
@@ -76,12 +81,12 @@ pub fn default_config() -> Result<Ts<ProcessorConfig>, JsError> {
     Ok(ProcessorConfig::default().into_ts()?)
 }
 
-/// A stateful PCM processor that JavaScript uses as the `Tunelet` class.
+/// A stateful audio processor that JavaScript uses as the `Tunelet` class.
 ///
-/// The input is signed 16-bit mono PCM. The output is planar stereo or an
-/// in-place mono downmix. The quantization, latency and configuration behavior
-/// are the same as in the native processor. Buffer lengths count frames, not
-/// bytes.
+/// The input is mono `Int16Array` PCM or mono `Float32Array` audio. The output
+/// is planar stereo or an in-place mono downmix. The quantization, latency and
+/// configuration behavior are the same as in the native processor. Buffer
+/// lengths count frames, not bytes.
 ///
 /// These rules apply to the buffers:
 ///
@@ -109,6 +114,15 @@ pub struct WasmProcessor {
     /// The reusable PCM buffer for the right channel, which the class copies to
     /// the caller only after a successful call.
     right: Vec<i16>,
+    /// The reusable `f32` buffer for input or in-place mono audio, with a
+    /// length equal to the prepared block limit.
+    float_input: Vec<f32>,
+    /// The reusable `f32` buffer for the left channel, which the class copies
+    /// to the caller only after a successful call.
+    float_left: Vec<f32>,
+    /// The reusable `f32` buffer for the right channel, which the class copies
+    /// to the caller only after a successful call.
+    float_right: Vec<f32>,
     /// The reusable buffers for the two formant envelopes. They become longer
     /// when a call needs more points, and they do not become shorter.
     envelope_input: Vec<f32>,
@@ -149,7 +163,11 @@ impl WasmProcessor {
         let rate = match sample_rate {
             44100.0 => SampleRate::Hz44100,
             48000.0 => SampleRate::Hz48000,
-            _ => return Err(JsError::new("sampleRate must be 44100 or 48000")),
+            _ => {
+                return Err(JsError::new(&format!(
+                    "unsupported sampleRate {sample_rate}: must be 44100 or 48000 (for Web Audio, pass {{ sampleRate: 48000 }} to AudioContext)"
+                )));
+            }
         };
         if !(1.0..=f64::from(u32::MAX)).contains(&max_block_frames)
             || max_block_frames.fract() != 0.0
@@ -170,6 +188,9 @@ impl WasmProcessor {
             input: pcm_buffer(max_block_frames)?,
             left: pcm_buffer(max_block_frames)?,
             right: pcm_buffer(max_block_frames)?,
+            float_input: float_buffer(max_block_frames)?,
+            float_left: float_buffer(max_block_frames)?,
+            float_right: float_buffer(max_block_frames)?,
             envelope_input: Vec::new(),
             envelope_output: Vec::new(),
         })
@@ -294,6 +315,73 @@ impl WasmProcessor {
         Ok(())
     }
 
+    /// Processes mono `Float32Array` input into left and right `Float32Array`
+    /// buffers of equal length.
+    ///
+    /// Input samples convert to 16-bit PCM as
+    /// `(sample * 32768.0).round() as i16`. Finite values in `-1.0..=1.0` map
+    /// to `-32768..=32767`, values outside that range saturate and `NaN`
+    /// becomes zero. Rendered samples convert to `Float32` as
+    /// `sample / 32768.0`. Optional events, empty blocks and drain
+    /// cancellation obey the same rules as `process`. If you omit `events`,
+    /// the call does not allocate on the Wasm heap.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if the channel lengths are not equal, if the block is
+    /// larger than `maxBlockFrames` or if an event is not valid. On error, the
+    /// output buffers and the DSP state do not change.
+    #[wasm_bindgen(js_name = processFloat32)]
+    pub fn process_float32(
+        &mut self,
+        input: &Float32Array,
+        left: &Float32Array,
+        right: &Float32Array,
+        events: Option<Ts<BlockEvents>>,
+    ) -> Result<(), JsError> {
+        let frames = input.length() as usize;
+        Error::check_length(frames, left.length() as usize)?;
+        Error::check_length(frames, right.length() as usize)?;
+        self.check_frames(frames)?;
+        let events = decode_events(events)?;
+        input.copy_to(&mut self.float_input[..frames]);
+        self.processor.process_planar_f32(
+            &self.float_input[..frames],
+            &mut self.float_left[..frames],
+            &mut self.float_right[..frames],
+            &events.0,
+        )?;
+        left.copy_from(&self.float_left[..frames]);
+        right.copy_from(&self.float_right[..frames]);
+        Ok(())
+    }
+
+    /// Replaces the audio in a mono `Float32Array` with the stereo downmix.
+    ///
+    /// Sample conversion, timing, events and drain cancellation are the same
+    /// as for `processFloat32`. Peak feedback measures the stereo output
+    /// before the downmix.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if the block is too large or an event is not valid.
+    /// It throws before the caller buffer or the DSP state changes.
+    #[wasm_bindgen(js_name = processMonoFloat32)]
+    pub fn process_mono_float32(
+        &mut self,
+        audio: &Float32Array,
+        events: Option<Ts<BlockEvents>>,
+    ) -> Result<(), JsError> {
+        let frames = audio.length() as usize;
+        self.check_frames(frames)?;
+        let events = decode_events(events)?;
+        audio.copy_to(&mut self.float_input[..frames]);
+        self.processor
+            .process_mono_in_place_f32(&mut self.float_input[..frames], &events.0)?;
+        audio.copy_from(&self.float_input[..frames]);
+        Ok(())
+    }
+
     /// Starts a finite tail budget and returns its frame count as a number.
     ///
     /// Call this method one time after the final input block. Another call
@@ -351,6 +439,55 @@ impl WasmProcessor {
         self.check_frames(frames)?;
         let count = self.processor.drain_mono(&mut self.input[..frames])?;
         audio.copy_from(&self.input[..frames]);
+        Ok(count)
+    }
+
+    /// Renders stereo tail frames into `Float32Array` buffers of equal length.
+    ///
+    /// Rendered samples convert as `sample / 32768.0`, and unused frames
+    /// become `0.0`. Return values, empty arrays and completion reset are the
+    /// same as for `drain`.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if the channel lengths are not equal or if the block
+    /// is larger than `maxBlockFrames`. After an error, both output arrays and
+    /// the drain state do not change.
+    #[wasm_bindgen(js_name = drainFloat32)]
+    pub fn drain_float32(
+        &mut self,
+        left: &Float32Array,
+        right: &Float32Array,
+    ) -> Result<usize, JsError> {
+        let frames = left.length() as usize;
+        Error::check_length(frames, right.length() as usize)?;
+        self.check_frames(frames)?;
+        let count = self.processor.drain_planar_f32(
+            &mut self.float_left[..frames],
+            &mut self.float_right[..frames],
+        )?;
+        left.copy_from(&self.float_left[..frames]);
+        right.copy_from(&self.float_right[..frames]);
+        Ok(count)
+    }
+
+    /// Renders a mono `Float32Array` tail block and returns its frame count.
+    ///
+    /// Unused samples become `0.0`. Downmix, completion and feedback behavior
+    /// are the same as for `drainMono`.
+    ///
+    /// # Errors
+    ///
+    /// If the block is larger than `maxBlockFrames`, this method throws before
+    /// the output or the state changes.
+    #[wasm_bindgen(js_name = drainMonoFloat32)]
+    pub fn drain_mono_float32(&mut self, audio: &Float32Array) -> Result<usize, JsError> {
+        let frames = audio.length() as usize;
+        self.check_frames(frames)?;
+        let count = self
+            .processor
+            .drain_mono_f32(&mut self.float_input[..frames])?;
+        audio.copy_from(&self.float_input[..frames]);
         Ok(count)
     }
 
@@ -418,6 +555,111 @@ impl WasmProcessor {
         let telemetry = self.processor.telemetry().into_ts()?;
         self.processor.take_telemetry();
         Ok(telemetry)
+    }
+
+    /// Writes the current feedback into a `Float32Array` of length 8 without
+    /// heap allocation.
+    ///
+    /// If `clear_peak` is `true`, the method also clears the stereo peak
+    /// window. The entries are:
+    ///
+    /// - `0`: `resampleRatio`
+    /// - `1`: `periodSamples`
+    /// - `2`: `frequencyHz`
+    /// - `3`: `targetMidiNote`, or `NaN` if unvoiced
+    /// - `4`: `1.0` if `voiced` is `true`, or `0.0` if `false`
+    /// - `5`: `peakLevel`
+    /// - `6`: `processedFrames` rounded to `Float32`
+    /// - `7`: `latencyFrames`
+    ///
+    /// # Errors
+    ///
+    /// Throws if `output.length` is not 8. On error, `output` and the peak
+    /// window do not change.
+    #[wasm_bindgen(js_name = writeFeedback)]
+    pub fn write_feedback(
+        &mut self,
+        output: &Float32Array,
+        clear_peak: Option<bool>,
+    ) -> Result<(), JsError> {
+        let mut values = [0.0_f32; FEEDBACK_LEN];
+        Error::check_length(values.len(), output.length() as usize)?;
+        self.processor
+            .write_feedback(&mut values, clear_peak.unwrap_or(false))?;
+        output.copy_from(&values);
+        Ok(())
+    }
+
+    /// Writes the current telemetry into a `Float32Array` of length 45 without
+    /// heap allocation.
+    ///
+    /// If `clear_peaks` is `true`, the method also clears the three peak
+    /// windows of the telemetry. The entries are:
+    ///
+    /// - `0`: `processedFrames` rounded to `Float32`
+    /// - `1`: `inputPeak`
+    /// - `2..4`: `outputPeak` (left, then right)
+    /// - `4`: `reverbWetPeak`
+    /// - `5`: `clarity`
+    /// - `6`: `1.0` if `tracking` is `true`, or `0.0` if `false`
+    /// - `7`: `voiceCount`
+    /// - `8..24`: `voiceRatios` (16 entries)
+    /// - `24..40`: `voiceGains` (16 entries)
+    /// - `40`: `punchGain`
+    /// - `41`: `warmGain`
+    /// - `42`: `alienLoopFrames`
+    /// - `43`: `alienPhaseFrames`
+    /// - `44`: `formantGeneration` rounded to `Float32`
+    ///
+    /// # Errors
+    ///
+    /// Throws if `output.length` is not 45. On error, `output` and the peak
+    /// windows do not change.
+    #[wasm_bindgen(js_name = writeTelemetry)]
+    pub fn write_telemetry(
+        &mut self,
+        output: &Float32Array,
+        clear_peaks: Option<bool>,
+    ) -> Result<(), JsError> {
+        let mut values = [0.0_f32; TELEMETRY_LEN];
+        Error::check_length(values.len(), output.length() as usize)?;
+        self.processor
+            .write_telemetry(&mut values, clear_peaks.unwrap_or(false))?;
+        output.copy_from(&values);
+        Ok(())
+    }
+
+    /// Decodes packed 3-byte MIDI messages from a `Uint8Array` and applies
+    /// them to harmony without Wasm heap allocation.
+    ///
+    /// `bytes.length` must be a multiple of three. Each 3-byte message decodes
+    /// with `MidiEvent::from_bytes`. Unsupported messages with valid byte
+    /// ranges have no effect. An empty `Uint8Array` is valid.
+    ///
+    /// # Errors
+    ///
+    /// Throws if `bytes.length` is not a multiple of three, if a status byte
+    /// is below `0x80` or if a data byte is above 127. All bytes are validated
+    /// before any state changes.
+    #[wasm_bindgen(js_name = applyMidi)]
+    pub fn apply_midi(&mut self, bytes: &Uint8Array) -> Result<(), JsError> {
+        apply_midi_bytes(bytes, |slice| self.processor.apply_midi(slice))
+    }
+
+    /// Decodes packed 3-byte MIDI messages from a `Uint8Array` and applies
+    /// them to the correction keyboard without Wasm heap allocation.
+    ///
+    /// `bytes.length` must be a multiple of three. Each 3-byte message decodes
+    /// with `MidiEvent::from_bytes`. An empty `Uint8Array` is valid.
+    ///
+    /// # Errors
+    ///
+    /// Throws if `bytes.length` is not a multiple of three, if a status byte
+    /// is below `0x80` or if a data byte is above 127. All bytes are validated
+    /// before any state changes.
+    #[wasm_bindgen(js_name = applyCorrectionMidi)]
+    pub fn apply_correction_midi(&mut self, bytes: &Uint8Array) -> Result<(), JsError> {
+        apply_midi_bytes(bytes, |slice| self.processor.apply_correction_midi(slice))
     }
 
     /// Writes the formant envelopes of the current model into two
@@ -498,6 +740,48 @@ fn decode_events(events: Option<Ts<BlockEvents>>) -> Result<BlockEvents, JsError
     })
 }
 
+/// Validates and applies packed 3-byte MIDI messages from a `Uint8Array`
+/// without heap allocation.
+fn apply_midi_bytes(
+    bytes: &Uint8Array,
+    mut apply: impl FnMut(&[u8]) -> Result<(), Error>,
+) -> Result<(), JsError> {
+    let len = bytes.length() as usize;
+    if !len.is_multiple_of(3) {
+        return Err(Error::InvalidMidi.into());
+    }
+    let mut stack = [0u8; 768];
+    if len <= stack.len() {
+        let slice = &mut stack[..len];
+        bytes.copy_to(slice);
+        apply(slice)?;
+        return Ok(());
+    }
+    let mut offset = 0;
+    while offset < len {
+        let index = offset as u32;
+        let message = [
+            bytes.get_index(index),
+            bytes.get_index(index + 1),
+            bytes.get_index(index + 2),
+        ];
+        MidiEvent::from_bytes(message)?;
+        offset += 3;
+    }
+    offset = 0;
+    while offset < len {
+        let index = offset as u32;
+        let message = [
+            bytes.get_index(index),
+            bytes.get_index(index + 1),
+            bytes.get_index(index + 2),
+        ];
+        apply(&message)?;
+        offset += 3;
+    }
+    Ok(())
+}
+
 /// Returns the first `points` entries of a reusable envelope buffer. If the
 /// buffer is shorter, it becomes `points` long first.
 ///
@@ -519,6 +803,17 @@ fn pcm_buffer(frames: usize) -> Result<Vec<i16>, JsError> {
     let mut buffer = Vec::new();
     buffer.try_reserve_exact(frames)?;
     buffer.resize(frames, 0);
+    Ok(buffer)
+}
+
+/// Allocates `f32` audio storage that contains zeros.
+///
+/// If the capacity overflows or the allocation fails, this function returns a
+/// JavaScript error. It does not panic.
+fn float_buffer(frames: usize) -> Result<Vec<f32>, JsError> {
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(frames)?;
+    buffer.resize(frames, 0.0);
     Ok(buffer)
 }
 

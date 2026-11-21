@@ -8,7 +8,12 @@ use crate::events::{ValidatedEvent, ValidatedEvents};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
 use crate::resynthesis::{self, Resynthesis};
-use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
+use crate::{ControlEvent, Error, MidiEvent, PrepareConfig, ProcessorConfig, TimedEvent};
+
+/// The number of `f32` entries that [`Processor::write_feedback`] writes.
+pub(crate) const FEEDBACK_LEN: usize = 8;
+/// The number of `f32` entries that [`Processor::write_telemetry`] writes.
+pub(crate) const TELEMETRY_LEN: usize = 45;
 
 /// A prepared vocal processor with state, mono input and stereo synthesis.
 ///
@@ -199,7 +204,7 @@ impl Processor {
         audio: &mut [i16],
         events: &[TimedEvent],
     ) -> Result<(), Error> {
-        let mut events = self.validate(audio, events)?;
+        let mut events = self.validate(audio.len(), events)?;
         self.drain_remaining = None;
         for (index, sample) in audio.iter_mut().enumerate() {
             while let Some(event) = events.next_at(index) {
@@ -207,6 +212,91 @@ impl Processor {
             }
             let output = self.next(*sample);
             *sample = ((output[0] as i32 + output[1] as i32) >> 1) as i16;
+        }
+        Ok(())
+    }
+
+    /// Processes mono `f32` audio into `[left, right]` stereo frames.
+    ///
+    /// Input samples convert to signed 16-bit PCM with
+    /// `(sample * 32768.0).round() as i16`. Finite values in `-1.0..=1.0` map
+    /// to `-32768..=32767`, values outside that range saturate and `NaN`
+    /// becomes zero. Each rendered PCM sample converts to `f32` as
+    /// `f32::from(sample) / 32768.0`, in `-32767/32768..=32767/32768`. The
+    /// internal DSP path, event order and drain cancellation are the same as
+    /// for [`process`](Self::process).
+    ///
+    /// # Errors
+    ///
+    /// The call checks [`Error::BufferLength`] first,
+    /// [`Error::BlockTooLarge`] second and [`Error::InvalidEvent`] third. All
+    /// checks finish before the state or the output changes.
+    pub fn process_f32(
+        &mut self,
+        input: &[f32],
+        output: &mut [[f32; 2]],
+        events: &[TimedEvent],
+    ) -> Result<(), Error> {
+        Error::check_length(input.len(), output.len())?;
+        self.process_into_f32(input, events, |index, frame| {
+            output[index] = frame_to_f32(frame);
+        })
+    }
+
+    /// Processes mono `f32` audio into separate left and right `f32` slices.
+    ///
+    /// The three slices must have equal frame counts. The sample conversion,
+    /// event order, empty-block behavior and drain cancellation are the same
+    /// as for [`process_f32`](Self::process_f32).
+    ///
+    /// # Errors
+    ///
+    /// The call checks [`Error::BufferLength`] for the left channel, then for
+    /// the right channel. Next, it checks [`Error::BlockTooLarge`], then
+    /// [`Error::InvalidEvent`]. If an error occurs, the two output slices and
+    /// all processor state do not change.
+    pub fn process_planar_f32(
+        &mut self,
+        input: &[f32],
+        left: &mut [f32],
+        right: &mut [f32],
+        events: &[TimedEvent],
+    ) -> Result<(), Error> {
+        Error::check_length(input.len(), left.len())?;
+        Error::check_length(input.len(), right.len())?;
+        self.process_into_f32(input, events, |index, frame| {
+            left[index] = sample_to_f32(frame[0]);
+            right[index] = sample_to_f32(frame[1]);
+        })
+    }
+
+    /// Replaces mono `f32` audio with the stereo downmix.
+    ///
+    /// Each input sample converts as in [`process_f32`](Self::process_f32).
+    /// The stereo output uses the fixed-point downmix of
+    /// [`process_mono_in_place`](Self::process_mono_in_place) before the
+    /// division by 32768. Peak feedback measures the stereo samples before the
+    /// downmix.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BlockTooLarge`] for a slice that is too large. Returns
+    /// [`Error::InvalidEvent`] for the first invalid event. All checks finish
+    /// before the audio slice or the processor state changes.
+    pub fn process_mono_in_place_f32(
+        &mut self,
+        audio: &mut [f32],
+        events: &[TimedEvent],
+    ) -> Result<(), Error> {
+        let mut events = self.validate(audio.len(), events)?;
+        self.drain_remaining = None;
+        for (index, sample) in audio.iter_mut().enumerate() {
+            while let Some(event) = events.next_at(index) {
+                self.apply(event);
+            }
+            let output = self.next(sample_from_f32(*sample));
+            let mono = ((i32::from(output[0]) + i32::from(output[1])) >> 1) as i16;
+            *sample = sample_to_f32(mono);
         }
         Ok(())
     }
@@ -291,6 +381,71 @@ impl Processor {
         Ok(count)
     }
 
+    /// Renders the next stereo tail frames as `f32` pairs and returns their
+    /// count.
+    ///
+    /// Output samples convert as `f32::from(sample) / 32768.0`. The method
+    /// fills unused frames with zeros. Completion and empty-buffer behavior
+    /// are the same as for [`drain`](Self::drain).
+    ///
+    /// # Errors
+    ///
+    /// If the output is larger than the prepared block limit, the method
+    /// returns [`Error::BlockTooLarge`] and does not change state or output.
+    pub fn drain_f32(&mut self, output: &mut [[f32; 2]]) -> Result<usize, Error> {
+        let count = self.drain_into(output.len(), |index, frame| {
+            output[index] = frame_to_f32(frame);
+        })?;
+        output[count..].fill([0.0; 2]);
+        Ok(count)
+    }
+
+    /// Renders the tail into separate `f32` output channels of equal size.
+    ///
+    /// Output samples convert as `f32::from(sample) / 32768.0`. Return values,
+    /// zero fill in unused samples and completion are the same as for
+    /// [`drain_planar`](Self::drain_planar).
+    ///
+    /// # Errors
+    ///
+    /// The method checks [`Error::BufferLength`] before
+    /// [`Error::BlockTooLarge`]. If either error occurs, the two channels and
+    /// the drain state do not change.
+    pub fn drain_planar_f32(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+    ) -> Result<usize, Error> {
+        Error::check_length(left.len(), right.len())?;
+        let count = self.drain_into(left.len(), |index, frame| {
+            left[index] = sample_to_f32(frame[0]);
+            right[index] = sample_to_f32(frame[1]);
+        })?;
+        left[count..].fill(0.0);
+        right[count..].fill(0.0);
+        Ok(count)
+    }
+
+    /// Renders the tail as mono `f32` audio and returns the number of rendered
+    /// frames.
+    ///
+    /// The fixed-point downmix is the same as in
+    /// [`drain_mono`](Self::drain_mono) before the division by 32768. Unused
+    /// samples become `0.0`.
+    ///
+    /// # Errors
+    ///
+    /// If the output is larger than the prepared block limit, the method
+    /// returns [`Error::BlockTooLarge`] before it changes output or state.
+    pub fn drain_mono_f32(&mut self, output: &mut [f32]) -> Result<usize, Error> {
+        let count = self.drain_into(output.len(), |index, frame| {
+            let mono = ((i32::from(frame[0]) + i32::from(frame[1])) >> 1) as i16;
+            output[index] = sample_to_f32(mono);
+        })?;
+        output[count..].fill(0.0);
+        Ok(count)
+    }
+
     /// Returns the finite tail budget for the current configuration.
     ///
     /// This value is a configured limit. It is not the number of drain frames
@@ -355,6 +510,45 @@ impl Processor {
         result
     }
 
+    /// Writes the current feedback into an `f32` slice of length 8.
+    ///
+    /// If `clear_peak` is `true`, the method also clears the stereo peak
+    /// window, as [`take_feedback`](Self::take_feedback) does. The slice
+    /// entries are:
+    ///
+    /// - `0`: [`Feedback::resample_ratio`]
+    /// - `1`: [`Feedback::period_samples`]
+    /// - `2`: [`Feedback::frequency_hz`]
+    /// - `3`: [`Feedback::target_midi_note`], or `f32::NAN` if `None`
+    /// - `4`: `1.0` if [`Feedback::voiced`] is `true`, or `0.0` if `false`
+    /// - `5`: [`Feedback::peak_level`]
+    /// - `6`: [`Feedback::processed_frames`] as `f32`
+    /// - `7`: [`Feedback::latency_frames`] as `f32`
+    ///
+    /// Above `16_777_216`, `processed_frames` rounds to `f32` precision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BufferLength`] if `output.len()` is not 8. On error,
+    /// `output` and the peak window do not change.
+    pub fn write_feedback(&mut self, output: &mut [f32], clear_peak: bool) -> Result<(), Error> {
+        Error::check_length(FEEDBACK_LEN, output.len())?;
+        let feedback = if clear_peak {
+            self.take_feedback()
+        } else {
+            self.feedback()
+        };
+        output[0] = feedback.resample_ratio;
+        output[1] = feedback.period_samples;
+        output[2] = feedback.frequency_hz;
+        output[3] = feedback.target_midi_note.unwrap_or(f32::NAN);
+        output[4] = if feedback.voiced { 1.0 } else { 0.0 };
+        output[5] = feedback.peak_level;
+        output[6] = feedback.processed_frames as f32;
+        output[7] = feedback.latency_frames as f32;
+        Ok(())
+    }
+
     /// Returns the state of the voices, the levels and the effects, and does
     /// not clear the peak windows.
     ///
@@ -400,6 +594,59 @@ impl Processor {
         let result = self.telemetry();
         self.clear_telemetry_peaks();
         result
+    }
+
+    /// Writes the current telemetry into an `f32` slice of length 45.
+    ///
+    /// If `clear_peaks` is `true`, the method also clears the three peak
+    /// windows of the telemetry, as [`take_telemetry`](Self::take_telemetry)
+    /// does. The slice entries are:
+    ///
+    /// - `0`: [`Telemetry::processed_frames`] as `f32`
+    /// - `1`: [`Telemetry::input_peak`]
+    /// - `2..4`: [`Telemetry::output_peak`] (left, then right)
+    /// - `4`: [`Telemetry::reverb_wet_peak`]
+    /// - `5`: [`Telemetry::clarity`]
+    /// - `6`: `1.0` if [`Telemetry::tracking`] is `true`, or `0.0` if `false`
+    /// - `7`: [`Telemetry::voice_count`] as `f32`
+    /// - `8..24`: [`Telemetry::voice_ratios`] (16 entries)
+    /// - `24..40`: [`Telemetry::voice_gains`] (16 entries)
+    /// - `40`: [`Telemetry::punch_gain`]
+    /// - `41`: [`Telemetry::warm_gain`]
+    /// - `42`: [`Telemetry::alien_loop_frames`] as `f32`
+    /// - `43`: [`Telemetry::alien_phase_frames`] as `f32`
+    /// - `44`: [`Telemetry::formant_generation`] as `f32`
+    ///
+    /// Above `16_777_216`, `processed_frames` and `formant_generation` round
+    /// to `f32` precision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BufferLength`] if `output.len()` is not 45. On error,
+    /// `output` and the peak windows do not change.
+    pub fn write_telemetry(&mut self, output: &mut [f32], clear_peaks: bool) -> Result<(), Error> {
+        Error::check_length(TELEMETRY_LEN, output.len())?;
+        let telemetry = if clear_peaks {
+            self.take_telemetry()
+        } else {
+            self.telemetry()
+        };
+        output[0] = telemetry.processed_frames as f32;
+        output[1] = telemetry.input_peak;
+        output[2] = telemetry.output_peak[0];
+        output[3] = telemetry.output_peak[1];
+        output[4] = telemetry.reverb_wet_peak;
+        output[5] = telemetry.clarity;
+        output[6] = if telemetry.tracking { 1.0 } else { 0.0 };
+        output[7] = f32::from(telemetry.voice_count);
+        output[8..24].copy_from_slice(&telemetry.voice_ratios);
+        output[24..40].copy_from_slice(&telemetry.voice_gains);
+        output[40] = telemetry.punch_gain;
+        output[41] = telemetry.warm_gain;
+        output[42] = telemetry.alien_loop_frames as f32;
+        output[43] = telemetry.alien_phase_frames as f32;
+        output[44] = telemetry.formant_generation as f32;
+        Ok(())
     }
 
     /// Starts new windows for the input peak, the output peaks and the wet
@@ -480,6 +727,49 @@ impl Processor {
         Ok(())
     }
 
+    /// Decodes packed 3-byte MIDI messages and applies them to harmony.
+    ///
+    /// `bytes` must have a length that is a multiple of three. Each group of
+    /// three bytes decodes with [`MidiEvent::from_bytes`]. Messages that
+    /// decode to `Ok(None)` have no effect. An empty slice is valid. An active
+    /// drain does not change.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidMidi`] if `bytes.len()` is not a multiple of
+    /// three or if any 3-byte message fails [`MidiEvent::from_bytes`]. All
+    /// messages are validated before any state changes.
+    pub fn apply_midi(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        for &message in validate_midi_bytes(bytes)? {
+            if let Some(event) = MidiEvent::from_bytes(message)? {
+                self.resynthesis.apply_midi(event);
+            }
+        }
+        Ok(())
+    }
+
+    /// Decodes packed 3-byte MIDI messages and applies them to the correction
+    /// keyboard.
+    ///
+    /// `bytes` must have a length that is a multiple of three. Each group of
+    /// three bytes decodes with [`MidiEvent::from_bytes`]. The note-table
+    /// semantics are the same as for [`ControlEvent::CorrectionMidi`]. An
+    /// empty slice is valid, and an active drain does not change.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidMidi`] if `bytes.len()` is not a multiple of
+    /// three or if any 3-byte message fails [`MidiEvent::from_bytes`]. All
+    /// messages are validated before any state changes.
+    pub fn apply_correction_midi(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        for &message in validate_midi_bytes(bytes)? {
+            if let Some(event) = MidiEvent::from_bytes(message)? {
+                self.resynthesis.apply_correction_midi(event);
+            }
+        }
+        Ok(())
+    }
+
     /// Applies a configuration that the public setter or the preflight checked.
     fn apply_config(&mut self, config: ProcessorConfig) {
         if self.config.punch != config.punch {
@@ -553,11 +843,11 @@ impl Processor {
     /// The returned cursor is the only source of validated control tokens.
     fn validate<'a>(
         &self,
-        input: &[i16],
+        frames: usize,
         events: &'a [TimedEvent],
     ) -> Result<ValidatedEvents<'a>, Error> {
-        self.check_block(input.len())?;
-        ValidatedEvents::new(events, input.len())
+        self.check_block(frames)?;
+        ValidatedEvents::new(events, frames)
     }
 
     /// Enforces the prepared block limit for each call.
@@ -647,13 +937,32 @@ impl Processor {
         events: &[TimedEvent],
         mut write: impl FnMut(usize, [i16; 2]),
     ) -> Result<(), Error> {
-        let mut events = self.validate(input, events)?;
+        let mut events = self.validate(input.len(), events)?;
         self.drain_remaining = None;
         for (index, sample) in input.iter().enumerate() {
             while let Some(event) = events.next_at(index) {
                 self.apply(event);
             }
             write(index, self.next(*sample));
+        }
+        Ok(())
+    }
+
+    /// Checks the `f32` block, applies controls at each offset and writes each
+    /// rendered frame.
+    fn process_into_f32(
+        &mut self,
+        input: &[f32],
+        events: &[TimedEvent],
+        mut write: impl FnMut(usize, [i16; 2]),
+    ) -> Result<(), Error> {
+        let mut events = self.validate(input.len(), events)?;
+        self.drain_remaining = None;
+        for (index, sample) in input.iter().enumerate() {
+            while let Some(event) = events.next_at(index) {
+                self.apply(event);
+            }
+            write(index, self.next(sample_from_f32(*sample)));
         }
         Ok(())
     }
@@ -694,6 +1003,36 @@ impl Processor {
         }
         Ok(count)
     }
+}
+
+/// Converts a normalized `f32` sample to signed 16-bit PCM.
+#[inline]
+fn sample_from_f32(sample: f32) -> i16 {
+    (sample * 32_768.0).round() as i16
+}
+
+/// Converts a signed 16-bit PCM sample to normalized `f32`.
+#[inline]
+fn sample_to_f32(sample: i16) -> f32 {
+    f32::from(sample) / 32_768.0
+}
+
+/// Converts a stereo 16-bit PCM frame to normalized `f32`.
+#[inline]
+fn frame_to_f32(frame: [i16; 2]) -> [f32; 2] {
+    frame.map(sample_to_f32)
+}
+
+/// Validates that `bytes` contains complete, valid 3-byte MIDI messages.
+fn validate_midi_bytes(bytes: &[u8]) -> Result<&[[u8; 3]], Error> {
+    let (messages, remainder) = bytes.as_chunks::<3>();
+    if !remainder.is_empty() {
+        return Err(Error::InvalidMidi);
+    }
+    for &message in messages {
+        MidiEvent::from_bytes(message)?;
+    }
+    Ok(messages)
 }
 
 /// A snapshot of the pitch analysis and the output level that you can copy.
