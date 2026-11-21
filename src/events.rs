@@ -1,21 +1,21 @@
 //! Controls for a block, which the processor validates before any change.
 
 use crate::config::validate_output_gain;
-use crate::effects::alien::AlienConfig;
-use crate::effects::punch::PunchConfig;
-use crate::effects::reverb::ReverbConfig;
-use crate::effects::warm::WarmConfig;
+use crate::effects::alien::{AlienConfig, AlienPatch};
+use crate::effects::punch::{PunchConfig, PunchPatch};
+use crate::effects::reverb::{ReverbConfig, ReverbPatch};
+use crate::effects::warm::{WarmConfig, WarmPatch};
 use crate::midi::MidiEvent;
-use crate::{Error, EventProblem, ProcessorConfig, ResynthesisConfig};
+use crate::resynthesis::ResynthesisPatch;
+use crate::{Error, EventProblem, ProcessorConfig, ProcessorPatch, ResynthesisConfig};
 
 /// A configuration or MIDI control that applies before a frame in the block.
 ///
 /// Give controls to a process call as [`TimedEvent`] values. The call borrows
 /// the slice only for that call. There is no heap allocation and no deferred
-/// queue. A stage event replaces all settings of that stage. To change one
-/// field, start from the current configuration of the processor.
-/// Configuration changes have the same effects on state as
-/// [`crate::Processor::set_config`].
+/// queue. Whole-stage events replace all settings of that stage. Patch events
+/// merge only their `Some` fields onto the active configuration. Configuration
+/// changes have the same effects on state as [`crate::Processor::set_config`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -25,16 +25,28 @@ use crate::{Error, EventProblem, ProcessorConfig, ResynthesisConfig};
 pub enum ControlEvent {
     /// This event replaces the full configuration.
     Configure(ProcessorConfig),
+    /// This event merges partial changes onto the full configuration.
+    Patch(ProcessorPatch),
     /// This event replaces the resynthesis configuration.
     Resynthesis(ResynthesisConfig),
+    /// This event merges partial changes onto the resynthesis configuration.
+    ResynthesisPatch(ResynthesisPatch),
     /// This event replaces the Punch configuration.
     Punch(PunchConfig),
+    /// This event merges partial changes onto the Punch configuration.
+    PunchPatch(PunchPatch),
     /// This event replaces the Warm configuration.
     Warm(WarmConfig),
+    /// This event merges partial changes onto the Warm configuration.
+    WarmPatch(WarmPatch),
     /// This event replaces the Alien configuration.
     Alien(AlienConfig),
+    /// This event merges partial changes onto the Alien configuration.
+    AlienPatch(AlienPatch),
     /// This event replaces the reverb configuration.
     Reverb(ReverbConfig),
+    /// This event merges partial changes onto the reverb configuration.
+    ReverbPatch(ReverbPatch),
     /// This event sets the final linear gain, 0..=64.
     ///
     /// The quantization and the mute behavior are the same as for
@@ -66,21 +78,85 @@ impl ControlEvent {
     /// Checks the configuration or MIDI ranges of the event, and does not
     /// apply the event.
     ///
+    /// For patch variants, this method merges the patch onto
+    /// [`ProcessorConfig::default`] before validation. During a process call,
+    /// the block preflight merges each patch onto a copy of the active
+    /// configuration in slice order.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidConfig`] for an invalid configuration or gain.
-    /// Returns [`Error::InvalidMidi`] for invalid MIDI fields. Reset is always
-    /// valid. The process call that contains the event checks the offset and
-    /// the order.
+    /// Returns [`Error::InvalidConfig`] for an invalid configuration, patch or
+    /// gain. Returns [`Error::InvalidMidi`] for invalid MIDI fields. Reset is
+    /// always valid. The process call that contains the event checks the
+    /// offset and the order.
     pub fn validate(self) -> Result<(), Error> {
+        let mut config = ProcessorConfig::default();
+        self.apply_and_validate(&mut config)
+    }
+
+    /// Simulates the event on `config` and validates the changed stage or MIDI
+    /// payload.
+    fn apply_and_validate(self, config: &mut ProcessorConfig) -> Result<(), Error> {
         match self {
-            Self::Configure(config) => config.validate(),
-            Self::Resynthesis(config) => config.validate(),
-            Self::Punch(config) => config.validate(),
-            Self::Warm(config) => config.validate(),
-            Self::Alien(config) => config.validate(),
-            Self::Reverb(config) => config.validate(),
-            Self::OutputGain(gain) => validate_output_gain(gain),
+            Self::Configure(value) => {
+                value.validate()?;
+                *config = value;
+                Ok(())
+            }
+            Self::Patch(patch) => {
+                config.merge_patch(patch);
+                config.validate()
+            }
+            Self::Resynthesis(value) => {
+                value.validate()?;
+                config.resynthesis = value;
+                Ok(())
+            }
+            Self::ResynthesisPatch(patch) => {
+                config.resynthesis.merge_patch(patch);
+                config.resynthesis.validate()
+            }
+            Self::Punch(value) => {
+                value.validate()?;
+                config.punch = value;
+                Ok(())
+            }
+            Self::PunchPatch(patch) => {
+                config.punch.merge_patch(patch);
+                config.punch.validate()
+            }
+            Self::Warm(value) => {
+                value.validate()?;
+                config.warm = value;
+                Ok(())
+            }
+            Self::WarmPatch(patch) => {
+                config.warm.merge_patch(patch);
+                config.warm.validate()
+            }
+            Self::Alien(value) => {
+                value.validate()?;
+                config.alien = value;
+                Ok(())
+            }
+            Self::AlienPatch(patch) => {
+                config.alien.merge_patch(patch);
+                config.alien.validate()
+            }
+            Self::Reverb(value) => {
+                value.validate()?;
+                config.reverb = value;
+                Ok(())
+            }
+            Self::ReverbPatch(patch) => {
+                config.reverb.merge_patch(patch);
+                config.reverb.validate()
+            }
+            Self::OutputGain(gain) => {
+                validate_output_gain(gain)?;
+                config.output_gain = gain;
+                Ok(())
+            }
             Self::Midi(event) | Self::CorrectionMidi(event) => event.validate(),
             Self::Reset => Ok(()),
         }
@@ -136,11 +212,17 @@ impl ValidatedEvent {
 impl<'a> ValidatedEvents<'a> {
     /// Checks the offsets, the order and the payloads, in slice order.
     ///
-    /// If an event fails, returns an error with the zero-based index of the
-    /// first invalid event. The offset bounds have priority over the order.
-    /// The order has priority over the payload validation. The function gives
-    /// no tokens unless the full slice passes.
-    pub(crate) fn new(events: &'a [TimedEvent], frames: usize) -> Result<Self, Error> {
+    /// Configuration replacements and patches apply to the stack copy `config`
+    /// in slice order, so later events validate against earlier changes in the
+    /// same block. If an event fails, returns an error with the zero-based
+    /// index of the first invalid event. The offset bounds have priority over
+    /// the order. The order has priority over the payload validation. The
+    /// function gives no tokens unless the full slice passes.
+    pub(crate) fn new(
+        events: &'a [TimedEvent],
+        frames: usize,
+        mut config: ProcessorConfig,
+    ) -> Result<Self, Error> {
         let mut previous = 0;
         for (index, event) in events.iter().enumerate() {
             let problem = if event.offset >= frames {
@@ -148,7 +230,7 @@ impl<'a> ValidatedEvents<'a> {
             } else if event.offset < previous {
                 Some(EventProblem::OffsetDecreasing)
             } else {
-                match event.event.validate() {
+                match event.event.apply_and_validate(&mut config) {
                     Ok(()) => None,
                     Err(Error::InvalidConfig { field, problem }) => {
                         Some(EventProblem::Config { field, problem })

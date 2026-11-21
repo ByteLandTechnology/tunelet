@@ -31,13 +31,13 @@ mod history;
 
 use crate::error::{check_count, check_range};
 use crate::filter::{Biquad, Design};
-use crate::formant::{Formant, FormantConfig, ANALYSIS_FRAMES};
-use crate::harmony::{HarmonyConfig, HarmonyState, HARMONY_VOICES};
+use crate::formant::{Formant, FormantConfig, FormantPatch, ANALYSIS_FRAMES};
+use crate::harmony::{HarmonyConfig, HarmonyPatch, HarmonyState, HARMONY_VOICES};
 use crate::midi::MidiEvent;
 use crate::numeric::fixed::{Q12, Q14, Q6, Q8};
 use crate::numeric::{ring, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
-use crate::pitch::{PitchConfig, PitchEstimate};
+use crate::pitch::{PitchConfig, PitchEstimate, PitchPatch};
 use crate::scale::{CorrectionTable, NoteMask};
 use crate::{Error, SampleRate};
 use history::prepare_history;
@@ -119,6 +119,41 @@ impl Default for CorrectionConfig {
 }
 
 impl CorrectionConfig {
+    /// Returns a copy with `enabled` set to the given value.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Returns a copy with `notes` set to the given mask.
+    pub const fn with_notes(mut self, notes: NoteMask) -> Self {
+        self.notes = notes;
+        self
+    }
+
+    /// Returns a copy with `retune_ms` set to the given value, 0..=400.
+    pub const fn with_retune_ms(mut self, retune_ms: f32) -> Self {
+        self.retune_ms = retune_ms;
+        self
+    }
+
+    /// Copies each present field of `patch` into this configuration.
+    ///
+    /// Fields that are `None` do not change. A `notes` mask that is `Some`
+    /// replaces all twelve pitch-class flags. This method does not validate
+    /// the result.
+    pub fn merge_patch(&mut self, patch: CorrectionPatch) {
+        if let Some(enabled) = patch.enabled {
+            self.enabled = enabled;
+        }
+        if let Some(notes) = patch.notes {
+            self.notes = notes;
+        }
+        if let Some(retune_ms) = patch.retune_ms {
+            self.retune_ms = retune_ms;
+        }
+    }
+
     /// Validates all fields, also if correction is disabled.
     ///
     /// All values of `enabled` and `notes` are valid. `retune_ms` must be
@@ -136,6 +171,77 @@ impl CorrectionConfig {
             0.0,
             400.0,
         )
+    }
+}
+
+impl From<CorrectionPatch> for CorrectionConfig {
+    fn from(patch: CorrectionPatch) -> Self {
+        let mut config = Self::default();
+        config.merge_patch(patch);
+        config
+    }
+}
+
+/// Partial changes for [`CorrectionConfig`].
+///
+/// Only fields that are `Some` overwrite the target fields in
+/// [`CorrectionConfig::merge_patch`]. All fields are `None` by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct CorrectionPatch {
+    /// Enables or disables the selection of correction targets.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub enabled: Option<bool>,
+    /// The configured target pitch classes.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub notes: Option<NoteMask>,
+    /// The half-life of the smoothing in milliseconds, 0..=400.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub retune_ms: Option<f32>,
+}
+
+impl CorrectionPatch {
+    /// Returns an empty patch with all fields set to `None`.
+    pub const fn new() -> Self {
+        Self {
+            enabled: None,
+            notes: None,
+            retune_ms: None,
+        }
+    }
+
+    /// Sets `enabled` on this patch.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    /// Sets `notes` on this patch.
+    pub const fn with_notes(mut self, notes: NoteMask) -> Self {
+        self.notes = Some(notes);
+        self
+    }
+
+    /// Sets `retune_ms` on this patch, 0..=400.
+    pub const fn with_retune_ms(mut self, retune_ms: f32) -> Self {
+        self.retune_ms = Some(retune_ms);
+        self
     }
 }
 
@@ -162,8 +268,7 @@ impl CorrectionConfig {
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase"),
-    tsify(large_number_types_as_bigints)
+    serde(rename_all = "camelCase")
 )]
 pub struct ResynthesisConfig {
     /// The acquisition sensitivity and the reporting bounds. The
@@ -242,15 +347,14 @@ pub struct ResynthesisConfig {
     /// delay of 1,543 frames. Alien, reverb and the output gain still occur
     /// after this stage.
     pub dry_mix: f32,
-    /// The seed for choir drift and aspiration, which use the same stream.
-    /// The default is `0x1234_abcd`.
+    /// The seed for choir drift and aspiration, 0..=4294967295. The default is
+    /// `0x1234_abcd`.
     ///
-    /// Only the low 32 bits select the sequence. If a configuration change
-    /// gives a different 64-bit value, the processor starts the stream again
-    /// from the low 32 bits. This is also true for a change to only the high
-    /// bits. Reset keeps the current position in the stream. The enabled
-    /// stages set the number of random values that the code reads.
-    pub random_seed: u64,
+    /// Choir drift and aspiration use the same stream. If a configuration
+    /// change gives a different seed, the processor starts the stream again
+    /// from the new seed. Reset keeps the current position in the stream. The
+    /// enabled stages set the number of random values that the code reads.
+    pub random_seed: u32,
 }
 
 impl Default for ResynthesisConfig {
@@ -276,6 +380,152 @@ impl Default for ResynthesisConfig {
 }
 
 impl ResynthesisConfig {
+    /// Returns a copy with `pitch` set to the given configuration.
+    pub const fn with_pitch(mut self, pitch: PitchConfig) -> Self {
+        self.pitch = pitch;
+        self
+    }
+
+    /// Returns a copy with `correction` set to the given configuration.
+    pub const fn with_correction(mut self, correction: CorrectionConfig) -> Self {
+        self.correction = correction;
+        self
+    }
+
+    /// Returns a copy with `pitch_ratio` set to the given value, 0.25..=4.
+    pub const fn with_pitch_ratio(mut self, pitch_ratio: f32) -> Self {
+        self.pitch_ratio = pitch_ratio;
+        self
+    }
+
+    /// Returns a copy with `formant` set to the given configuration.
+    pub const fn with_formant(mut self, formant: FormantConfig) -> Self {
+        self.formant = formant;
+        self
+    }
+
+    /// Returns a copy with `mode` set to the given value.
+    pub const fn with_mode(mut self, mode: MultiVoiceMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Returns a copy with `choir_voices` set to the given value, 1..=16.
+    pub const fn with_choir_voices(mut self, choir_voices: u8) -> Self {
+        self.choir_voices = choir_voices;
+        self
+    }
+
+    /// Returns a copy with `choir_detune` set to the given value, 10..=100.
+    pub const fn with_choir_detune(mut self, choir_detune: f32) -> Self {
+        self.choir_detune = choir_detune;
+        self
+    }
+
+    /// Returns a copy with `choir_delay` set to the given value, 20..=200.
+    pub const fn with_choir_delay(mut self, choir_delay: f32) -> Self {
+        self.choir_delay = choir_delay;
+        self
+    }
+
+    /// Returns a copy with `choir_spread_percent` set to the given value,
+    /// 0..=100%.
+    pub const fn with_choir_spread_percent(mut self, choir_spread_percent: f32) -> Self {
+        self.choir_spread_percent = choir_spread_percent;
+        self
+    }
+
+    /// Returns a copy with `stereo_output` set to the given value.
+    pub const fn with_stereo_output(mut self, stereo_output: bool) -> Self {
+        self.stereo_output = stereo_output;
+        self
+    }
+
+    /// Returns a copy with `harmony` set to the given configuration.
+    pub const fn with_harmony(mut self, harmony: HarmonyConfig) -> Self {
+        self.harmony = harmony;
+        self
+    }
+
+    /// Returns a copy with `harmony_gain` set to the given value, 0..=1.
+    pub const fn with_harmony_gain(mut self, harmony_gain: f32) -> Self {
+        self.harmony_gain = harmony_gain;
+        self
+    }
+
+    /// Returns a copy with `harmonic_modulation` set to the given value,
+    /// 0..=24.
+    pub const fn with_harmonic_modulation(mut self, harmonic_modulation: f32) -> Self {
+        self.harmonic_modulation = harmonic_modulation;
+        self
+    }
+
+    /// Returns a copy with `dry_mix` set to the given value, 0..=1.
+    pub const fn with_dry_mix(mut self, dry_mix: f32) -> Self {
+        self.dry_mix = dry_mix;
+        self
+    }
+
+    /// Returns a copy with `random_seed` set to the given value,
+    /// 0..=4294967295.
+    pub const fn with_random_seed(mut self, random_seed: u32) -> Self {
+        self.random_seed = random_seed;
+        self
+    }
+
+    /// Merges each present field and sub-patch of `patch` into this
+    /// configuration.
+    ///
+    /// Fields that are `None` do not change. This method does not validate the
+    /// result.
+    pub fn merge_patch(&mut self, patch: ResynthesisPatch) {
+        if let Some(pitch) = patch.pitch {
+            self.pitch.merge_patch(pitch);
+        }
+        if let Some(correction) = patch.correction {
+            self.correction.merge_patch(correction);
+        }
+        if let Some(pitch_ratio) = patch.pitch_ratio {
+            self.pitch_ratio = pitch_ratio;
+        }
+        if let Some(formant) = patch.formant {
+            self.formant.merge_patch(formant);
+        }
+        if let Some(mode) = patch.mode {
+            self.mode = mode;
+        }
+        if let Some(choir_voices) = patch.choir_voices {
+            self.choir_voices = choir_voices;
+        }
+        if let Some(choir_detune) = patch.choir_detune {
+            self.choir_detune = choir_detune;
+        }
+        if let Some(choir_delay) = patch.choir_delay {
+            self.choir_delay = choir_delay;
+        }
+        if let Some(choir_spread_percent) = patch.choir_spread_percent {
+            self.choir_spread_percent = choir_spread_percent;
+        }
+        if let Some(stereo_output) = patch.stereo_output {
+            self.stereo_output = stereo_output;
+        }
+        if let Some(harmony) = patch.harmony {
+            self.harmony.merge_patch(harmony);
+        }
+        if let Some(harmony_gain) = patch.harmony_gain {
+            self.harmony_gain = harmony_gain;
+        }
+        if let Some(harmonic_modulation) = patch.harmonic_modulation {
+            self.harmonic_modulation = harmonic_modulation;
+        }
+        if let Some(dry_mix) = patch.dry_mix {
+            self.dry_mix = dry_mix;
+        }
+        if let Some(random_seed) = patch.random_seed {
+            self.random_seed = random_seed;
+        }
+    }
+
     /// Validates all fields, also the settings for stages that are disabled
     /// or not active.
     ///
@@ -308,6 +558,245 @@ impl ResynthesisConfig {
             1,
             16,
         )
+    }
+}
+
+impl From<ResynthesisPatch> for ResynthesisConfig {
+    fn from(patch: ResynthesisPatch) -> Self {
+        let mut config = Self::default();
+        config.merge_patch(patch);
+        config
+    }
+}
+
+/// Partial changes for [`ResynthesisConfig`].
+///
+/// Only fields and sub-patches that are `Some` apply in
+/// [`ResynthesisConfig::merge_patch`]. All fields are `None` by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct ResynthesisPatch {
+    /// Partial changes for pitch acquisition and reporting bounds.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub pitch: Option<PitchPatch>,
+    /// Partial changes for target notes and retune smoothing.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub correction: Option<CorrectionPatch>,
+    /// The pitch multiplier, 0.25..=4.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub pitch_ratio: Option<f32>,
+    /// Partial changes for vocal-tract controls and aspiration.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub formant: Option<FormantPatch>,
+    /// The voice arrangement.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub mode: Option<MultiVoiceMode>,
+    /// The total number of choir voices, with the lead voice, 1..=16.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub choir_voices: Option<u8>,
+    /// The drift control for secondary voices, 10..=100, without a unit.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub choir_detune: Option<f32>,
+    /// The scale of the choir delay table, 20..=200, without a unit.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub choir_delay: Option<f32>,
+    /// The stereo width of the choir, 0..=100%.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub choir_spread_percent: Option<f32>,
+    /// Enables or disables a stereo pan for each voice.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub stereo_output: Option<bool>,
+    /// Partial changes for the four harmony voices.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub harmony: Option<HarmonyPatch>,
+    /// The pan gain of the harmony voices, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub harmony_gain: Option<f32>,
+    /// The modulation depth, 0..=24, without a unit.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub harmonic_modulation: Option<f32>,
+    /// The dry fraction at the resynthesis stage, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub dry_mix: Option<f32>,
+    /// The seed for choir drift and aspiration, 0..=4294967295.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub random_seed: Option<u32>,
+}
+
+impl ResynthesisPatch {
+    /// Returns an empty patch with all fields set to `None`.
+    pub const fn new() -> Self {
+        Self {
+            pitch: None,
+            correction: None,
+            pitch_ratio: None,
+            formant: None,
+            mode: None,
+            choir_voices: None,
+            choir_detune: None,
+            choir_delay: None,
+            choir_spread_percent: None,
+            stereo_output: None,
+            harmony: None,
+            harmony_gain: None,
+            harmonic_modulation: None,
+            dry_mix: None,
+            random_seed: None,
+        }
+    }
+
+    /// Sets `pitch` on this patch.
+    pub const fn with_pitch(mut self, pitch: PitchPatch) -> Self {
+        self.pitch = Some(pitch);
+        self
+    }
+
+    /// Sets `correction` on this patch.
+    pub const fn with_correction(mut self, correction: CorrectionPatch) -> Self {
+        self.correction = Some(correction);
+        self
+    }
+
+    /// Sets `pitch_ratio` on this patch, 0.25..=4.
+    pub const fn with_pitch_ratio(mut self, pitch_ratio: f32) -> Self {
+        self.pitch_ratio = Some(pitch_ratio);
+        self
+    }
+
+    /// Sets `formant` on this patch.
+    pub const fn with_formant(mut self, formant: FormantPatch) -> Self {
+        self.formant = Some(formant);
+        self
+    }
+
+    /// Sets `mode` on this patch.
+    pub const fn with_mode(mut self, mode: MultiVoiceMode) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+
+    /// Sets `choir_voices` on this patch, 1..=16.
+    pub const fn with_choir_voices(mut self, choir_voices: u8) -> Self {
+        self.choir_voices = Some(choir_voices);
+        self
+    }
+
+    /// Sets `choir_detune` on this patch, 10..=100.
+    pub const fn with_choir_detune(mut self, choir_detune: f32) -> Self {
+        self.choir_detune = Some(choir_detune);
+        self
+    }
+
+    /// Sets `choir_delay` on this patch, 20..=200.
+    pub const fn with_choir_delay(mut self, choir_delay: f32) -> Self {
+        self.choir_delay = Some(choir_delay);
+        self
+    }
+
+    /// Sets `choir_spread_percent` on this patch, 0..=100%.
+    pub const fn with_choir_spread_percent(mut self, choir_spread_percent: f32) -> Self {
+        self.choir_spread_percent = Some(choir_spread_percent);
+        self
+    }
+
+    /// Sets `stereo_output` on this patch.
+    pub const fn with_stereo_output(mut self, stereo_output: bool) -> Self {
+        self.stereo_output = Some(stereo_output);
+        self
+    }
+
+    /// Sets `harmony` on this patch.
+    pub const fn with_harmony(mut self, harmony: HarmonyPatch) -> Self {
+        self.harmony = Some(harmony);
+        self
+    }
+
+    /// Sets `harmony_gain` on this patch, 0..=1.
+    pub const fn with_harmony_gain(mut self, harmony_gain: f32) -> Self {
+        self.harmony_gain = Some(harmony_gain);
+        self
+    }
+
+    /// Sets `harmonic_modulation` on this patch, 0..=24.
+    pub const fn with_harmonic_modulation(mut self, harmonic_modulation: f32) -> Self {
+        self.harmonic_modulation = Some(harmonic_modulation);
+        self
+    }
+
+    /// Sets `dry_mix` on this patch, 0..=1.
+    pub const fn with_dry_mix(mut self, dry_mix: f32) -> Self {
+        self.dry_mix = Some(dry_mix);
+        self
+    }
+
+    /// Sets `random_seed` on this patch, 0..=4294967295.
+    pub const fn with_random_seed(mut self, random_seed: u32) -> Self {
+        self.random_seed = Some(random_seed);
+        self
     }
 }
 

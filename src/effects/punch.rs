@@ -67,6 +67,58 @@ impl Default for PunchConfig {
     }
 }
 impl PunchConfig {
+    /// Returns a copy with `enabled` set to the given value.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Returns a copy with `gain_db` set to the given value, -96..=12.
+    pub const fn with_gain_db(mut self, gain_db: f32) -> Self {
+        self.gain_db = gain_db;
+        self
+    }
+
+    /// Returns a copy with `impact` set to the given value, 0..=1.
+    pub const fn with_impact(mut self, impact: f32) -> Self {
+        self.impact = impact;
+        self
+    }
+
+    /// Returns a copy with `ceiling_db` set to the given value, -96..=0.
+    pub const fn with_ceiling_db(mut self, ceiling_db: f32) -> Self {
+        self.ceiling_db = ceiling_db;
+        self
+    }
+
+    /// Returns a copy with `attack_ms` set to the given value, 0.01..=5000.
+    pub const fn with_attack_ms(mut self, attack_ms: f32) -> Self {
+        self.attack_ms = attack_ms;
+        self
+    }
+
+    /// Copies each present field of `patch` into this configuration.
+    ///
+    /// Fields that are `None` do not change. This method does not validate the
+    /// result.
+    pub fn merge_patch(&mut self, patch: PunchPatch) {
+        if let Some(enabled) = patch.enabled {
+            self.enabled = enabled;
+        }
+        if let Some(gain_db) = patch.gain_db {
+            self.gain_db = gain_db;
+        }
+        if let Some(impact) = patch.impact {
+            self.impact = impact;
+        }
+        if let Some(ceiling_db) = patch.ceiling_db {
+            self.ceiling_db = ceiling_db;
+        }
+        if let Some(attack_ms) = patch.attack_ms {
+            self.attack_ms = attack_ms;
+        }
+    }
+
     /// Validates all fields, also when Punch is disabled.
     ///
     /// The floating-point controls must be finite and in their documented
@@ -82,6 +134,105 @@ impl PunchConfig {
         check_range("punch.impact", self.impact, 0.0, 1.0)?;
         check_range("punch.ceiling_db", self.ceiling_db, -96.0, 0.0)?;
         check_range("punch.attack_ms", self.attack_ms, 0.01, 5000.0)
+    }
+}
+
+impl From<PunchPatch> for PunchConfig {
+    fn from(patch: PunchPatch) -> Self {
+        let mut config = Self::default();
+        config.merge_patch(patch);
+        config
+    }
+}
+
+/// Partial changes for [`PunchConfig`].
+///
+/// Only fields that are `Some` overwrite the target fields in
+/// [`PunchConfig::merge_patch`]. All fields are `None` by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct PunchPatch {
+    /// Enables or disables this input stage.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub enabled: Option<bool>,
+    /// The input gain in decibels, -96..=12.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub gain_db: Option<f32>,
+    /// The transient emphasis without a unit, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub impact: Option<f32>,
+    /// The output ceiling of the saturation in dBFS, -96..=0.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub ceiling_db: Option<f32>,
+    /// The attack half-life of the peak follower in milliseconds, 0.01..=5000.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub attack_ms: Option<f32>,
+}
+
+impl PunchPatch {
+    /// Returns an empty patch with all fields set to `None`.
+    pub const fn new() -> Self {
+        Self {
+            enabled: None,
+            gain_db: None,
+            impact: None,
+            ceiling_db: None,
+            attack_ms: None,
+        }
+    }
+
+    /// Sets `enabled` on this patch.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    /// Sets `gain_db` on this patch, -96..=12.
+    pub const fn with_gain_db(mut self, gain_db: f32) -> Self {
+        self.gain_db = Some(gain_db);
+        self
+    }
+
+    /// Sets `impact` on this patch, 0..=1.
+    pub const fn with_impact(mut self, impact: f32) -> Self {
+        self.impact = Some(impact);
+        self
+    }
+
+    /// Sets `ceiling_db` on this patch, -96..=0.
+    pub const fn with_ceiling_db(mut self, ceiling_db: f32) -> Self {
+        self.ceiling_db = Some(ceiling_db);
+        self
+    }
+
+    /// Sets `attack_ms` on this patch, 0.01..=5000.
+    pub const fn with_attack_ms(mut self, attack_ms: f32) -> Self {
+        self.attack_ms = Some(attack_ms);
+        self
     }
 }
 

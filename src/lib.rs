@@ -9,20 +9,20 @@
 //! # Preparing and configuring
 //!
 //! [`PrepareConfig`] sets the sample rate. It also sets the maximum number of
-//! frames for one process call or one drain call. To make a
-//! [`ProcessorConfig`], start from its default value and change its public
-//! stage fields. Then give it to [`Processor::new`]. All configuration ranges
-//! are inclusive, unless the documentation tells you differently.
-//! Floating-point controls must be finite.
+//! frames for one process call or one drain call. To configure a processor,
+//! give a [`ProcessorConfig`] or a partial [`ProcessorPatch`] to
+//! [`Processor::new`]. Each `*Config` and `*Patch` type provides `with_*`
+//! builders. All configuration ranges are inclusive, unless the documentation
+//! tells you differently. Floating-point controls must be finite.
 //!
 //! Validation also examines disabled stages and the controls of voice modes
 //! that are not active.
 //!
 //! A configuration value is a copy. If you change it, the processor does not
-//! change until [`Processor::set_config`] or a configuration event applies it.
-//! You can change settings between blocks, or at a frame offset with a
-//! [`TimedEvent`]. To change the sample rate or the block limit, you
-//! must make a new processor.
+//! change until [`Processor::set_config`], [`Processor::update_config`] or a
+//! configuration event applies it. You can change settings between blocks, or
+//! at a frame offset with a [`TimedEvent`]. To change the sample rate or the
+//! block limit, you must make a new processor.
 //!
 //! # Audio and timed controls
 //!
@@ -121,19 +121,22 @@ mod scale;
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub mod wasm;
 
-pub use config::{PrepareConfig, ProcessorConfig, SampleRate};
-pub use effects::alien::AlienConfig;
-pub use effects::punch::PunchConfig;
-pub use effects::reverb::{ReverbConfig, ReverbMode};
-pub use effects::warm::WarmConfig;
+pub use config::{PrepareConfig, ProcessorConfig, ProcessorPatch, SampleRate};
+pub use effects::alien::{AlienConfig, AlienPatch};
+pub use effects::punch::{PunchConfig, PunchPatch};
+pub use effects::reverb::{ReverbConfig, ReverbMode, ReverbPatch};
+pub use effects::warm::{WarmConfig, WarmPatch};
 pub use error::{ConfigProblem, Error, EventProblem};
 pub use events::{ControlEvent, TimedEvent};
-pub use formant::FormantConfig;
+pub use formant::{FormantConfig, FormantPatch};
 pub use harmony::{
-    ChordDegree, ChordName, HarmonyConfig, HarmonyScale, HarmonySource, Inversion, HARMONY_VOICES,
+    ChordDegree, ChordName, HarmonyConfig, HarmonyPatch, HarmonyScale, HarmonySource, Inversion,
+    HARMONY_VOICES,
 };
 pub use midi::MidiEvent;
-pub use pitch::PitchConfig;
+pub use pitch::{PitchConfig, PitchPatch};
 pub use processor::{Feedback, Processor, Telemetry};
-pub use resynthesis::{CorrectionConfig, MultiVoiceMode, ResynthesisConfig};
+pub use resynthesis::{
+    CorrectionConfig, CorrectionPatch, MultiVoiceMode, ResynthesisConfig, ResynthesisPatch,
+};
 pub use scale::{CorrectionScale, NoteMask, PitchClass};

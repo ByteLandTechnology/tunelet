@@ -43,6 +43,31 @@ impl Default for AlienConfig {
     }
 }
 impl AlienConfig {
+    /// Returns a copy with `enabled` set to the given value.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Returns a copy with `loop_frames` set to the given value, 1..=96000.
+    pub const fn with_loop_frames(mut self, loop_frames: u32) -> Self {
+        self.loop_frames = loop_frames;
+        self
+    }
+
+    /// Copies each present field of `patch` into this configuration.
+    ///
+    /// Fields that are `None` do not change. This method does not validate the
+    /// result.
+    pub fn merge_patch(&mut self, patch: AlienPatch) {
+        if let Some(enabled) = patch.enabled {
+            self.enabled = enabled;
+        }
+        if let Some(loop_frames) = patch.loop_frames {
+            self.loop_frames = loop_frames;
+        }
+    }
+
     /// Validates all fields, also when Alien is disabled.
     ///
     /// `loop_frames` must be in its documented inclusive range. Validation
@@ -54,6 +79,63 @@ impl AlienConfig {
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
         check_count("alien.loop_frames", i64::from(self.loop_frames), 1, 96_000)
+    }
+}
+
+impl From<AlienPatch> for AlienConfig {
+    fn from(patch: AlienPatch) -> Self {
+        let mut config = Self::default();
+        config.merge_patch(patch);
+        config
+    }
+}
+
+/// Partial changes for [`AlienConfig`].
+///
+/// Only fields that are `Some` overwrite the target fields in
+/// [`AlienConfig::merge_patch`]. All fields are `None` by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct AlienPatch {
+    /// Selects reversed playback instead of the direct input.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub enabled: Option<bool>,
+    /// The loop length in frames, 1..=96000.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub loop_frames: Option<u32>,
+}
+
+impl AlienPatch {
+    /// Returns an empty patch with all fields set to `None`.
+    pub const fn new() -> Self {
+        Self {
+            enabled: None,
+            loop_frames: None,
+        }
+    }
+
+    /// Sets `enabled` on this patch.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    /// Sets `loop_frames` on this patch, 1..=96000.
+    pub const fn with_loop_frames(mut self, loop_frames: u32) -> Self {
+        self.loop_frames = Some(loop_frames);
+        self
     }
 }
 

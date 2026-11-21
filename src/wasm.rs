@@ -14,15 +14,18 @@
 //! PCM API does not give buffer pointers or long-lived memory views to
 //! JavaScript. The class copies the input before it writes the output.
 //!
-//! Configuration objects obey these rules:
+//! Configuration and patch objects obey these rules:
 //!
 //! - Field names use camelCase.
 //! - Enum values are strings.
-//! - Each object must contain all required fields.
-//! - The optional harmony `voices` field defaults to 4.
+//! - Complete configuration objects contain all fields, except that the
+//!   optional harmony `voices` field defaults to 4.
+//! - Patch objects make all fields optional and merge only defined fields.
 //!
-//! [`default_config`] gives a configuration to start from. Control events use
-//! `{ type, value }`, and the reset control has no `value`. MIDI messages use
+//! [`default_config`] gives a complete configuration. [`note_mask_from_key_scale`]
+//! makes a correction mask from a key and a scale, and [`parse_midi_bytes`]
+//! decodes a three-byte MIDI packet. Control events use `{ type, value }`, and
+//! the reset control has no `value`. MIDI messages use
 //! `{ type, channel, note, velocity }`, with the fields that apply to the
 //! selected variant. The TypeScript declarations come from the same Rust types
 //! that validation uses.
@@ -42,9 +45,10 @@
 //! `free()` method.
 
 use crate::{
-    Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
+    CorrectionScale, Error, Feedback, MidiEvent, NoteMask, PitchClass, PrepareConfig, Processor,
+    ProcessorConfig, ProcessorPatch, SampleRate, Telemetry, TimedEvent,
 };
-use js_sys::{Float32Array, Int16Array};
+use js_sys::{Array, Float32Array, Int16Array, Number, Uint8Array};
 use serde::{Deserialize, Serialize};
 use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
@@ -60,12 +64,17 @@ use wasm_bindgen::prelude::*;
 #[serde(transparent)]
 pub struct BlockEvents(Vec<TimedEvent>);
 
+/// A three-byte MIDI packet (`Uint8Array | readonly number[]` in TypeScript).
+#[derive(Serialize, Deserialize, Tsify)]
+#[serde(transparent)]
+#[tsify(type = "Uint8Array | readonly number[]")]
+pub struct MidiBytes([u8; 3]);
+
 /// Returns a complete, independent default configuration for JavaScript.
 ///
-/// Change its fields and give it to `Tunelet` or to `setConfig`. The
-/// `randomSeed` field is a JavaScript `bigint`, so it keeps all 64 bits. After
-/// the binding decodes them, floating-point controls have the precision of the
-/// Rust `f32` type.
+/// Change its fields and give it to `Tunelet`, `setConfig` or `updateConfig`.
+/// All numeric fields use JavaScript `number`. After the binding decodes them,
+/// floating-point controls have the precision of the Rust `f32` type.
 ///
 /// # Errors
 ///
@@ -74,6 +83,43 @@ pub struct BlockEvents(Vec<TimedEvent>);
 #[wasm_bindgen(js_name = defaultConfig)]
 pub fn default_config() -> Result<Ts<ProcessorConfig>, JsError> {
     Ok(ProcessorConfig::default().into_ts()?)
+}
+
+/// Returns the correction pitch-class mask for `key` and `scale`.
+///
+/// Each scale mode enables the same pitch classes as in native Rust.
+/// `"chromatic"` enables all twelve pitch classes for every key.
+///
+/// # Errors
+///
+/// Throws a JavaScript `Error` if `key` or `scale` is not a valid enum string.
+#[wasm_bindgen(js_name = noteMaskFromKeyScale)]
+pub fn note_mask_from_key_scale(
+    key: Ts<PitchClass>,
+    scale: Ts<CorrectionScale>,
+) -> Result<Ts<NoteMask>, JsError> {
+    Ok(NoteMask::from_key_scale(key.to_rust()?, scale.to_rust()?).into_ts()?)
+}
+
+/// Decodes one three-byte MIDI message into a `MidiEvent`, or `undefined` if
+/// the message is valid but not supported.
+///
+/// Accepts Note On, Note Off and controller 123 (All Notes Off) with the
+/// validation rules of [`MidiEvent::from_bytes`]. A Note On with velocity zero
+/// returns a `noteOff` event.
+///
+/// # Errors
+///
+/// Throws a JavaScript `Error` if `bytes` does not have three integer bytes in
+/// `0..=255`, if the status byte is below `0x80` or if a data byte is above
+/// 127.
+#[wasm_bindgen(js_name = parseMidiBytes)]
+pub fn parse_midi_bytes(bytes: Ts<MidiBytes>) -> Result<Option<Ts<MidiEvent>>, JsError> {
+    let raw = decode_midi_bytes(&bytes.js_value())?;
+    match MidiEvent::from_bytes(raw)? {
+        Some(event) => Ok(Some(event.into_ts()?)),
+        None => Ok(None),
+    }
 }
 
 /// A stateful PCM processor that JavaScript uses as the `Tunelet` class.
@@ -121,10 +167,12 @@ impl WasmProcessor {
     ///
     /// `sample_rate` must be 44100 or 48000. `max_block_frames` must be an
     /// integer in 1..=4294967295. It is a limit for each call, and smaller
-    /// blocks and empty blocks are also valid. If you omit `config`, the
-    /// processor uses the default configuration. The constructor validates
-    /// the settings before it allocates the processor or the PCM buffers. In
-    /// TypeScript, use `new Tunelet(sampleRate, maxBlockFrames, config)`.
+    /// blocks and empty blocks are also valid. `config` accepts a partial
+    /// `ProcessorPatch` or a complete `ProcessorConfig` and merges defined
+    /// fields onto the defaults. If you omit `config`, the processor uses the
+    /// default configuration. The constructor validates the settings before it
+    /// allocates the processor or the PCM buffers. In TypeScript, use
+    /// `new Tunelet(sampleRate, maxBlockFrames, config)`.
     ///
     /// # Errors
     ///
@@ -132,8 +180,8 @@ impl WasmProcessor {
     ///
     /// - The rate is not 44100 or 48000.
     /// - The block limit is not an integer or is out of range.
-    /// - The configuration object is malformed or a field is missing.
-    /// - The configuration is not valid.
+    /// - The configuration object is malformed.
+    /// - The merged configuration is not valid.
     /// - The reservation of a PCM buffer fails.
     ///
     /// The available Wasm memory must also have sufficient space for the DSP
@@ -142,7 +190,7 @@ impl WasmProcessor {
     pub fn new(
         sample_rate: f64,
         max_block_frames: f64,
-        config: Option<Ts<ProcessorConfig>>,
+        config: Option<Ts<ProcessorPatch>>,
     ) -> Result<WasmProcessor, JsError> {
         // Accept JavaScript numbers without the u32 coercion of wasm-bindgen.
         // That coercion silently truncates fractions and wraps large values.
@@ -161,7 +209,7 @@ impl WasmProcessor {
         let max_block_frames = max_block_frames as usize;
         let preparation = PrepareConfig::new(rate, max_block_frames)?;
         let config = match config {
-            Some(value) => value.to_rust()?,
+            Some(value) => ProcessorConfig::from(value.to_rust()?),
             None => ProcessorConfig::default(),
         };
         let processor = Processor::new(preparation, config)?;
@@ -202,8 +250,8 @@ impl WasmProcessor {
 
     /// Returns a copy of the active configuration as a new JavaScript object.
     ///
-    /// A change to the object has no effect until `setConfig` or a timed event
-    /// applies it.
+    /// A change to the object has no effect until `setConfig`, `updateConfig`
+    /// or a timed event applies it.
     ///
     /// # Errors
     ///
@@ -225,6 +273,24 @@ impl WasmProcessor {
     #[wasm_bindgen(js_name = setConfig)]
     pub fn set_config(&mut self, config: Ts<ProcessorConfig>) -> Result<(), JsError> {
         self.processor.set_config(config.to_rust()?)?;
+        Ok(())
+    }
+
+    /// Decodes a partial configuration patch, validates the merged settings
+    /// and applies them.
+    ///
+    /// Undefined fields keep their active values. State retention and drain
+    /// cancellation follow `setConfig`. The conversion ignores additional
+    /// properties of the JavaScript object.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if the patch object is malformed or if a merged field
+    /// is out of range. After an error, all processor state and any active
+    /// drain stay the same.
+    #[wasm_bindgen(js_name = updateConfig)]
+    pub fn update_config(&mut self, patch: Ts<ProcessorPatch>) -> Result<(), JsError> {
+        self.processor.update_config(patch.to_rust()?)?;
         Ok(())
     }
 
@@ -356,8 +422,9 @@ impl WasmProcessor {
 
     /// Returns a new feedback object and does not clear the peak window.
     ///
-    /// `processedFrames` is a `bigint`, so its 64-bit count stays exact.
-    /// `latencyFrames` is a number. See `Feedback` for each measurement.
+    /// `processedFrames` and `latencyFrames` are JavaScript numbers.
+    /// `processedFrames` saturates at `Number.MAX_SAFE_INTEGER`. See `Feedback`
+    /// for each measurement.
     ///
     /// `targetMidiNote` is `undefined` in these cases, which are also the
     /// cases where `voiced` is `false`:
@@ -394,8 +461,9 @@ impl WasmProcessor {
     ///
     /// The telemetry is for meters and displays. It gives the ratio and the
     /// gain of each voice, the input and output peaks, the pitch clarity and
-    /// the state of the effects. `processedFrames` is a `bigint`. See
-    /// `Telemetry` for each measurement.
+    /// the state of the effects. `processedFrames` is a JavaScript number that
+    /// saturates at `Number.MAX_SAFE_INTEGER`. See `Telemetry` for each
+    /// measurement.
     ///
     /// # Errors
     ///
@@ -522,14 +590,42 @@ fn pcm_buffer(frames: usize) -> Result<Vec<i16>, JsError> {
     Ok(buffer)
 }
 
-/// Serializes the bounded Wasm frame count as a JavaScript number.
-///
-/// The serializer of the feedback structure keeps its other counter, a `u64`,
-/// as a `bigint`. This module compiles only for wasm32, where every `usize`
-/// fits in a `u32`.
+/// Decodes a three-byte MIDI packet from a `Uint8Array` or a three-element
+/// JavaScript array without integer wrap.
+fn decode_midi_bytes(value: &JsValue) -> Result<[u8; 3], Error> {
+    if let Some(bytes) = value.dyn_ref::<Uint8Array>() {
+        if bytes.length() != 3 {
+            return Err(Error::InvalidMidi);
+        }
+        let mut packet = [0; 3];
+        bytes.copy_to(&mut packet);
+        return Ok(packet);
+    }
+    if let Some(array) = value.dyn_ref::<Array>() {
+        if array.length() != 3 {
+            return Err(Error::InvalidMidi);
+        }
+        let mut packet = [0; 3];
+        for (slot, item) in packet.iter_mut().zip(array.iter()) {
+            let Some(number) = item.as_f64() else {
+                return Err(Error::InvalidMidi);
+            };
+            if !Number::is_safe_integer(&item) || !(0.0..=255.0).contains(&number) {
+                return Err(Error::InvalidMidi);
+            }
+            *slot = number as u8;
+        }
+        return Ok(packet);
+    }
+    Err(Error::InvalidMidi)
+}
+
+/// Serializes a 64-bit frame count as a JavaScript number, saturated at
+/// `Number.MAX_SAFE_INTEGER`.
 pub(crate) fn serialize_frame_count<S: serde::Serializer>(
-    frames: &usize,
+    frames: &u64,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    serializer.serialize_u32(*frames as u32)
+    const MAX_SAFE_INTEGER: u64 = (1 << f64::MANTISSA_DIGITS) - 1;
+    serializer.serialize_f64((*frames).min(MAX_SAFE_INTEGER) as f64)
 }

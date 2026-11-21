@@ -52,6 +52,42 @@ impl Default for PitchConfig {
 }
 
 impl PitchConfig {
+    /// Returns a copy with `threshold` set to the given value, 0.002..=0.2.
+    pub const fn with_threshold(mut self, threshold: f32) -> Self {
+        self.threshold = threshold;
+        self
+    }
+
+    /// Returns a copy with `min_frequency_hz` set to the given value,
+    /// 40..=2000.
+    pub const fn with_min_frequency_hz(mut self, min_frequency_hz: f32) -> Self {
+        self.min_frequency_hz = min_frequency_hz;
+        self
+    }
+
+    /// Returns a copy with `max_frequency_hz` set to the given value,
+    /// 40..=2000.
+    pub const fn with_max_frequency_hz(mut self, max_frequency_hz: f32) -> Self {
+        self.max_frequency_hz = max_frequency_hz;
+        self
+    }
+
+    /// Copies each present field of `patch` into this configuration.
+    ///
+    /// Fields that are `None` do not change. This method does not validate the
+    /// result.
+    pub fn merge_patch(&mut self, patch: PitchPatch) {
+        if let Some(threshold) = patch.threshold {
+            self.threshold = threshold;
+        }
+        if let Some(min_frequency_hz) = patch.min_frequency_hz {
+            self.min_frequency_hz = min_frequency_hz;
+        }
+        if let Some(max_frequency_hz) = patch.max_frequency_hz {
+            self.max_frequency_hz = max_frequency_hz;
+        }
+    }
+
     /// Applies only the bounds for host reports to a kept estimate.
     ///
     /// If the estimate is not voiced or is out of range, the result is the
@@ -90,6 +126,81 @@ impl PitchConfig {
             return Err(Error::config(min, ConfigProblem::Unordered { other: max }));
         }
         Ok(())
+    }
+}
+
+impl From<PitchPatch> for PitchConfig {
+    fn from(patch: PitchPatch) -> Self {
+        let mut config = Self::default();
+        config.merge_patch(patch);
+        config
+    }
+}
+
+/// Partial changes for [`PitchConfig`].
+///
+/// Only fields that are `Some` overwrite the target fields in
+/// [`PitchConfig::merge_patch`]. All fields are `None` by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct PitchPatch {
+    /// The normalized cycle-difference threshold for acquisition, 0.002..=0.2.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub threshold: Option<f32>,
+    /// The lower bound of the feedback in hertz (inclusive), 40..=2000.
+    ///
+    /// After the merge, it must be strictly less than `max_frequency_hz`.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub min_frequency_hz: Option<f32>,
+    /// The upper bound of the feedback in hertz (inclusive), 40..=2000.
+    ///
+    /// After the merge, it must be strictly greater than `min_frequency_hz`.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub max_frequency_hz: Option<f32>,
+}
+
+impl PitchPatch {
+    /// Returns an empty patch with all fields set to `None`.
+    pub const fn new() -> Self {
+        Self {
+            threshold: None,
+            min_frequency_hz: None,
+            max_frequency_hz: None,
+        }
+    }
+
+    /// Sets `threshold` on this patch, 0.002..=0.2.
+    pub const fn with_threshold(mut self, threshold: f32) -> Self {
+        self.threshold = Some(threshold);
+        self
+    }
+
+    /// Sets `min_frequency_hz` on this patch, 40..=2000.
+    pub const fn with_min_frequency_hz(mut self, min_frequency_hz: f32) -> Self {
+        self.min_frequency_hz = Some(min_frequency_hz);
+        self
+    }
+
+    /// Sets `max_frequency_hz` on this patch, 40..=2000.
+    pub const fn with_max_frequency_hz(mut self, max_frequency_hz: f32) -> Self {
+        self.max_frequency_hz = Some(max_frequency_hz);
+        self
     }
 }
 

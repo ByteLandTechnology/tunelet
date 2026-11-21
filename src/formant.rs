@@ -84,6 +84,59 @@ impl Default for FormantConfig {
     }
 }
 impl FormantConfig {
+    /// Returns a copy with `enabled` set to the given value.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Returns a copy with `width` set to the given value, 0.5..=2.
+    pub const fn with_width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
+
+    /// Returns a copy with `stretch` set to the given value, 0.5..=2.
+    pub const fn with_stretch(mut self, stretch: f32) -> Self {
+        self.stretch = stretch;
+        self
+    }
+
+    /// Returns a copy with `aspiration_mix` set to the given value, 0..=1.
+    pub const fn with_aspiration_mix(mut self, aspiration_mix: f32) -> Self {
+        self.aspiration_mix = aspiration_mix;
+        self
+    }
+
+    /// Returns a copy with `aspiration_cutoff_hz` set to the given value,
+    /// 500..=10000.
+    pub const fn with_aspiration_cutoff_hz(mut self, aspiration_cutoff_hz: f32) -> Self {
+        self.aspiration_cutoff_hz = aspiration_cutoff_hz;
+        self
+    }
+
+    /// Copies each present field of `patch` into this configuration.
+    ///
+    /// Fields that are `None` do not change. This method does not validate the
+    /// result.
+    pub fn merge_patch(&mut self, patch: FormantPatch) {
+        if let Some(enabled) = patch.enabled {
+            self.enabled = enabled;
+        }
+        if let Some(width) = patch.width {
+            self.width = width;
+        }
+        if let Some(stretch) = patch.stretch {
+            self.stretch = stretch;
+        }
+        if let Some(aspiration_mix) = patch.aspiration_mix {
+            self.aspiration_mix = aspiration_mix;
+        }
+        if let Some(aspiration_cutoff_hz) = patch.aspiration_cutoff_hz {
+            self.aspiration_cutoff_hz = aspiration_cutoff_hz;
+        }
+    }
+
     /// Validates all fields, also if the formant stage is disabled.
     ///
     /// Each floating-point control must be finite and in its documented
@@ -101,6 +154,105 @@ impl FormantConfig {
         check_range(field, self.aspiration_mix, 0.0, 1.0)?;
         let field = "resynthesis.formant.aspiration_cutoff_hz";
         check_range(field, self.aspiration_cutoff_hz, 500.0, 10000.0)
+    }
+}
+
+impl From<FormantPatch> for FormantConfig {
+    fn from(patch: FormantPatch) -> Self {
+        let mut config = Self::default();
+        config.merge_patch(patch);
+        config
+    }
+}
+
+/// Partial changes for [`FormantConfig`].
+///
+/// Only fields that are `Some` overwrite the target fields in
+/// [`FormantConfig::merge_patch`]. All fields are `None` by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct FormantPatch {
+    /// Enables or disables formant analysis and synthesis.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub enabled: Option<bool>,
+    /// The vocal-tract width factor, 0.5..=2.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub width: Option<f32>,
+    /// The vocal-tract length factor, 0.5..=2.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub stretch: Option<f32>,
+    /// The aspiration level, 0..=1, without a unit.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub aspiration_mix: Option<f32>,
+    /// The high-pass cutoff for aspiration in hertz, 500..=10000.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub aspiration_cutoff_hz: Option<f32>,
+}
+
+impl FormantPatch {
+    /// Returns an empty patch with all fields set to `None`.
+    pub const fn new() -> Self {
+        Self {
+            enabled: None,
+            width: None,
+            stretch: None,
+            aspiration_mix: None,
+            aspiration_cutoff_hz: None,
+        }
+    }
+
+    /// Sets `enabled` on this patch.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    /// Sets `width` on this patch, 0.5..=2.
+    pub const fn with_width(mut self, width: f32) -> Self {
+        self.width = Some(width);
+        self
+    }
+
+    /// Sets `stretch` on this patch, 0.5..=2.
+    pub const fn with_stretch(mut self, stretch: f32) -> Self {
+        self.stretch = Some(stretch);
+        self
+    }
+
+    /// Sets `aspiration_mix` on this patch, 0..=1.
+    pub const fn with_aspiration_mix(mut self, aspiration_mix: f32) -> Self {
+        self.aspiration_mix = Some(aspiration_mix);
+        self
+    }
+
+    /// Sets `aspiration_cutoff_hz` on this patch, 500..=10000.
+    pub const fn with_aspiration_cutoff_hz(mut self, aspiration_cutoff_hz: f32) -> Self {
+        self.aspiration_cutoff_hz = Some(aspiration_cutoff_hz);
+        self
     }
 }
 

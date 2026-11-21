@@ -40,6 +40,31 @@ impl Default for WarmConfig {
     }
 }
 impl WarmConfig {
+    /// Returns a copy with `enabled` set to the given value.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Returns a copy with `drive_db` set to the given value, 0..=6.
+    pub const fn with_drive_db(mut self, drive_db: f32) -> Self {
+        self.drive_db = drive_db;
+        self
+    }
+
+    /// Copies each present field of `patch` into this configuration.
+    ///
+    /// Fields that are `None` do not change. This method does not validate the
+    /// result.
+    pub fn merge_patch(&mut self, patch: WarmPatch) {
+        if let Some(enabled) = patch.enabled {
+            self.enabled = enabled;
+        }
+        if let Some(drive_db) = patch.drive_db {
+            self.drive_db = drive_db;
+        }
+    }
+
     /// Validates all fields, also when Warm is disabled.
     ///
     /// `drive_db` must be finite and in its documented inclusive range.
@@ -52,6 +77,63 @@ impl WarmConfig {
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
         check_range("warm.drive_db", self.drive_db, 0.0, 6.0)
+    }
+}
+
+impl From<WarmPatch> for WarmConfig {
+    fn from(patch: WarmPatch) -> Self {
+        let mut config = Self::default();
+        config.merge_patch(patch);
+        config
+    }
+}
+
+/// Partial changes for [`WarmConfig`].
+///
+/// Only fields that are `Some` overwrite the target fields in
+/// [`WarmConfig::merge_patch`]. All fields are `None` by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct WarmPatch {
+    /// Enables or disables the saturation stage.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub enabled: Option<bool>,
+    /// The drive in decibels, 0..=6.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub drive_db: Option<f32>,
+}
+
+impl WarmPatch {
+    /// Returns an empty patch with all fields set to `None`.
+    pub const fn new() -> Self {
+        Self {
+            enabled: None,
+            drive_db: None,
+        }
+    }
+
+    /// Sets `enabled` on this patch.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    /// Sets `drive_db` on this patch, 0..=6.
+    pub const fn with_drive_db(mut self, drive_db: f32) -> Self {
+        self.drive_db = Some(drive_db);
+        self
     }
 }
 

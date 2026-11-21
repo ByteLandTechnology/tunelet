@@ -1,15 +1,29 @@
 /**
  * The shared ESM entry point for browsers and Node.js.
  *
- * Call `loadTunelet()` before you construct processors or read the default
- * configuration. Both environments use the same generated bindings and the
- * same Wasm binary. This module re-exports all named exports of the module
- * that wasm-bindgen generates, which include `Tunelet`, `defaultConfig`,
- * `initSync` and the configuration, event and feedback types.
+ * Call `loadTunelet()` before you construct processors or call the helper
+ * functions. Both environments use the same generated bindings and the same
+ * Wasm binary. This module re-exports all named exports of the module that
+ * wasm-bindgen generates, which include `Tunelet`, `defaultConfig`,
+ * `noteMaskFromKeyScale`, `parseMidiBytes`, `initSync` and the configuration,
+ * patch, event and feedback types.
  */
-import init, { initSync } from "../pkg/tunelet.js";
+import init, {
+  Tunelet,
+  defaultConfig,
+  initSync,
+  noteMaskFromKeyScale,
+  parseMidiBytes,
+} from "../pkg/tunelet.js";
 import type { InitInput, InitOutput } from "../pkg/tunelet.js";
 
+export {
+  Tunelet,
+  defaultConfig,
+  initSync,
+  noteMaskFromKeyScale,
+  parseMidiBytes,
+};
 export * from "../pkg/tunelet.js";
 
 /** The shared initialization promise, which a failure clears. */

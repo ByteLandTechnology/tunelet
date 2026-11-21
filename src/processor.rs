@@ -8,7 +8,7 @@ use crate::events::{ValidatedEvent, ValidatedEvents};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
 use crate::resynthesis::{self, Resynthesis};
-use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
+use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, ProcessorPatch, TimedEvent};
 
 /// A prepared vocal processor with state, mono input and stereo synthesis.
 ///
@@ -85,10 +85,11 @@ impl Processor {
     /// Validates the settings, allocates histories and makes a new processor.
     ///
     /// Each processor is independent. `preparation` fixes the rate and the
-    /// block limit for each call. After construction, the audio, control,
-    /// feedback, reset and drain calls do not allocate, do not lock and do no
-    /// I/O. Audio histories, pitch reports and meters start clear. The random
-    /// stream starts from the low 32 bits of `random_seed`.
+    /// block limit for each call. `config` can be a [`ProcessorConfig`] or a
+    /// [`ProcessorPatch`] that merges onto [`ProcessorConfig::default`]. After
+    /// construction, the audio, control, feedback, reset and drain calls do
+    /// not allocate, do not lock and do no I/O. Audio histories, pitch reports
+    /// and meters start clear. The random stream starts from `random_seed`.
     ///
     /// Punch uses its default cached drive until the first window of 100
     /// frames with Punch enabled. The initial note table of correction has the
@@ -100,7 +101,15 @@ impl Processor {
     /// not valid. This check occurs before the allocation of the histories.
     /// The types of `preparation` already make sure that the block limit is
     /// not zero and that the sample rate is supported.
-    pub fn new(preparation: PrepareConfig, config: ProcessorConfig) -> Result<Self, Error> {
+    pub fn new(
+        preparation: PrepareConfig,
+        config: impl Into<ProcessorConfig>,
+    ) -> Result<Self, Error> {
+        Self::new_from_config(preparation, config.into())
+    }
+
+    /// Allocates a processor from a concrete configuration after validation.
+    fn new_from_config(preparation: PrepareConfig, config: ProcessorConfig) -> Result<Self, Error> {
         config.validate()?;
         let rate = preparation.sample_rate;
         // Drive uses the default gain until the first 100-frame peak window.
@@ -114,7 +123,7 @@ impl Processor {
             resynthesis: Box::new(Resynthesis::new(rate, config.resynthesis)),
             alien: Alien::new(config.alien),
             reverb: Reverb::new(rate, config.reverb),
-            numeric: NumericContext::new(config.resynthesis.random_seed as u32),
+            numeric: NumericContext::new(config.resynthesis.random_seed),
             peak: 0,
             input_peak: 0,
             output_peaks: [0; 2],
@@ -467,8 +476,7 @@ impl Processor {
     /// Each successful call cancels a drain, also for an identical
     /// configuration. A change of reverb mode keeps the delay contents. If you
     /// disable Punch, Warm or reverb, the history of that stage stops. Alien
-    /// continues to record. A change in either half of the `u64` seed starts
-    /// the stream again, but the new sequence uses only the low 32 bits.
+    /// continues to record.
     ///
     /// # Errors
     ///
@@ -478,6 +486,23 @@ impl Processor {
         config.validate()?;
         self.apply_config(config);
         Ok(())
+    }
+
+    /// Merges `patch` onto a copy of the active configuration, validates the
+    /// result and applies it.
+    ///
+    /// Fields that are `None` keep their current values. State retention and
+    /// drain cancellation follow [`set_config`](Self::set_config).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfig`] if a merged field is not valid. The
+    /// method returns this error before it changes any state, also an active
+    /// drain.
+    pub fn update_config(&mut self, patch: ProcessorPatch) -> Result<(), Error> {
+        let mut config = self.config;
+        config.merge_patch(patch);
+        self.set_config(config)
     }
 
     /// Applies a configuration that the public setter or the preflight checked.
@@ -500,7 +525,7 @@ impl Processor {
             self.last_resample_ratio = 0.0;
         }
         if self.config.resynthesis.random_seed != config.resynthesis.random_seed {
-            self.numeric.random = RandomStream::new(config.resynthesis.random_seed as u32);
+            self.numeric.random = RandomStream::new(config.resynthesis.random_seed);
         }
         if self.config.alien != config.alien {
             self.alien.set_config(config.alien);
@@ -557,7 +582,7 @@ impl Processor {
         events: &'a [TimedEvent],
     ) -> Result<ValidatedEvents<'a>, Error> {
         self.check_block(input.len())?;
-        ValidatedEvents::new(events, input.len())
+        ValidatedEvents::new(events, input.len(), self.config)
     }
 
     /// Enforces the prepared block limit for each call.
@@ -573,18 +598,24 @@ impl Processor {
 
     /// Applies a validated control immediately before its frame is rendered.
     ///
-    /// A partial configuration event replaces one stage in the active
-    /// configuration. MIDI and reset events act directly. A reset does not
-    /// discard later events in the block.
+    /// Whole-stage events replace one stage in the active configuration, and
+    /// patch events merge only their `Some` fields. MIDI and reset events act
+    /// directly. A reset does not discard later events in the block.
     fn apply(&mut self, event: ValidatedEvent) {
         let mut config = self.config;
         match event.into_inner() {
             ControlEvent::Configure(value) => config = value,
+            ControlEvent::Patch(patch) => config.merge_patch(patch),
             ControlEvent::Resynthesis(value) => config.resynthesis = value,
+            ControlEvent::ResynthesisPatch(patch) => config.resynthesis.merge_patch(patch),
             ControlEvent::Punch(value) => config.punch = value,
+            ControlEvent::PunchPatch(patch) => config.punch.merge_patch(patch),
             ControlEvent::Warm(value) => config.warm = value,
+            ControlEvent::WarmPatch(patch) => config.warm.merge_patch(patch),
             ControlEvent::Alien(value) => config.alien = value,
+            ControlEvent::AlienPatch(patch) => config.alien.merge_patch(patch),
             ControlEvent::Reverb(value) => config.reverb = value,
+            ControlEvent::ReverbPatch(patch) => config.reverb.merge_patch(patch),
             ControlEvent::OutputGain(value) => config.output_gain = value,
             ControlEvent::Midi(event) => {
                 self.resynthesis.apply_midi(event);
@@ -707,8 +738,7 @@ impl Processor {
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase"),
-    tsify(large_number_types_as_bigints)
+    serde(rename_all = "camelCase")
 )]
 pub struct Feedback {
     /// The pitch-correction ratio from the last processed frame, where 1 is
@@ -765,13 +795,12 @@ pub struct Feedback {
     ///
     /// The count saturates at `u64::MAX`. Drain completion resets it in the
     /// last drain call.
-    pub processed_frames: u64,
-    /// The nominal resynthesis latency, as [`Processor::latency_frames`] gives.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(serialize_with = "crate::wasm::serialize_frame_count"),
-        tsify(type = "number")
+        serde(serialize_with = "crate::wasm::serialize_frame_count")
     )]
+    pub processed_frames: u64,
+    /// The nominal resynthesis latency, as [`Processor::latency_frames`] gives.
     pub latency_frames: usize,
 }
 
@@ -790,12 +819,15 @@ pub struct Feedback {
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase"),
-    tsify(large_number_types_as_bigints)
+    serde(rename_all = "camelCase")
 )]
 pub struct Telemetry {
     /// The number of frames processed since construction or the last reset,
     /// as [`Feedback::processed_frames`] gives.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(serialize_with = "crate::wasm::serialize_frame_count")
+    )]
     pub processed_frames: u64,
     /// The largest absolute input sample in the window, divided by 32768.
     ///

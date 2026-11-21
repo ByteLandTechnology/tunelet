@@ -1,5 +1,6 @@
 //! Pitch classes and correction tables, made from scales or held MIDI notes.
 
+use crate::harmony::HarmonyScale;
 use crate::midi::MidiEvent;
 use crate::SampleRate;
 
@@ -65,6 +66,8 @@ impl PitchClass {
 }
 
 /// A scale for [`NoteMask::from_key_scale`].
+///
+/// It includes all seven modes of [`HarmonyScale`] and [`Self::Chromatic`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -72,13 +75,39 @@ impl PitchClass {
     serde(rename_all = "camelCase")
 )]
 pub enum CorrectionScale {
-    /// The major scale.
+    /// Major (ionian): semitone offsets 0, 2, 4, 5, 7, 9, 11.
     Major,
-    /// The natural minor scale.
+    /// Major without the seventh degree: semitone offsets 0, 2, 4, 5, 7, 9.
+    MajorWithoutSeventh,
+    /// Major with a flat seventh (mixolydian): semitone offsets 0, 2, 4, 5, 7,
+    /// 9, 10.
+    MajorFlatSeventh,
+    /// Natural minor (aeolian): semitone offsets 0, 2, 3, 5, 7, 8, 10.
     Minor,
-    /// The chromatic scale with all notes.
+    /// Harmonic minor: semitone offsets 0, 2, 3, 5, 7, 8, 11.
+    HarmonicMinor,
+    /// Minor with a natural sixth (dorian): semitone offsets 0, 2, 3, 5, 7, 9,
+    /// 10.
+    MinorNaturalSixth,
+    /// Minor with a major seventh: semitone offsets 0, 2, 3, 5, 7, 9, 11.
+    MinorMajorSeventh,
+    /// The chromatic scale with all twelve notes.
     #[default]
     Chromatic,
+}
+
+impl From<HarmonyScale> for CorrectionScale {
+    fn from(scale: HarmonyScale) -> Self {
+        match scale {
+            HarmonyScale::Major => Self::Major,
+            HarmonyScale::MajorWithoutSeventh => Self::MajorWithoutSeventh,
+            HarmonyScale::MajorFlatSeventh => Self::MajorFlatSeventh,
+            HarmonyScale::Minor => Self::Minor,
+            HarmonyScale::HarmonicMinor => Self::HarmonicMinor,
+            HarmonyScale::MinorNaturalSixth => Self::MinorNaturalSixth,
+            HarmonyScale::MinorMajorSeventh => Self::MinorMajorSeventh,
+        }
+    }
 }
 
 /// The permitted correction pitch classes, in the order C, C♯, D, D♯, E, F,
@@ -119,24 +148,22 @@ impl NoteMask {
 
     /// Returns the pitch classes of `scale`, with `key` as the tonic.
     ///
-    /// Major uses the semitone offsets 0, 2, 4, 5, 7, 9, 11. Natural minor
-    /// uses 0, 2, 3, 5, 7, 8, 10. Chromatic permits all classes for all keys.
-    /// This function only makes a value. To apply the value, use the
-    /// correction configuration.
-    pub fn from_key_scale(key: PitchClass, scale: CorrectionScale) -> Self {
-        if scale == CorrectionScale::Chromatic {
-            return Self::CHROMATIC;
-        }
-        let offset = usize::from(key.semitone())
-            + if scale == CorrectionScale::Minor {
-                3
-            } else {
-                0
-            };
-        let major = [
-            true, false, true, false, true, true, false, true, false, true, false, true,
-        ];
-        Self(std::array::from_fn(|i| major[(i + 24 - offset) % 12]))
+    /// Each heptatonic or hexatonic variant uses the same semitone offsets as
+    /// the equivalent [`HarmonyScale`] variant. [`CorrectionScale::Chromatic`]
+    /// permits all classes for all keys. This function only makes a value. To
+    /// apply the value, use the correction configuration.
+    pub const fn from_key_scale(key: PitchClass, scale: CorrectionScale) -> Self {
+        let harmony = match scale {
+            CorrectionScale::Major => HarmonyScale::Major,
+            CorrectionScale::MajorWithoutSeventh => HarmonyScale::MajorWithoutSeventh,
+            CorrectionScale::MajorFlatSeventh => HarmonyScale::MajorFlatSeventh,
+            CorrectionScale::Minor => HarmonyScale::Minor,
+            CorrectionScale::HarmonicMinor => HarmonyScale::HarmonicMinor,
+            CorrectionScale::MinorNaturalSixth => HarmonyScale::MinorNaturalSixth,
+            CorrectionScale::MinorMajorSeventh => HarmonyScale::MinorMajorSeventh,
+            CorrectionScale::Chromatic => return Self::CHROMATIC,
+        };
+        harmony.note_mask(key)
     }
 }
 

@@ -9,7 +9,7 @@ mod chords;
 use crate::error::{check_count, check_range};
 use crate::midi::{note_period, velocity_gain, MidiEvent};
 use crate::numeric::fixed::{Q12, Q14, Q6};
-use crate::scale::PitchClass;
+use crate::scale::{NoteMask, PitchClass};
 use crate::{Error, SampleRate};
 use chords::SCALE_TONES;
 
@@ -109,6 +109,25 @@ pub enum HarmonyScale {
     /// This table keeps the natural sixth of the ascending melodic minor
     /// scale.
     MinorMajorSeventh,
+}
+
+impl HarmonyScale {
+    /// Returns the pitch classes of this scale, with `key` as the tonic.
+    ///
+    /// Each entry in the scale table enables one pitch class relative to
+    /// `key`. [`Self::MajorWithoutSeventh`] repeats its sixth degree, so the
+    /// returned mask enables six pitch classes.
+    pub const fn note_mask(self, key: PitchClass) -> NoteMask {
+        let mut notes = [false; 12];
+        let tones = SCALE_TONES[self as usize];
+        let root = key.semitone() as usize;
+        let mut i = 0;
+        while i < tones.len() {
+            notes[(root + tones[i] as usize) % 12] = true;
+            i += 1;
+        }
+        NoteMask::new(notes)
+    }
 }
 
 /// A named chord for [`HarmonySource::ChordByName`].
@@ -356,6 +375,131 @@ impl Default for HarmonyConfig {
 }
 
 impl HarmonyConfig {
+    /// Returns a copy with `source` set to the given value.
+    pub const fn with_source(mut self, source: HarmonySource) -> Self {
+        self.source = source;
+        self
+    }
+
+    /// Returns a copy with `key` set to the given value.
+    pub const fn with_key(mut self, key: PitchClass) -> Self {
+        self.key = key;
+        self
+    }
+
+    /// Returns a copy with `scale` set to the given value.
+    pub const fn with_scale(mut self, scale: HarmonyScale) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    /// Returns a copy with `chromatic_intervals` set to the given array, each
+    /// element in -24..=24.
+    pub const fn with_chromatic_intervals(
+        mut self,
+        chromatic_intervals: [i8; HARMONY_VOICES],
+    ) -> Self {
+        self.chromatic_intervals = chromatic_intervals;
+        self
+    }
+
+    /// Returns a copy with `diatonic_intervals` set to the given array, each
+    /// element in -14..=14.
+    pub const fn with_diatonic_intervals(
+        mut self,
+        diatonic_intervals: [i8; HARMONY_VOICES],
+    ) -> Self {
+        self.diatonic_intervals = diatonic_intervals;
+        self
+    }
+
+    /// Returns a copy with `chord` set to the given value.
+    pub const fn with_chord(mut self, chord: ChordName) -> Self {
+        self.chord = chord;
+        self
+    }
+
+    /// Returns a copy with `degree` set to the given value.
+    pub const fn with_degree(mut self, degree: ChordDegree) -> Self {
+        self.degree = degree;
+        self
+    }
+
+    /// Returns a copy with `inversion` set to the given value.
+    pub const fn with_inversion(mut self, inversion: Inversion) -> Self {
+        self.inversion = inversion;
+        self
+    }
+
+    /// Returns a copy with `register_percent` set to the given value,
+    /// 0..=100%.
+    pub const fn with_register_percent(mut self, register_percent: f32) -> Self {
+        self.register_percent = register_percent;
+        self
+    }
+
+    /// Returns a copy with `voicing_spread_percent` set to the given value,
+    /// 0..=100%.
+    pub const fn with_voicing_spread_percent(mut self, voicing_spread_percent: f32) -> Self {
+        self.voicing_spread_percent = voicing_spread_percent;
+        self
+    }
+
+    /// Returns a copy with `portamento_ms` set to the given value, 0..=10000.
+    pub const fn with_portamento_ms(mut self, portamento_ms: f32) -> Self {
+        self.portamento_ms = portamento_ms;
+        self
+    }
+
+    /// Returns a copy with `voices` set to the given value, 0..=4.
+    pub const fn with_voices(mut self, voices: u8) -> Self {
+        self.voices = voices;
+        self
+    }
+
+    /// Copies each present field of `patch` into this configuration.
+    ///
+    /// Fields that are `None` do not change. An interval array that is `Some`
+    /// replaces all four entries. This method does not validate the result.
+    pub fn merge_patch(&mut self, patch: HarmonyPatch) {
+        if let Some(source) = patch.source {
+            self.source = source;
+        }
+        if let Some(key) = patch.key {
+            self.key = key;
+        }
+        if let Some(scale) = patch.scale {
+            self.scale = scale;
+        }
+        if let Some(chromatic_intervals) = patch.chromatic_intervals {
+            self.chromatic_intervals = chromatic_intervals;
+        }
+        if let Some(diatonic_intervals) = patch.diatonic_intervals {
+            self.diatonic_intervals = diatonic_intervals;
+        }
+        if let Some(chord) = patch.chord {
+            self.chord = chord;
+        }
+        if let Some(degree) = patch.degree {
+            self.degree = degree;
+        }
+        if let Some(inversion) = patch.inversion {
+            self.inversion = inversion;
+        }
+        if let Some(register_percent) = patch.register_percent {
+            self.register_percent = register_percent;
+        }
+        if let Some(voicing_spread_percent) = patch.voicing_spread_percent {
+            self.voicing_spread_percent = voicing_spread_percent;
+        }
+        if let Some(portamento_ms) = patch.portamento_ms {
+            self.portamento_ms = portamento_ms;
+        }
+        if let Some(voices) = patch.voices {
+            self.voices = voices;
+        }
+    }
+
     /// Validates all fields, which includes the fields that the selected
     /// source does not use.
     ///
@@ -390,6 +534,210 @@ impl HarmonyConfig {
             0.0,
             10_000.0,
         )
+    }
+}
+
+impl From<HarmonyPatch> for HarmonyConfig {
+    fn from(patch: HarmonyPatch) -> Self {
+        let mut config = Self::default();
+        config.merge_patch(patch);
+        config
+    }
+}
+
+/// Partial changes for [`HarmonyConfig`].
+///
+/// Only fields that are `Some` overwrite the target fields in
+/// [`HarmonyConfig::merge_patch`]. All fields are `None` by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct HarmonyPatch {
+    /// The pitch source for the four harmony voices.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub source: Option<HarmonySource>,
+    /// The pitch class of the tonic.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub key: Option<PitchClass>,
+    /// The scale for smart intervals and degree chords.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub scale: Option<HarmonyScale>,
+    /// Four fixed semitone offsets, each in -24..=24.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "[number, number, number, number]")
+    )]
+    pub chromatic_intervals: Option<[i8; HARMONY_VOICES]>,
+    /// Four offsets in scale steps, each in -14..=14.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "[number, number, number, number]")
+    )]
+    pub diatonic_intervals: Option<[i8; HARMONY_VOICES]>,
+    /// The named chord for [`HarmonySource::ChordByName`].
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub chord: Option<ChordName>,
+    /// The chord on a scale degree for [`HarmonySource::ChordByDegree`].
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub degree: Option<ChordDegree>,
+    /// The inversion for named chords and degree chords.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub inversion: Option<Inversion>,
+    /// The chord register from low to high, 0..=100%.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub register_percent: Option<f32>,
+    /// The chord voicing from close to open, 0..=100%.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub voicing_spread_percent: Option<f32>,
+    /// The half-life of the target-period smoothing in milliseconds,
+    /// 0..=10000.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub portamento_ms: Option<f32>,
+    /// The number of voices that sound in the interval sources, 0..=4.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub voices: Option<u8>,
+}
+
+impl HarmonyPatch {
+    /// Returns an empty patch with all fields set to `None`.
+    pub const fn new() -> Self {
+        Self {
+            source: None,
+            key: None,
+            scale: None,
+            chromatic_intervals: None,
+            diatonic_intervals: None,
+            chord: None,
+            degree: None,
+            inversion: None,
+            register_percent: None,
+            voicing_spread_percent: None,
+            portamento_ms: None,
+            voices: None,
+        }
+    }
+
+    /// Sets `source` on this patch.
+    pub const fn with_source(mut self, source: HarmonySource) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// Sets `key` on this patch.
+    pub const fn with_key(mut self, key: PitchClass) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// Sets `scale` on this patch.
+    pub const fn with_scale(mut self, scale: HarmonyScale) -> Self {
+        self.scale = Some(scale);
+        self
+    }
+
+    /// Sets `chromatic_intervals` on this patch, each element in -24..=24.
+    pub const fn with_chromatic_intervals(
+        mut self,
+        chromatic_intervals: [i8; HARMONY_VOICES],
+    ) -> Self {
+        self.chromatic_intervals = Some(chromatic_intervals);
+        self
+    }
+
+    /// Sets `diatonic_intervals` on this patch, each element in -14..=14.
+    pub const fn with_diatonic_intervals(
+        mut self,
+        diatonic_intervals: [i8; HARMONY_VOICES],
+    ) -> Self {
+        self.diatonic_intervals = Some(diatonic_intervals);
+        self
+    }
+
+    /// Sets `chord` on this patch.
+    pub const fn with_chord(mut self, chord: ChordName) -> Self {
+        self.chord = Some(chord);
+        self
+    }
+
+    /// Sets `degree` on this patch.
+    pub const fn with_degree(mut self, degree: ChordDegree) -> Self {
+        self.degree = Some(degree);
+        self
+    }
+
+    /// Sets `inversion` on this patch.
+    pub const fn with_inversion(mut self, inversion: Inversion) -> Self {
+        self.inversion = Some(inversion);
+        self
+    }
+
+    /// Sets `register_percent` on this patch, 0..=100%.
+    pub const fn with_register_percent(mut self, register_percent: f32) -> Self {
+        self.register_percent = Some(register_percent);
+        self
+    }
+
+    /// Sets `voicing_spread_percent` on this patch, 0..=100%.
+    pub const fn with_voicing_spread_percent(mut self, voicing_spread_percent: f32) -> Self {
+        self.voicing_spread_percent = Some(voicing_spread_percent);
+        self
+    }
+
+    /// Sets `portamento_ms` on this patch, 0..=10000.
+    pub const fn with_portamento_ms(mut self, portamento_ms: f32) -> Self {
+        self.portamento_ms = Some(portamento_ms);
+        self
+    }
+
+    /// Sets `voices` on this patch, 0..=4.
+    pub const fn with_voices(mut self, voices: u8) -> Self {
+        self.voices = Some(voices);
+        self
     }
 }
 

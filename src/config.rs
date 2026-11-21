@@ -1,10 +1,11 @@
 //! Sample rates, block limits and the complete processor configuration.
 
-use crate::effects::alien::AlienConfig;
-use crate::effects::punch::PunchConfig;
-use crate::effects::reverb::ReverbConfig;
-use crate::effects::warm::WarmConfig;
+use crate::effects::alien::{AlienConfig, AlienPatch};
+use crate::effects::punch::{PunchConfig, PunchPatch};
+use crate::effects::reverb::{ReverbConfig, ReverbPatch};
+use crate::effects::warm::{WarmConfig, WarmPatch};
 use crate::error::{check_range, ConfigProblem};
+use crate::resynthesis::ResynthesisPatch;
 use crate::Error;
 use crate::ResynthesisConfig;
 use std::num::NonZeroUsize;
@@ -117,6 +118,18 @@ impl PrepareConfig {
             max_block_frames,
         })
     }
+
+    /// Returns a copy with `sample_rate` set to the given value.
+    pub const fn with_sample_rate(mut self, sample_rate: SampleRate) -> Self {
+        self.sample_rate = sample_rate;
+        self
+    }
+
+    /// Returns a copy with `max_block_frames` set to the given nonzero limit.
+    pub const fn with_max_block_frames(mut self, max_block_frames: NonZeroUsize) -> Self {
+        self.max_block_frames = max_block_frames;
+        self
+    }
 }
 
 /// The settings for the complete signal chain, in the order of the stages.
@@ -134,8 +147,7 @@ impl PrepareConfig {
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase"),
-    tsify(large_number_types_as_bigints)
+    serde(rename_all = "camelCase")
 )]
 pub struct ProcessorConfig {
     /// The input dynamics and saturation stage, which applies first.
@@ -184,6 +196,68 @@ impl Default for ProcessorConfig {
 }
 
 impl ProcessorConfig {
+    /// Returns a copy with `punch` set to the given configuration.
+    pub const fn with_punch(mut self, punch: PunchConfig) -> Self {
+        self.punch = punch;
+        self
+    }
+
+    /// Returns a copy with `warm` set to the given configuration.
+    pub const fn with_warm(mut self, warm: WarmConfig) -> Self {
+        self.warm = warm;
+        self
+    }
+
+    /// Returns a copy with `resynthesis` set to the given configuration.
+    pub const fn with_resynthesis(mut self, resynthesis: ResynthesisConfig) -> Self {
+        self.resynthesis = resynthesis;
+        self
+    }
+
+    /// Returns a copy with `alien` set to the given configuration.
+    pub const fn with_alien(mut self, alien: AlienConfig) -> Self {
+        self.alien = alien;
+        self
+    }
+
+    /// Returns a copy with `reverb` set to the given configuration.
+    pub const fn with_reverb(mut self, reverb: ReverbConfig) -> Self {
+        self.reverb = reverb;
+        self
+    }
+
+    /// Returns a copy with `output_gain` set to the given value, 0..=64.
+    pub const fn with_output_gain(mut self, output_gain: f32) -> Self {
+        self.output_gain = output_gain;
+        self
+    }
+
+    /// Merges each present stage patch and gain field of `patch` into this
+    /// configuration.
+    ///
+    /// Fields that are `None` do not change. This method does not validate the
+    /// result.
+    pub fn merge_patch(&mut self, patch: ProcessorPatch) {
+        if let Some(punch) = patch.punch {
+            self.punch.merge_patch(punch);
+        }
+        if let Some(warm) = patch.warm {
+            self.warm.merge_patch(warm);
+        }
+        if let Some(resynthesis) = patch.resynthesis {
+            self.resynthesis.merge_patch(resynthesis);
+        }
+        if let Some(alien) = patch.alien {
+            self.alien.merge_patch(alien);
+        }
+        if let Some(reverb) = patch.reverb {
+            self.reverb.merge_patch(reverb);
+        }
+        if let Some(output_gain) = patch.output_gain {
+            self.output_gain = output_gain;
+        }
+    }
+
     /// Checks all stages and the final gain, and does not change state.
     ///
     /// The validation uses the signal order: Punch, Warm, resynthesis, Alien,
@@ -202,6 +276,121 @@ impl ProcessorConfig {
         self.alien.validate()?;
         self.reverb.validate()?;
         validate_output_gain(self.output_gain)
+    }
+}
+
+impl From<ProcessorPatch> for ProcessorConfig {
+    fn from(patch: ProcessorPatch) -> Self {
+        let mut config = Self::default();
+        config.merge_patch(patch);
+        config
+    }
+}
+
+/// Partial changes for [`ProcessorConfig`].
+///
+/// Give this structure to [`crate::Processor::new`],
+/// [`crate::Processor::update_config`] or [`crate::ControlEvent::Patch`]. Only
+/// fields and sub-patches that are `Some` overwrite the target settings in
+/// [`ProcessorConfig::merge_patch`]. All fields are `None` by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct ProcessorPatch {
+    /// Partial changes for the Punch input stage.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub punch: Option<PunchPatch>,
+    /// Partial changes for the Warm saturation stage.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub warm: Option<WarmPatch>,
+    /// Partial changes for pitch tracking, correction, voices and formants.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub resynthesis: Option<ResynthesisPatch>,
+    /// Partial changes for the Alien reverse-loop stage.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub alien: Option<AlienPatch>,
+    /// Partial changes for the reverb stage.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub reverb: Option<ReverbPatch>,
+    /// The linear gain after all effects, 0..=64.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub output_gain: Option<f32>,
+}
+
+impl ProcessorPatch {
+    /// Returns an empty patch with all fields set to `None`.
+    pub const fn new() -> Self {
+        Self {
+            punch: None,
+            warm: None,
+            resynthesis: None,
+            alien: None,
+            reverb: None,
+            output_gain: None,
+        }
+    }
+
+    /// Sets `punch` on this patch.
+    pub const fn with_punch(mut self, punch: PunchPatch) -> Self {
+        self.punch = Some(punch);
+        self
+    }
+
+    /// Sets `warm` on this patch.
+    pub const fn with_warm(mut self, warm: WarmPatch) -> Self {
+        self.warm = Some(warm);
+        self
+    }
+
+    /// Sets `resynthesis` on this patch.
+    pub const fn with_resynthesis(mut self, resynthesis: ResynthesisPatch) -> Self {
+        self.resynthesis = Some(resynthesis);
+        self
+    }
+
+    /// Sets `alien` on this patch.
+    pub const fn with_alien(mut self, alien: AlienPatch) -> Self {
+        self.alien = Some(alien);
+        self
+    }
+
+    /// Sets `reverb` on this patch.
+    pub const fn with_reverb(mut self, reverb: ReverbPatch) -> Self {
+        self.reverb = Some(reverb);
+        self
+    }
+
+    /// Sets `output_gain` on this patch, 0..=64.
+    pub const fn with_output_gain(mut self, output_gain: f32) -> Self {
+        self.output_gain = Some(output_gain);
+        self
     }
 }
 

@@ -97,8 +97,8 @@ If you use the scoped package, import from `@bytelandtechnology/tunelet`.
 
 ```rust
 use tunelet::{
-    CorrectionScale, NoteMask, PitchClass, PrepareConfig, Processor, ProcessorConfig,
-    SampleRate,
+    CorrectionPatch, CorrectionScale, NoteMask, PitchClass, PrepareConfig, Processor,
+    ProcessorPatch, ResynthesisPatch, SampleRate,
 };
 
 fn main() -> Result<(), tunelet::Error> {
@@ -106,14 +106,20 @@ fn main() -> Result<(), tunelet::Error> {
     let rate = SampleRate::try_from(48_000)?;
     let preparation = PrepareConfig::new(rate, 1024)?;
 
-    // 2. Start from the default configuration and change fields.
-    let mut config = ProcessorConfig::default();
-    config.resynthesis.correction.notes =
-        NoteMask::from_key_scale(PitchClass::A, CorrectionScale::Minor);
-    config.resynthesis.correction.retune_ms = 20.0;
+    // 2. Build a patch for the fields that differ from the defaults.
+    let patch = ProcessorPatch::new().with_resynthesis(
+        ResynthesisPatch::new().with_correction(
+            CorrectionPatch::new()
+                .with_notes(NoteMask::from_key_scale(
+                    PitchClass::A,
+                    CorrectionScale::Minor,
+                ))
+                .with_retune_ms(20.0),
+        ),
+    );
 
     // 3. Construct the processor. Only this step allocates memory.
-    let mut processor = Processor::new(preparation, config)?;
+    let mut processor = Processor::new(preparation, patch)?;
 
     // 4. Process blocks. Each input sample gives one stereo frame.
     let input = [0i16; 1024];
@@ -136,12 +142,12 @@ fn main() -> Result<(), tunelet::Error> {
 ### TypeScript
 
 ```ts
-import { loadTunelet, Tunelet, defaultConfig } from "tunelet";
+import { loadTunelet, Tunelet } from "tunelet";
 
 await loadTunelet();
-const config = defaultConfig();
-config.resynthesis.pitchRatio = 1.25;
-const processor = new Tunelet(48000, 1024, config);
+const processor = new Tunelet(48000, 1024, {
+  resynthesis: { pitchRatio: 1.25 },
+});
 
 const input = new Int16Array(1024);
 const left = new Int16Array(1024);
@@ -201,11 +207,13 @@ To prepare a processor, do these steps:
 1. Use `SampleRate::try_from(hz)` to check the input rate.
 2. Use `PrepareConfig::new(rate, max_block_frames)` to set a nonzero block
    limit.
-3. Create a `Processor` with that preparation and a `ProcessorConfig`.
+3. Create a `Processor` with that preparation and a `ProcessorConfig` or a
+   `ProcessorPatch`.
 
-Configuration structures implement `Default`. To select voices and effects,
-edit their fields. To change the sample rate or the block limit, make a new
-processor.
+Configuration structures implement `Default`, and `*Patch` structures change
+selected fields. Use `update_config` to merge a `ProcessorPatch`, or use
+`set_config` to replace the full `ProcessorConfig`. To change the sample rate
+or the block limit, make a new processor.
 
 Select the process function for your output layout:
 
@@ -237,8 +245,9 @@ These rules apply to the offsets:
 - An offset must not be less than the offset before it.
 
 Events with equal offsets execute in slice order. An empty block accepts no
-events. A stage event replaces all settings of that stage. To change one
-field, start from `processor.config()`.
+events. A stage event replaces all settings of that stage. A patch event
+(`Patch`, `ResynthesisPatch`, `PunchPatch`, `WarmPatch`, `AlienPatch` or
+`ReverbPatch`) merges only `Some` fields onto the active configuration.
 
 Harmony MIDI uses `ControlEvent::Midi`. MIDI for the correction keyboard uses
 `ControlEvent::CorrectionMidi`. For example, this event starts a harmony note
@@ -363,7 +372,7 @@ these items:
 
 Both environments use the same imports and the same initialization call. An
 import of the package does not load the binary. Call `loadTunelet()` before
-you use `Tunelet` or `defaultConfig()`.
+you use `Tunelet` or the helper functions.
 
 - Node.js reads the packaged binary from a file URL relative to the module.
 - Browsers fetch the served Wasm asset.
@@ -406,19 +415,21 @@ page that opens the JavaScript.
 
 ### TypeScript API
 
-| Operation                         | TypeScript API                                           |
-| --------------------------------- | -------------------------------------------------------- |
-| Shared initialization             | `loadTunelet(source?)`                                   |
-| Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
-| In-place mono downmix             | `processMono(audio, events?)`                            |
-| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
-| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
-| Feedback                          | `feedback()`, `takeFeedback()`                           |
-| Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
-| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`         |
-| Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)` |
-| Configured tail budget            | `tailFrames()`                                           |
-| Reset or release memory           | `reset()`, `free()`                                      |
+| Operation                         | TypeScript API                                                            |
+| --------------------------------- | ------------------------------------------------------------------------- |
+| Shared initialization             | `loadTunelet(source?)`                                                    |
+| Construct a processor             | `new Tunelet(sampleRate, maxBlockFrames, config?)`                        |
+| Mono PCM to planar stereo         | `process(input, left, right, events?)`                                    |
+| In-place mono downmix             | `processMono(audio, events?)`                                             |
+| Configuration                     | `config()`, `setConfig(config)`, `updateConfig(patch)`, `defaultConfig()` |
+| Scale and MIDI helpers            | `noteMaskFromKeyScale(key, scale)`, `parseMidiBytes(bytes)`               |
+| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`                           |
+| Feedback                          | `feedback()`, `takeFeedback()`                                            |
+| Telemetry                         | `telemetry()`, `takeTelemetry()`                                          |
+| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`                          |
+| Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)`                  |
+| Configured tail budget            | `tailFrames()`                                                            |
+| Reset or release memory           | `reset()`, `free()`                                                       |
 
 ### Audio buffers
 
@@ -436,22 +447,27 @@ audio device.
 
 ### Configuration objects
 
-Configuration objects contain all required fields. They use camelCase names
-and show enums as string literals. To change the configuration, do these steps:
+Configuration and patch objects use camelCase names and show enums as string
+literals. `new Tunelet(sampleRate, maxBlockFrames, config?)` and
+`updateConfig(patch)` accept a `ProcessorPatch`, where every field is
+optional. Undefined fields keep their default or active values.
 
-1. Start from `defaultConfig()` or `config()`.
-2. Edit the necessary fields.
-3. Call `setConfig()`.
+To replace the entire configuration at one time, start from `defaultConfig()`
+or `config()`, edit the fields and call `setConfig(config)`. In `setConfig`,
+the optional `resynthesis.harmony.voices` field defaults to 4 if it is absent.
+`noteMaskFromKeyScale(key, scale)` builds a 12-flag `NoteMask` for any
+`PitchClass` and `CorrectionScale`, which includes all seven harmony modes and
+`"chromatic"`.
 
-If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
+If a field is malformed or out of range, the call throws a JavaScript `Error`
+before it changes the state. The conversion ignores extra object properties.
+The generated declarations contain the parameter documentation from the Rust
 types.
 
-`resynthesis.randomSeed` and the `processedFrames` field of feedback and
-telemetry use `bigint`. Frame offsets, block lengths and latency use
-`number`.
+All numeric fields use `number`, so `JSON.stringify` works on
+`defaultConfig()`, `config()`, `feedback()` and `telemetry()`.
+`resynthesis.randomSeed` is an integer in `0..=4294967295`. `processedFrames`
+saturates at `Number.MAX_SAFE_INTEGER`.
 
 ### Events
 
@@ -463,15 +479,27 @@ example, this event changes the final gain before the first frame:
 { offset: 0, event: { type: "outputGain", value: 0.5 } }
 ```
 
-A harmony Note On event has this form:
+Patch events (`patch`, `resynthesisPatch`, `punchPatch`, `warmPatch`,
+`alienPatch` and `reverbPatch`) merge defined fields onto the active
+configuration without overwrites:
+
+```ts
+{ offset: 128, event: { type: "reverbPatch", value: { mix: 0.8 } } }
+```
+
+Stage events (`resynthesis`, `punch`, `warm`, `alien` and `reverb`) replace
+all fields of that stage. A harmony Note On event has this form:
 
 ```ts
 { offset: 0, event: { type: "midi", value: { type: "noteOn", channel: 0, note: 60, velocity: 100 } } }
 ```
 
-Use `correctionMidi` for the separate correction keyboard. The native rules
-for event order and for the validation of the whole block also apply to these
-bindings.
+`parseMidiBytes(bytes)` decodes a three-byte `Uint8Array` or number array into
+a `MidiEvent` for Note On, Note Off and controller 123 (All Notes Off). It
+returns `undefined` for valid messages that are not supported, and throws a
+JavaScript `Error` on invalid bytes. Use `correctionMidi` for the separate
+correction keyboard. The native rules for event order and for the validation
+of the whole block also apply to these bindings.
 
 ### Feedback, telemetry and formant envelopes
 

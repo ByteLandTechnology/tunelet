@@ -96,6 +96,67 @@ impl Default for ReverbConfig {
     }
 }
 impl ReverbConfig {
+    /// Returns a copy with `enabled` set to the given value.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Returns a copy with `mode` set to the given value.
+    pub const fn with_mode(mut self, mode: ReverbMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Returns a copy with `mix` set to the given value, 0..=1.
+    pub const fn with_mix(mut self, mix: f32) -> Self {
+        self.mix = mix;
+        self
+    }
+
+    /// Returns a copy with `diffusion` set to the given value, 0..=1.
+    pub const fn with_diffusion(mut self, diffusion: f32) -> Self {
+        self.diffusion = diffusion;
+        self
+    }
+
+    /// Returns a copy with `decay` set to the given value, 0..=1.
+    pub const fn with_decay(mut self, decay: f32) -> Self {
+        self.decay = decay;
+        self
+    }
+
+    /// Returns a copy with `brightness_hz` set to the given value, 80..=20000.
+    pub const fn with_brightness_hz(mut self, brightness_hz: f32) -> Self {
+        self.brightness_hz = brightness_hz;
+        self
+    }
+
+    /// Copies each present field of `patch` into this configuration.
+    ///
+    /// Fields that are `None` do not change. This method does not validate the
+    /// result.
+    pub fn merge_patch(&mut self, patch: ReverbPatch) {
+        if let Some(enabled) = patch.enabled {
+            self.enabled = enabled;
+        }
+        if let Some(mode) = patch.mode {
+            self.mode = mode;
+        }
+        if let Some(mix) = patch.mix {
+            self.mix = mix;
+        }
+        if let Some(diffusion) = patch.diffusion {
+            self.diffusion = diffusion;
+        }
+        if let Some(decay) = patch.decay {
+            self.decay = decay;
+        }
+        if let Some(brightness_hz) = patch.brightness_hz {
+            self.brightness_hz = brightness_hz;
+        }
+    }
+
     /// Validates all fields, also when the stage is disabled or the selected
     /// mode does not use a field.
     ///
@@ -112,6 +173,119 @@ impl ReverbConfig {
         check_range("reverb.diffusion", self.diffusion, 0.0, 1.0)?;
         check_range("reverb.decay", self.decay, 0.0, 1.0)?;
         check_range("reverb.brightness_hz", self.brightness_hz, 80.0, 20000.0)
+    }
+}
+
+impl From<ReverbPatch> for ReverbConfig {
+    fn from(patch: ReverbPatch) -> Self {
+        let mut config = Self::default();
+        config.merge_patch(patch);
+        config
+    }
+}
+
+/// Partial changes for [`ReverbConfig`].
+///
+/// Only fields that are `Some` overwrite the target fields in
+/// [`ReverbConfig::merge_patch`]. All fields are `None` by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct ReverbPatch {
+    /// Enables or disables the selected network.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub enabled: Option<bool>,
+    /// The topology of the delay network.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub mode: Option<ReverbMode>,
+    /// The wet fraction, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub mix: Option<f32>,
+    /// The diffusion control without a unit, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub diffusion: Option<f32>,
+    /// The feedback control without a unit, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub decay: Option<f32>,
+    /// The low-pass cutoff in hertz for networks with damped paths, 80..=20000.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub brightness_hz: Option<f32>,
+}
+
+impl ReverbPatch {
+    /// Returns an empty patch with all fields set to `None`.
+    pub const fn new() -> Self {
+        Self {
+            enabled: None,
+            mode: None,
+            mix: None,
+            diffusion: None,
+            decay: None,
+            brightness_hz: None,
+        }
+    }
+
+    /// Sets `enabled` on this patch.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    /// Sets `mode` on this patch.
+    pub const fn with_mode(mut self, mode: ReverbMode) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+
+    /// Sets `mix` on this patch, 0..=1.
+    pub const fn with_mix(mut self, mix: f32) -> Self {
+        self.mix = Some(mix);
+        self
+    }
+
+    /// Sets `diffusion` on this patch, 0..=1.
+    pub const fn with_diffusion(mut self, diffusion: f32) -> Self {
+        self.diffusion = Some(diffusion);
+        self
+    }
+
+    /// Sets `decay` on this patch, 0..=1.
+    pub const fn with_decay(mut self, decay: f32) -> Self {
+        self.decay = Some(decay);
+        self
+    }
+
+    /// Sets `brightness_hz` on this patch, 80..=20000.
+    pub const fn with_brightness_hz(mut self, brightness_hz: f32) -> Self {
+        self.brightness_hz = Some(brightness_hz);
+        self
     }
 }
 
