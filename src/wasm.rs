@@ -78,10 +78,10 @@ pub fn default_config() -> Result<Ts<ProcessorConfig>, JsError> {
 
 /// A stateful PCM processor that JavaScript uses as the `Tunelet` class.
 ///
-/// The input is signed 16-bit mono PCM. The output is planar stereo or an
-/// in-place mono downmix. The quantization, latency and configuration behavior
-/// are the same as in the native processor. Buffer lengths count frames, not
-/// bytes.
+/// The input is signed 16-bit mono PCM. The output is planar stereo or
+/// in-place mono PCM from the mono reverb bus. The quantization, latency and
+/// configuration behavior are the same as in the native processor. Buffer
+/// lengths count frames, not bytes.
 ///
 /// These rules apply to the buffers:
 ///
@@ -191,10 +191,10 @@ impl WasmProcessor {
         self.input.len()
     }
 
-    /// The nominal resynthesis delay in frames.
+    /// The nominal resynthesis delay in frames: 1,593 frames at both rates.
     ///
-    /// Other signal paths have different timing. See the `latencyFrames`
-    /// property for the timing of the dry path and the voices.
+    /// The dry path uses the same 1,593-frame delay. Resampled voices, choir
+    /// delays and effects have different delays.
     #[wasm_bindgen(getter, js_name = latencyFrames)]
     pub fn latency_frames(&self) -> usize {
         self.processor.latency_frames()
@@ -268,11 +268,11 @@ impl WasmProcessor {
         Ok(())
     }
 
-    /// Replaces the audio in a mono `Int16Array` with the stereo downmix.
+    /// Replaces the audio in a mono `Int16Array` through the mono reverb bus.
     ///
-    /// The timing, the events and the drain cancellation are the same as for
-    /// `process`. Peak feedback measures the stereo output before the downmix,
-    /// as in the native processor.
+    /// The events and the drain cancellation are the same as for `process`.
+    /// Peak feedback and telemetry measure the mono output and mono reverb wet
+    /// signal directly, as in the native processor.
     ///
     /// # Errors
     ///
@@ -338,8 +338,8 @@ impl WasmProcessor {
 
     /// Renders a mono tail block and returns its frame count.
     ///
-    /// The method fills the unused output with zeros. The downmix, completion
-    /// and feedback behavior are the same as for `drainMono`.
+    /// The method fills the unused output with zeros. The mono reverb bus,
+    /// completion and feedback behavior match `processMono` and `beginDrain`.
     ///
     /// # Errors
     ///
@@ -374,7 +374,7 @@ impl WasmProcessor {
         Ok(self.processor.feedback().into_ts()?)
     }
 
-    /// Returns the feedback and clears only the stereo peak window.
+    /// Returns the feedback and clears only the output peak window.
     ///
     /// The other feedback fields and all audio histories do not change.
     ///

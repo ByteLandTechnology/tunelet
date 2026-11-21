@@ -47,7 +47,7 @@ pub struct Processor {
     reverb: Reverb,
     /// The random sequence of this instance and the cached arctangent position.
     numeric: NumericContext,
-    /// The largest absolute clipped stereo PCM sample in the feedback window.
+    /// The largest absolute clipped output PCM sample in the feedback window.
     peak: i32,
     /// The largest absolute PCM input sample in the telemetry window, before
     /// Punch.
@@ -181,13 +181,13 @@ impl Processor {
         })
     }
 
-    /// Replaces mono PCM with the stereo result after the downmix.
+    /// Replaces mono PCM in place with the output of the mono reverb bus.
     ///
     /// The method reads each input sample before it writes over that location.
-    /// The downmix uses `(i32::from(left) + i32::from(right)) >> 1`, which
-    /// rounds toward negative infinity. Panning and stereo effects run before
-    /// this downmix. Peak feedback measures the stereo samples. Events and
-    /// drain cancellation are the same as for [`process`](Self::process).
+    /// Voice pan and Alien advance their stereo state, then the mono reverb bus
+    /// renders one channel before the output gain and clamp. Peak feedback and
+    /// telemetry measure this mono output directly. Events and drain
+    /// cancellation are the same as for [`process`](Self::process).
     ///
     /// # Errors
     ///
@@ -205,8 +205,7 @@ impl Processor {
             while let Some(event) = events.next_at(index) {
                 self.apply(event);
             }
-            let output = self.next(*sample);
-            *sample = ((output[0] as i32 + output[1] as i32) >> 1) as i16;
+            *sample = self.next_mono(*sample);
         }
         Ok(())
     }
@@ -272,7 +271,7 @@ impl Processor {
 
     /// Renders the tail as mono PCM and returns the number of rendered frames.
     ///
-    /// The downmix is the same as in
+    /// The mono reverb bus and peak meters operate in the same way as in
     /// [`process_mono_in_place`](Self::process_mono_in_place). The method
     /// fills unused samples with zeros. If the drain is not active or is
     /// complete, the method returns zero. An empty output uses no budget. At
@@ -284,9 +283,7 @@ impl Processor {
     /// If the output is larger than the prepared block limit, the method
     /// returns [`Error::BlockTooLarge`] before it changes output or state.
     pub fn drain_mono(&mut self, output: &mut [i16]) -> Result<usize, Error> {
-        let count = self.drain_into(output.len(), |index, frame| {
-            output[index] = ((i32::from(frame[0]) + i32::from(frame[1])) >> 1) as i16;
-        })?;
+        let count = self.drain_mono_into(output)?;
         output[count..].fill(0);
         Ok(count)
     }
@@ -324,14 +321,14 @@ impl Processor {
 
     /// Returns the nominal resynthesis latency: 1,593 frames at both rates.
     ///
-    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
-    /// and effects have their own timing. Thus, this value does not align all
-    /// paths.
+    /// The dry path has the same delay of 1,593 frames, aligned with unity wet
+    /// voices. Resampled voices, choir delays and effects have different
+    /// delays. Thus, this value does not align all paths.
     pub fn latency_frames(&self) -> usize {
         resynthesis::LATENCY_FRAMES
     }
 
-    /// Returns the pitch, stereo peak and frame count, and does not clear them.
+    /// Returns the pitch, output peak and frame count, and does not clear them.
     ///
     /// To start a new peak window, use [`take_feedback`](Self::take_feedback).
     pub fn feedback(&self) -> Feedback {
@@ -602,12 +599,12 @@ impl Processor {
         self.apply_config(config);
     }
 
-    /// Renders one frame through the full chain and updates stereo feedback.
+    /// Renders one stereo frame through the full chain and updates stereo
+    /// feedback.
     ///
     /// Resynthesis produces Q14 audio. Output gain is Q8. The multiplication
     /// wraps before the shift. PCM conversion clips to the symmetric 16-bit
-    /// range. This order and the peak measurement before the downmix are part
-    /// of the output.
+    /// range.
     fn next(&mut self, mut input: i16) -> [i16; 2] {
         self.input_peak = self.input_peak.max((input as i32).abs());
         if self.config.punch.enabled {
@@ -633,6 +630,36 @@ impl Processor {
         for (peak, sample) in self.output_peaks.iter_mut().zip(result) {
             *peak = (*peak).max((sample as i32).abs());
         }
+        self.frames = self.frames.saturating_add(1);
+        result
+    }
+
+    /// Renders one frame through the mono reverb bus and updates mono
+    /// feedback.
+    ///
+    /// Output gain is Q8 and wraps before the shift. PCM conversion clips to
+    /// the symmetric 16-bit range. Both output peak channels record the mono
+    /// sample.
+    fn next_mono(&mut self, mut input: i16) -> i16 {
+        self.input_peak = self.input_peak.max((input as i32).abs());
+        if self.config.punch.enabled {
+            input = self.punch.process_sample(input, &mut self.numeric);
+        }
+        if self.config.warm.enabled {
+            input = self.warm.process_sample(input);
+        }
+        let voice = self.resynthesis.process_sample(input, &mut self.numeric);
+        self.last_resample_ratio = self.resynthesis.resample_ratio();
+        let alien = self.alien.process_sample(voice);
+        let reverb = self.reverb.process_mono_sample(alien);
+        let gain = (self.config.output_gain as f64 * 256.0) as i32;
+        let result = (reverb.to_bits().wrapping_mul(gain) >> 8)
+            .wrapping_shl(1)
+            .clamp(-32767, 32767) as i16;
+        let peak = (result as i32).abs();
+        self.peak = self.peak.max(peak);
+        self.output_peaks[0] = self.output_peaks[0].max(peak);
+        self.output_peaks[1] = self.output_peaks[1].max(peak);
         self.frames = self.frames.saturating_add(1);
         result
     }
@@ -694,15 +721,44 @@ impl Processor {
         }
         Ok(count)
     }
+
+    /// Renders only the mono tail budget that is left. The caller writes zeros
+    /// in the unused samples.
+    fn drain_mono_into(&mut self, output: &mut [i16]) -> Result<usize, Error> {
+        let frames = output.len();
+        self.check_block(frames)?;
+        let count = self.drain_remaining.unwrap_or(0).min(frames);
+        let configured = self.config.resynthesis;
+        if configured.formant.aspiration_mix != 0.0 {
+            let mut silent = configured;
+            silent.formant.aspiration_mix = 0.0;
+            // Zero aspiration is valid in all validated configurations.
+            self.resynthesis.apply_config(silent);
+        }
+        for sample in &mut output[..count] {
+            *sample = self.next_mono(0);
+        }
+        if configured.formant.aspiration_mix != 0.0 {
+            self.resynthesis.apply_config(configured);
+        }
+        if let Some(remaining) = self.drain_remaining {
+            let remaining = remaining - count;
+            if remaining == 0 {
+                self.reset();
+            }
+            self.drain_remaining = Some(remaining);
+        }
+        Ok(count)
+    }
 }
 
 /// A snapshot of the pitch analysis and the output level that you can copy.
 ///
 /// Get it with [`Processor::feedback`] or [`Processor::take_feedback`]. The
 /// pitch fields describe the tracked input and the correction target. The
-/// peak measures the final clipped stereo output. `Default` gives a snapshot
-/// with all zeros and no target. It does not read the nominal latency of a
-/// prepared processor.
+/// peak measures the final clipped stereo or mono output. `Default` gives a
+/// snapshot with all zeros and no target. It does not read the nominal latency
+/// of a prepared processor.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -753,12 +809,13 @@ pub struct Feedback {
     /// This is not an amplitude gate or a confidence score. A tracking result
     /// can stay between detector updates.
     pub voiced: bool,
-    /// The largest absolute clipped stereo sample, divided by 32768.
+    /// The largest absolute clipped output sample, divided by 32768.
     ///
     /// The peak window starts at construction, at a reset, at a change of
     /// stereo output or at a call to [`Processor::take_feedback`]. The value
-    /// is in 0..=32767/32768. The mono downmix occurs after this measurement.
-    /// [`Processor::feedback`] does not clear the value.
+    /// is in 0..=32767/32768. Stereo calls measure both channels, and mono
+    /// calls measure the mono sample directly. [`Processor::feedback`] does not
+    /// clear the value.
     pub peak_level: f32,
     /// The number of frames processed since construction or the last reset,
     /// with drain frames included.
@@ -804,15 +861,16 @@ pub struct Telemetry {
     /// The largest absolute clipped sample of the left and the right output
     /// in the window, divided by 32768.
     ///
-    /// The measurement is after the output gain. Each value is in
-    /// 0..=32767/32768.
+    /// The measurement is after the output gain. Mono calls record the mono
+    /// output sample in both entries. Each value is in 0..=32767/32768.
     pub output_peak: [f32; 2],
     /// The largest absolute wet contribution of the reverb in the window,
     /// where 1 is full scale.
     ///
     /// The contribution is the wet signal times the mix, before the output
-    /// gain. It is the larger of the two channels. While the reverb is
-    /// disabled, the window gets no new values.
+    /// gain. Stereo calls measure the larger of the two channels, and mono
+    /// calls measure the mono wet signal. While the reverb is disabled, the
+    /// window gets no new values.
     pub reverb_wet_peak: f32,
     /// How periodic the tracked input is, in 0..=1.
     ///

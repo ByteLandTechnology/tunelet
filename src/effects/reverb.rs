@@ -8,10 +8,10 @@ use crate::{Error, SampleRate};
 /// The echo or reverberation network. The default is [`Self::Echo`].
 ///
 /// All modes share one delay buffer. A mode change uses the same buffer
-/// contents and damping filter memories. Thus a transition can play audio
-/// from the previous network. The stereo layout of the buffer does not make
-/// all modes give different left and right signals. Schroeder gives the same
-/// value on the two channels.
+/// contents and low-pass filter memories. Thus a transition can play audio
+/// from the previous network. Stereo calls use stereo wet taps, where
+/// `Schroeder` adds the same wet signal to both channels. Mono calls read
+/// mono taps from the same delay buffer without opposite-sign cancellation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -58,9 +58,9 @@ pub struct ReverbConfig {
     pub mode: ReverbMode,
     /// The wet fraction, 0..=1.
     ///
-    /// The default is 0.5. The dry weight is `1 - mix`. Schroeder and Binaural
-    /// use a mono dry signal. The other modes keep the stereo dry input. If
-    /// the network is enabled, a zero mix still advances it.
+    /// The default is 0.5. The dry weight is `1 - mix`. Stereo calls keep the
+    /// left and right dry inputs in all modes, and mono calls use the mono dry
+    /// input. If the network is enabled, a zero mix still advances it.
     pub mix: f32,
     /// The diffusion control without a unit, 0..=1.
     ///
@@ -154,6 +154,15 @@ pub(crate) struct Reverb {
 /// negative values.
 const TWO: Fixed<0> = Fixed::from_bits(2);
 
+/// Selects the stereo or mono readout of the shared delay network.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BusMode {
+    /// Two output channels with stereo dry mix and stereo wet taps.
+    Stereo,
+    /// One output channel with mono dry mix and mono wet taps.
+    Mono,
+}
+
 /// Quantizes a fixed network coefficient to Q14.
 #[inline]
 fn q14(coefficient: f64) -> Q14 {
@@ -218,29 +227,50 @@ impl Reverb {
     pub(crate) fn clear_wet_peak(&mut self) {
         self.wet_peak = 0;
     }
-    /// Calculates the selected network one time and advances the ring by one
-    /// frame.
+    /// Calculates the selected stereo network one time and advances the ring by
+    /// one frame.
     /// In bypass, no delay or filter history advances. The internal mono
-    /// averages use integer division toward zero. The PCM downmix in the
-    /// processor uses a shift.
+    /// averages use integer division toward zero.
     pub(crate) fn process_sample(&mut self, frame: [Q14; 2]) -> [Q14; 2] {
+        self.process_bus(frame, BusMode::Stereo)
+    }
+    /// Calculates the selected mono network one time and advances the ring by
+    /// one frame.
+    /// In bypass, no delay or filter history advances. The internal mono
+    /// averages use integer division toward zero.
+    pub(crate) fn process_mono_sample(&mut self, frame: [Q14; 2]) -> Q14 {
+        self.process_bus(frame, BusMode::Mono)[0]
+    }
+    /// Advances the shared network on `bus` and records the wet peak.
+    fn process_bus(&mut self, frame: [Q14; 2], bus: BusMode) -> [Q14; 2] {
         let [left, right] = frame;
         let mono = (left + right).div::<0, 14>(TWO);
         let t = self.taps;
         let dry = Q14::ONE - self.mix;
         let d = &mut self.delay;
         if !self.config.enabled {
-            return frame;
+            return match bus {
+                BusMode::Stereo => frame,
+                BusMode::Mono => [mono, mono],
+            };
         }
         let mut result = match self.config.mode {
             ReverbMode::Echo => {
                 d.put(mono, t[0]);
                 let echo: Fixed<0> = Fixed::<0>::from_bits(t[39] as i32).mul(self.diffuse);
                 d.comb(t[0], echo.to_bits() as usize, self.decay);
-                [
-                    mul(left, dry) + mul(self.mix, d.get(t[25]) - d.get(t[32])),
-                    mul(right, dry) - mul(self.mix, d.get(t[26]) - d.get(t[31])),
-                ]
+                match bus {
+                    BusMode::Stereo => [
+                        mul(left, dry) + mul(self.mix, d.get(t[25]) - d.get(t[32])),
+                        mul(right, dry) - mul(self.mix, d.get(t[26]) - d.get(t[31])),
+                    ],
+                    BusMode::Mono => {
+                        let wet = ((d.get(t[25]) + d.get(t[26])) - (d.get(t[31]) + d.get(t[32])))
+                            .div::<0, 14>(TWO);
+                        let value = mul(mono, dry) + mul(self.mix, wet);
+                        [value, value]
+                    }
+                }
             }
             ReverbMode::Schroeder => {
                 for i in [0, 13, 23, 29] {
@@ -260,8 +290,14 @@ impl Reverb {
                 );
                 d.allpass(t[40], t[43], self.decay);
                 d.allpass(t[44], t[45], self.decay);
-                let value = mul(mono, dry) + mul(self.mix, d.get(t[45]));
-                [value, value]
+                let wet = mul(self.mix, d.get(t[45]));
+                match bus {
+                    BusMode::Stereo => [mul(left, dry) + wet, mul(right, dry) + wet],
+                    BusMode::Mono => {
+                        let value = mul(mono, dry) + wet;
+                        [value, value]
+                    }
+                }
             }
             ReverbMode::SmallRoom => {
                 d.put(left, t[0]);
@@ -297,14 +333,25 @@ impl Reverb {
                 );
                 d.put(a, tap);
                 d.lpf(filter, &mut self.lpf1);
-                let out = mul(mono, dry) + mul(self.mix, d.get(t[40] + filter) + a);
+                let wet_left = d.get(t[40] + filter) + a;
                 let b = mul(
                     self.diffuse >> 1,
                     d.get(t[47] + seed) + d.get(t[48] + seed) + d.get(t[54] + seed),
                 );
                 d.put(b, t[40] + tap);
                 d.lpf(t[40] + filter, &mut self.lpf2);
-                [out, mul(mono, dry) + mul(self.mix, d.get(filter) + b)]
+                let wet_right = d.get(filter) + b;
+                match bus {
+                    BusMode::Stereo => [
+                        mul(left, dry) + mul(self.mix, wet_left),
+                        mul(right, dry) + mul(self.mix, wet_right),
+                    ],
+                    BusMode::Mono => {
+                        let wet = (wet_left + wet_right).div::<0, 14>(TWO);
+                        let value = mul(mono, dry) + mul(self.mix, wet);
+                        [value, value]
+                    }
+                }
             }
             ReverbMode::MediumHall => {
                 d.put(mono.div::<0, 14>(TWO), t[0]);
@@ -317,26 +364,41 @@ impl Reverb {
                     d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
                 }
                 d.comb_lpf(t[0], t[66], self.decay, &mut self.lpf2);
-                [
-                    d.fir(
-                        self.scratch,
-                        &[
-                            (t[16], q14(-0.25)),
-                            (t[33], q14(0.25)),
-                            (t[51], q14(-0.25)),
-                            (t[55], q14(0.25)),
-                        ],
-                    ),
-                    d.fir(
-                        self.scratch,
-                        &[
-                            (t[16], q14(0.25)),
-                            (t[32], q14(0.25)),
-                            (t[52], q14(0.25)),
-                            (t[56], q14(0.2)),
-                        ],
-                    ),
-                ]
+                match bus {
+                    BusMode::Stereo => [
+                        d.fir(
+                            self.scratch,
+                            &[
+                                (t[16], q14(-0.25)),
+                                (t[33], q14(0.25)),
+                                (t[51], q14(-0.25)),
+                                (t[55], q14(0.25)),
+                            ],
+                        ),
+                        d.fir(
+                            self.scratch,
+                            &[
+                                (t[16], q14(0.25)),
+                                (t[32], q14(0.25)),
+                                (t[52], q14(0.25)),
+                                (t[56], q14(0.2)),
+                            ],
+                        ),
+                    ],
+                    BusMode::Mono => {
+                        let wet = d.fir(
+                            self.scratch,
+                            &[
+                                (t[16], q14(0.25)),
+                                (t[33], q14(0.25)),
+                                (t[51], q14(0.25)),
+                                (t[55], q14(0.25)),
+                            ],
+                        );
+                        let value = mul(mono, dry) + mul(self.mix, wet);
+                        [value, value]
+                    }
+                }
             }
             ReverbMode::LargeHall => {
                 d.put(mono, t[0]);
@@ -362,26 +424,36 @@ impl Reverb {
             }
         };
         if matches!(
-            self.config.mode,
-            ReverbMode::SmallRoom | ReverbMode::MediumHall | ReverbMode::LargeHall
+            (bus, self.config.mode),
+            (
+                BusMode::Stereo,
+                ReverbMode::SmallRoom | ReverbMode::MediumHall | ReverbMode::LargeHall
+            )
         ) {
             result[0] = mul(left, dry) + mul(self.mix, result[0]);
             result[1] = mul(right, dry) + mul(self.mix, result[1]);
+        } else if matches!(
+            (bus, self.config.mode),
+            (BusMode::Mono, ReverbMode::SmallRoom | ReverbMode::LargeHall)
+        ) {
+            let wet = (result[0] + result[1]).div::<0, 14>(TWO);
+            let value = mul(mono, dry) + mul(self.mix, wet);
+            result = [value, value];
         }
         d.step();
         // Telemetry only. The wet contribution is the output minus the dry
-        // term. Schroeder and Binaural use the mono dry signal.
-        let dry_input = if matches!(
-            self.config.mode,
-            ReverbMode::Schroeder | ReverbMode::Binaural
-        ) {
-            [mono, mono]
-        } else {
-            [left, right]
-        };
-        for (value, input) in result.iter().zip(dry_input) {
-            let wet = (*value - mul(input, dry)).to_bits().wrapping_abs();
-            self.wet_peak = self.wet_peak.max(wet);
+        // term.
+        match bus {
+            BusMode::Stereo => {
+                for (value, input) in result.iter().zip(frame) {
+                    let wet = (*value - mul(input, dry)).to_bits().wrapping_abs();
+                    self.wet_peak = self.wet_peak.max(wet);
+                }
+            }
+            BusMode::Mono => {
+                let wet = (result[0] - mul(mono, dry)).to_bits().wrapping_abs();
+                self.wet_peak = self.wet_peak.max(wet);
+            }
         }
         result
     }

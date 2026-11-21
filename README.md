@@ -172,7 +172,9 @@ voice. It disables the effects and the formant stage.
 | Output gain    | Linear gain, 0..=64                                         | 1              | `output_gain`            |
 
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+dry path starts after Warm and has a delay of 1,593 frames, aligned with
+unity wet voices. Stereo reverb calls keep the stereo dry signal in all
+six reverb modes, and mono calls use a dedicated mono reverb bus.
 
 ### Harmony sources
 
@@ -288,7 +290,7 @@ These calls read the state of the processor. They do not change the audio.
 
 | Call                 | Data                                                              |
 | -------------------- | ----------------------------------------------------------------- |
-| `feedback()`         | The pitch, the stereo peak, the correction ratio, the frame count |
+| `feedback()`         | The pitch, the output peak, the correction ratio, the frame count |
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
@@ -298,14 +300,14 @@ These calls read the state of the processor. They do not change the audio.
 The telemetry includes these items:
 
 - The pitch ratio and the gain of each voice.
-- The peaks of the input, of the two output channels and of the reverb wet
-  signal.
+- The peaks of the input, of the output channels and of the reverb wet
+  signal. Mono calls record the mono peak.
 - The pitch clarity, which is a confidence score from 0 to 1.
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
 The peak windows of the telemetry are independent of the peak window of the
-feedback. The latency is nominal. Dry mixes, resampled voices and effects
-have different timing.
+feedback. The latency is nominal and matches the dry path. Resampled voices,
+choir delays and effects have different delays.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
@@ -410,7 +412,7 @@ page that opens the JavaScript.
 | --------------------------------- | -------------------------------------------------------- |
 | Shared initialization             | `loadTunelet(source?)`                                   |
 | Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
-| In-place mono downmix             | `processMono(audio, events?)`                            |
+| In-place mono PCM                 | `processMono(audio, events?)`                            |
 | Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
 | Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
 | Feedback                          | `feedback()`, `takeFeedback()`                           |

@@ -30,8 +30,8 @@
 //!
 //! - [`Processor::process`] writes `[left, right]` frames.
 //! - [`Processor::process_planar`] writes separate channels.
-//! - [`Processor::process_mono_in_place`] replaces the input with the stereo
-//!   downmix.
+//! - [`Processor::process_mono_in_place`] renders mono PCM through the mono
+//!   reverb bus.
 //!
 //! These layouts do not depend on [`ResynthesisConfig::stereo_output`], which
 //! controls voice panning. The output is clipped to -32767..=32767.
@@ -49,12 +49,12 @@
 //! # Feedback, latency and lifecycle
 //!
 //! [`Processor::feedback`] gives the pitch, the correction ratio, the
-//! accumulated stereo peak and the frame count.
+//! accumulated output peak and the frame count.
 //! [`Processor::take_feedback`] also clears the peak window. The pitch
 //! reporting bounds change only the reports. They do not change the detection
-//! or the audio signal. [`Processor::latency_frames`] gives a nominal
-//! resynthesis delay. Voice delays, pitch changes and effects have their own
-//! timing.
+//! or the audio signal. [`Processor::latency_frames`] gives the 1,593-frame
+//! nominal resynthesis delay, which also aligns the dry path. Voice delays,
+//! pitch changes and effects have different delays.
 //!
 //! [`Processor::telemetry`] gives data for meters and displays: the ratio and
 //! the gain of each voice, the input and output peaks, the pitch clarity and
