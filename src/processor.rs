@@ -159,7 +159,9 @@ impl Processor {
         events: &[TimedEvent],
     ) -> Result<(), Error> {
         Error::check_length(input.len(), output.len())?;
-        self.process_into(input, events, |index, frame| output[index] = frame)
+        self.process_into(input.len(), events, |processor, index| {
+            output[index] = processor.next(input[index], OutputLayout::Stereo);
+        })
     }
 
     /// Processes mono PCM into separate left and right output slices.
@@ -184,7 +186,8 @@ impl Processor {
     ) -> Result<(), Error> {
         Error::check_length(input.len(), left.len())?;
         Error::check_length(input.len(), right.len())?;
-        self.process_into(input, events, |index, frame| {
+        self.process_into(input.len(), events, |processor, index| {
+            let frame = processor.next(input[index], OutputLayout::Stereo);
             left[index] = frame[0];
             right[index] = frame[1];
         })
@@ -209,16 +212,10 @@ impl Processor {
         audio: &mut [i16],
         events: &[TimedEvent],
     ) -> Result<(), Error> {
-        let mut events = self.validate(audio, events)?;
-        self.drain_remaining = None;
-        for (index, sample) in audio.iter_mut().enumerate() {
-            while let Some(event) = events.next_at(index) {
-                self.apply(event);
-            }
-            let output = self.next(*sample, OutputLayout::Mono);
-            *sample = output[0];
-        }
-        Ok(())
+        self.process_into(audio.len(), events, |processor, index| {
+            let output = processor.next(audio[index], OutputLayout::Mono);
+            audio[index] = output[0];
+        })
     }
 
     /// Starts a tail with the current [`tail_frames`](Self::tail_frames)
@@ -505,11 +502,7 @@ impl Processor {
         }
         if self.config.resynthesis.stereo_output != config.resynthesis.stereo_output {
             // Resynthesis resets its histories if its stereo setting changes.
-            self.alien.reset();
-            self.reverb.reset();
-            self.peak = 0;
-            self.clear_telemetry_peaks();
-            self.last_resample_ratio = 0.0;
+            self.reset_post_resynthesis();
         }
         if self.config.resynthesis.random_seed != config.resynthesis.random_seed {
             self.numeric.random = RandomStream::new(config.resynthesis.random_seed as u32);
@@ -551,13 +544,21 @@ impl Processor {
         self.punch.reset();
         self.warm.reset();
         self.resynthesis.reset();
+        self.reset_post_resynthesis();
+        self.frames = 0;
+        self.drain_remaining = None;
+    }
+
+    /// Clears the stages, the peak windows and the ratio after resynthesis.
+    ///
+    /// Both a full reset and a change of stereo output clear this state. The
+    /// frame count does not change here.
+    fn reset_post_resynthesis(&mut self) {
         self.alien.reset();
         self.reverb.reset();
         self.peak = 0;
         self.clear_telemetry_peaks();
-        self.frames = 0;
         self.last_resample_ratio = 0.0;
-        self.drain_remaining = None;
     }
 
     /// Checks the block size, then checks all events without a change.
@@ -565,17 +566,17 @@ impl Processor {
     /// The returned cursor is the only source of validated control tokens.
     fn validate<'a>(
         &self,
-        input: &[i16],
+        frames: usize,
         events: &'a [TimedEvent],
     ) -> Result<ValidatedEvents<'a>, Error> {
-        self.check_block(input.len())?;
-        ValidatedEvents::new(events, input.len())
+        self.check_block(frames)?;
+        ValidatedEvents::new(events, frames)
     }
 
     /// Enforces the prepared block limit for each call.
     ///
     /// Zero frames are valid.
-    fn check_block(&self, frames: usize) -> Result<(), Error> {
+    pub(crate) fn check_block(&self, frames: usize) -> Result<(), Error> {
         let max = self.preparation.max_block_frames.get();
         if frames > max {
             return Err(Error::BlockTooLarge { frames, max });
@@ -636,7 +637,7 @@ impl Processor {
             (((i64::from(sample.to_bits()) * gain) >> 8) << 1).clamp(-32767, 32767) as i16
         });
         if matches!(layout, OutputLayout::Mono) {
-            let mono = ((i32::from(result[0]) + i32::from(result[1])) >> 1) as i16;
+            let mono = downmix(result);
             result = [mono, mono];
         }
         self.peak = self
@@ -650,23 +651,24 @@ impl Processor {
         result
     }
 
-    /// Checks the block, applies all controls at each offset and writes each
-    /// rendered frame.
+    /// Checks the block, applies all controls at each offset and renders each
+    /// frame.
     ///
-    /// A callback for the buffer layout writes the frames.
+    /// A callback reads the input sample and writes the output for its buffer
+    /// layout.
     fn process_into(
         &mut self,
-        input: &[i16],
+        frames: usize,
         events: &[TimedEvent],
-        mut write: impl FnMut(usize, [i16; 2]),
+        mut render: impl FnMut(&mut Self, usize),
     ) -> Result<(), Error> {
-        let mut events = self.validate(input, events)?;
+        let mut events = self.validate(frames, events)?;
         self.drain_remaining = None;
-        for (index, sample) in input.iter().enumerate() {
+        for index in 0..frames {
             while let Some(event) = events.next_at(index) {
                 self.apply(event);
             }
-            write(index, self.next(*sample, OutputLayout::Stereo));
+            render(self, index);
         }
         Ok(())
     }
@@ -708,6 +710,11 @@ impl Processor {
         }
         Ok(count)
     }
+}
+
+/// Mixes a stereo frame to mono and rounds toward negative infinity.
+fn downmix(frame: [i16; 2]) -> i16 {
+    ((i32::from(frame[0]) + i32::from(frame[1])) >> 1) as i16
 }
 
 /// A snapshot of the pitch analysis and the output level that you can copy.
