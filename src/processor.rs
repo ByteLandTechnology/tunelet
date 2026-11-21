@@ -819,20 +819,18 @@ impl Processor {
         *last_resample_ratio = resynthesis.resample_ratio();
         let alien = alien.process_sample(voice);
         let reverb = reverb.process_sample(alien);
-        let gain = (config.output_gain as f64 * 256.0) as i32;
+        let gain = (config.output_gain as f64 * 256.0) as i64;
         reverb.map(|sample| {
-            (sample.to_bits().wrapping_mul(gain) >> 8)
-                .wrapping_shl(1)
-                .clamp(-32767, 32767) as i16
+            (((i64::from(sample.to_bits()) * gain) >> 8) << 1).clamp(-32767, 32767) as i16
         })
     }
 
     /// Renders one frame through the full chain and updates stereo feedback.
     ///
-    /// Resynthesis produces Q14 audio. Output gain is Q8. The multiplication
-    /// wraps before the shift. PCM conversion clips to the symmetric 16-bit
-    /// range. This order and the peak measurement before the downmix are part
-    /// of the output.
+    /// Resynthesis produces Q14 audio. Output gain is Q8. The gain product
+    /// uses `i64` arithmetic before the symmetric `-32767..=32767` PCM clamp.
+    /// This order and the peak measurement before the downmix are part of the
+    /// output.
     fn next(&mut self, input: i16) -> [i16; 2] {
         self.input_peak = self.input_peak.max((input as i32).abs());
         let result = match self.resampler.as_mut() {

@@ -91,9 +91,9 @@
 //! Construction allocates the audio storage. After construction, the calls for
 //! audio, controls, feedback, reset and drain do not allocate memory. They do
 //! not acquire locks and do no I/O. Each processor owns its histories and its
-//! random stream. Fixed-point arithmetic uses explicit wrapping and
-//! quantization. If you change the order of the arithmetic, the samples can
-//! change.
+//! random stream. Fixed-point arithmetic uses `i64` products, saturated
+//! `i32` bounds and explicit quantization. If you change the order of the
+//! arithmetic, the samples can change.
 //!
 //! The default build uses only safe Rust and has no dependencies.
 //!

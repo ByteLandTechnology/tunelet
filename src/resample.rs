@@ -6,6 +6,7 @@
 //! A 4x resampler puts an outer 2x stage around an inner 2x stage.
 
 use crate::filter::{Biquad, Design};
+use crate::numeric::clamp_i32;
 use crate::numeric::fixed::Q14;
 use crate::SampleRate;
 
@@ -79,7 +80,7 @@ impl Stage2x {
         }
         let excited = if !self.odd {
             let step = core(input);
-            [step[0] << 1, step[1] << 1]
+            step.map(|sample| Q14::from_bits(clamp_i32(i64::from(sample.to_bits()) << 1)))
         } else {
             [Q14::ZERO; 2]
         };
@@ -186,5 +187,5 @@ fn pcm_to_q14(sample: i16) -> Q14 {
 /// Converts a Q14 audio sample to symmetric 16-bit PCM.
 #[inline]
 fn q14_to_pcm(sample: Q14) -> i16 {
-    sample.to_bits().wrapping_shl(1).clamp(-32767, 32767) as i16
+    (i64::from(sample.to_bits()) << 1).clamp(-32767, 32767) as i16
 }
