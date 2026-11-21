@@ -344,16 +344,16 @@ impl Formant {
         self.stretch[bank] = (stretch as f64 * 16384.0) as i32;
         let count = (((ORDER - 1) as f64 * stretch as f64 + 1.001) as usize).min(MAX_ORDER);
         self.stretch_count[bank] = count;
-        for i in 0..count - 1 {
+        for (i, entry) in self.stretch_map[bank][..count - 1].iter_mut().enumerate() {
             let fraction = i as f64 / (count - 1) as f64;
-            self.stretch_map[bank][i] = ((ORDER - 1) as f64 * fraction * 128.0) as i32;
+            *entry = ((ORDER - 1) as f64 * fraction * 128.0) as i32;
         }
         self.stretch_map[bank][count - 1] = ((ORDER - 1) * 128) as i32;
     }
     /// Clears the synthesis feedback of the four harmony banks.
     pub(crate) fn clear_harmony_history(&mut self) {
-        for slot in 1..SYNTHESIS_BANKS {
-            self.history[slot].fill(0_i32);
+        for history in &mut self.history[1..] {
+            history.fill(0_i32);
         }
     }
     /// Clears the audio, the stamps, the synthesis history and the history of
