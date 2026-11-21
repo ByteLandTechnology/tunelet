@@ -10,7 +10,7 @@
  * `initSync` and the configuration, event and feedback types.
  */
 import "./text-codec-shim.js";
-import init, { initSync, Tunelet } from "../pkg/tunelet.js";
+import init, { Tunelet } from "../pkg/tunelet.js";
 import type {
   BlockEvents,
   Feedback,
@@ -64,8 +64,8 @@ function copyViewToArrayBuffer(view: ArrayBufferView): ArrayBuffer {
   return copy.buffer;
 }
 
-/** Reads a Node.js `file:` URL into an `ArrayBuffer`. */
-async function readFileUrlBytes(url: URL): Promise<ArrayBuffer> {
+/** Reads a Node.js `file:` URL into a byte view. */
+async function readFileUrlBuffer(url: URL): Promise<Uint8Array> {
   // Keep the Node.js built-in module out of browser bundles. TypeScript
   // removes the type-only import. The runtime import runs only for `file:`
   // URLs.
@@ -73,8 +73,12 @@ async function readFileUrlBytes(url: URL): Promise<ArrayBuffer> {
   const fs: typeof import("node:fs/promises") = await import(
     /* webpackIgnore: true */ /* @vite-ignore */ moduleName
   );
-  const buffer = await fs.readFile(url);
-  return copyViewToArrayBuffer(buffer);
+  return fs.readFile(url);
+}
+
+/** Reads a Node.js `file:` URL into an `ArrayBuffer`. */
+async function readFileUrlBytes(url: URL): Promise<ArrayBuffer> {
+  return copyViewToArrayBuffer(await readFileUrlBuffer(url));
 }
 
 /** Returns `true` if `input` requires `fetch` in non-file environments. */
@@ -148,7 +152,7 @@ async function initialize(
       : await source;
 
   if (input instanceof URL && input.protocol === "file:") {
-    return initSync({ module: await readFileUrlBytes(input) });
+    return init({ module_or_path: await readFileUrlBuffer(input) });
   }
 
   if (
