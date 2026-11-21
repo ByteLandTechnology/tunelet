@@ -282,9 +282,9 @@ impl MonoPolyphase {
         let samples = &self.history[self.write..self.write + self.taps];
         let offset = phase_index * self.taps;
         let coeffs = &self.table[offset..offset + self.taps];
-        let mut sum: i32 = 0;
+        let mut sum = 0_i64;
         for (&sample, &coeff) in samples.iter().zip(coeffs) {
-            sum = sum.wrapping_add(i32::from(sample).wrapping_mul(coeff.to_bits()));
+            sum = sum.saturating_add(i64::from(sample) * i64::from(coeff.to_bits()));
         }
         round_q14(sum).clamp(-32768, 32767) as i16
     }
@@ -329,12 +329,12 @@ impl StereoPolyphase {
         let frames = &self.history[self.write..self.write + self.taps];
         let offset = phase_index * self.taps;
         let coeffs = &self.table[offset..offset + self.taps];
-        let mut left: i32 = 0;
-        let mut right: i32 = 0;
+        let mut left = 0_i64;
+        let mut right = 0_i64;
         for (&frame, &coeff) in frames.iter().zip(coeffs) {
-            let weight = coeff.to_bits();
-            left = left.wrapping_add(i32::from(frame[0]).wrapping_mul(weight));
-            right = right.wrapping_add(i32::from(frame[1]).wrapping_mul(weight));
+            let weight = i64::from(coeff.to_bits());
+            left = left.saturating_add(i64::from(frame[0]) * weight);
+            right = right.saturating_add(i64::from(frame[1]) * weight);
         }
         [
             round_q14(left).clamp(-32767, 32767) as i16,
