@@ -344,7 +344,7 @@ impl PitchTracker {
         }
         let maximum = ((self.detection_count - 6) / 2).min(ACQUISITION_LAGS as i32 - 1) as usize;
         let mut normalized = [0_i32; ACQUISITION_LAGS];
-        #[expect(
+        #[allow(
             clippy::needless_range_loop,
             reason = "one lag index drives three tables in the hot loop"
         )]
