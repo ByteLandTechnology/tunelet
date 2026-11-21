@@ -382,15 +382,17 @@ For a custom asset location, give one of these sources to
 - A promise for one of these.
 
 For a Node.js `file:` source, use a URL object. A string source obeys fetch
-rules. The first concurrent call selects the source. Later arguments do not
-replace an initialized module. A custom binary must match the generated
-bindings.
+rules. Calls with the same source share the initialized module. A call with a
+different source rejects with an `Error`. A custom binary must match the
+generated bindings.
 
 The package root also exports `loadTunelet` as its default export. For direct
 control of Wasm initialization, `tunelet/wasm` gives the generated default
 initializer and `initSync`. The package root re-exports `initSync` too. Use
-only one initialization entry point for each module instance. The package
-gives only ESM exports. CommonJS applications can use `await import("tunelet")`.
+only one initialization entry point for each module instance. Calls before
+initialization or after `free()` throw an `Error`, and duplicate `free()`
+calls do no work. The package gives only ESM exports. CommonJS applications
+can use `await import("tunelet")`.
 
 ### Deployment
 
