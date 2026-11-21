@@ -565,9 +565,10 @@ ignores both directories. The archive contains only these items:
 - The package metadata.
 - The README.
 
-The `build:wasm` script uses `--no-opt`. This flag disables the separate
-Binaryen pass, but Rust still builds in release mode. The TypeScript and
-Node.js type declarations are only development dependencies.
+The `build:wasm` script builds the crate in release mode with LTO and one
+codegen unit. Then `wasm-pack` runs Binaryen `wasm-opt` on
+`pkg/tunelet_bg.wasm`. The TypeScript and Node.js type declarations are only
+development dependencies.
 
 ## License
 
