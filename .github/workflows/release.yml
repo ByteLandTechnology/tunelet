@@ -52,6 +52,9 @@ jobs:
         with:
           toolchain: "1.99.1"
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-bin: "false"
       - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: wasm-pack@0.15.1
@@ -66,12 +69,14 @@ jobs:
         with:
           node-version: "24.22.2"
           registry-url: "https://registry.npmjs.org"
-          package-manager-cache: false
+          cache: "npm"
       # Trusted publishing needs npm 11.5.1 or later.
       - run: npm install --global npm@12.2.3
       - run: npm ci
-      # The prepack script builds the Wasm bindings and the TypeScript entry.
-      - run: npm publish
+      # Check the archive files and loadTunelet() before npm publish.
+      - run: npm run verify:pack
+      # Publish the built files without a second prepack build.
+      - run: npm publish --ignore-scripts
 
   publish-github:
     needs: release-please
@@ -90,6 +95,9 @@ jobs:
         with:
           toolchain: "1.99.1"
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-bin: "false"
       - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: wasm-pack@0.15.1
@@ -105,14 +113,16 @@ jobs:
           node-version: "24.22.2"
           registry-url: "https://npm.pkg.github.com"
           scope: "@bytelandtechnology"
-          package-manager-cache: false
+          cache: "npm"
       # Use the same npm version as publish-npm.
       - run: npm install --global npm@12.2.3
       - run: npm ci
       # GitHub Packages accepts only names in the scope of the owner.
       - run: npm pkg set name=@bytelandtechnology/tunelet
-      # The prepack script builds the Wasm bindings and the TypeScript entry.
-      - run: npm publish
+      # Check the archive files and loadTunelet() before npm publish.
+      - run: npm run verify:pack
+      # Publish the built files without a second prepack build.
+      - run: npm publish --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
