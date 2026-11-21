@@ -198,6 +198,9 @@ The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
 voices. The other voices release with the usual gain envelope. The chord
 and MIDI sources ignore this field.
 
+`resynthesis.harmony_gain` scales the four harmony voices in mono and in
+stereo. It does not scale the lead voice.
+
 ## Process audio
 
 To prepare a processor, do these steps:
