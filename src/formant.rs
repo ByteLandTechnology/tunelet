@@ -41,7 +41,7 @@ use crate::{Error, SampleRate};
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase")
+    serde(default, rename_all = "camelCase")
 )]
 pub struct FormantConfig {
     /// Enables formant analysis and synthesis. The default is `false`.
@@ -74,6 +74,12 @@ pub struct FormantConfig {
 }
 impl Default for FormantConfig {
     fn default() -> Self {
+        Self::new()
+    }
+}
+impl FormantConfig {
+    /// Returns the default disabled formant configuration.
+    const fn new() -> Self {
         Self {
             enabled: false,
             width: 1.0,
@@ -82,8 +88,46 @@ impl Default for FormantConfig {
             aspiration_cutoff_hz: 4000.0,
         }
     }
-}
-impl FormantConfig {
+
+    /// Returns enabled formant settings with unity width, unity stretch and no
+    /// aspiration.
+    pub const fn enabled() -> Self {
+        Self::new().with_enabled(true)
+    }
+
+    /// Sets `enabled` and returns the configuration.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Sets the vocal-tract width factor, 0.5..=2, and returns the
+    /// configuration.
+    pub const fn with_width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
+
+    /// Sets the vocal-tract length factor, 0.5..=2, and returns the
+    /// configuration.
+    pub const fn with_stretch(mut self, stretch: f32) -> Self {
+        self.stretch = stretch;
+        self
+    }
+
+    /// Sets the aspiration level, 0..=1, and returns the configuration.
+    pub const fn with_aspiration_mix(mut self, aspiration_mix: f32) -> Self {
+        self.aspiration_mix = aspiration_mix;
+        self
+    }
+
+    /// Sets the high-pass cutoff for aspiration in hertz, 500..=10000, and
+    /// returns the configuration.
+    pub const fn with_aspiration_cutoff_hz(mut self, aspiration_cutoff_hz: f32) -> Self {
+        self.aspiration_cutoff_hz = aspiration_cutoff_hz;
+        self
+    }
+
     /// Validates all fields, also if the formant stage is disabled.
     ///
     /// Each floating-point control must be finite and in its documented

@@ -18,11 +18,16 @@
 //!
 //! - Field names use camelCase.
 //! - Enum values are strings.
-//! - Each object must contain all required fields.
-//! - The optional harmony `voices` field defaults to 4.
+//! - Omitted configuration fields in the constructor or `setConfig` use their
+//!   defaults.
+//! - Omitted fields in `updateConfig` keep their active values.
+//! - Numeric fields use `number`, so configurations, feedback and telemetry
+//!   work with `JSON.stringify`.
 //!
-//! [`default_config`] gives a configuration to start from. Control events use
-//! `{ type, value }`, and the reset control has no `value`. MIDI messages use
+//! [`default_config`] gives a complete configuration. [`note_mask_from_key_scale`]
+//! builds a 12-note mask from a key and a scale, and [`parse_midi_bytes`]
+//! decodes a 3-byte MIDI message. Control events use `{ type, value }`, and
+//! the reset control has no `value`. MIDI messages use
 //! `{ type, channel, note, velocity }`, with the fields that apply to the
 //! selected variant. The TypeScript declarations come from the same Rust types
 //! that validation uses.
@@ -42,12 +47,33 @@
 //! `free()` method.
 
 use crate::{
-    Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
+    CorrectionScale, Error, Feedback, MidiEvent, NoteMask, PitchClass, PrepareConfig, Processor,
+    ProcessorConfig, SampleRate, Telemetry, TimedEvent,
 };
-use js_sys::{Float32Array, Int16Array};
+use js_sys::{Array, Float32Array, Int16Array, Object, Reflect, Uint8Array};
 use serde::{Deserialize, Serialize};
 use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+
+#[wasm_bindgen(typescript_custom_section)]
+const TS_DEEP_PARTIAL: &'static str = r#"/**
+ * Makes each object property of `T` optional at every depth, and keeps arrays
+ * and tuples unchanged.
+ */
+export type DeepPartial<T> = T extends readonly unknown[]
+    ? T
+    : T extends object
+      ? { [K in keyof T]?: DeepPartial<T[K]> }
+      : T;
+"#;
+
+#[wasm_bindgen]
+extern "C" {
+    /// A partial processor configuration object from JavaScript.
+    #[wasm_bindgen(typescript_type = "DeepPartial<ProcessorConfig>")]
+    pub type PartialProcessorConfig;
+}
 
 /// The events for one call that processes audio (`TimedEvent[]` in TypeScript).
 ///
@@ -62,10 +88,10 @@ pub struct BlockEvents(Vec<TimedEvent>);
 
 /// Returns a complete, independent default configuration for JavaScript.
 ///
-/// Change its fields and give it to `Tunelet` or to `setConfig`. The
-/// `randomSeed` field is a JavaScript `bigint`, so it keeps all 64 bits. After
-/// the binding decodes them, floating-point controls have the precision of the
-/// Rust `f32` type.
+/// Change its fields and give it to `Tunelet`, `setConfig` or `updateConfig`.
+/// All numeric fields are JavaScript `number` values. After the binding
+/// decodes them, floating-point controls have the precision of the Rust `f32`
+/// type.
 ///
 /// # Errors
 ///
@@ -74,6 +100,47 @@ pub struct BlockEvents(Vec<TimedEvent>);
 #[wasm_bindgen(js_name = defaultConfig)]
 pub fn default_config() -> Result<Ts<ProcessorConfig>, JsError> {
     Ok(ProcessorConfig::default().into_ts()?)
+}
+
+/// Returns the 12-note boolean mask for `key` and `scale`.
+///
+/// Index 0 is C and index 11 is B. Give the returned mask to
+/// `resynthesis.correction.notes` or a `correctionNotes` parameter event.
+///
+/// # Errors
+///
+/// Throws a JavaScript `Error` if `key` or `scale` is not a valid variant
+/// string.
+#[wasm_bindgen(js_name = noteMaskFromKeyScale)]
+pub fn note_mask_from_key_scale(
+    key: Ts<PitchClass>,
+    scale: Ts<CorrectionScale>,
+) -> Result<Ts<NoteMask>, JsError> {
+    Ok(NoteMask::from_key_scale(key.to_rust()?, scale.to_rust()?).into_ts()?)
+}
+
+/// Decodes one complete 3-byte MIDI message, as [`MidiEvent::from_bytes`]
+/// does.
+///
+/// Note On with velocity 0 returns a `noteOff` object. Other messages with
+/// valid status and data bytes return `undefined`. System-exclusive data and
+/// running status are not supported.
+///
+/// # Errors
+///
+/// Throws a JavaScript `Error` if `bytes` does not have length 3, if the
+/// status byte is below `0x80` or if a data byte is above 127.
+#[wasm_bindgen(js_name = parseMidiBytes)]
+pub fn parse_midi_bytes(bytes: &Uint8Array) -> Result<Option<Ts<MidiEvent>>, JsError> {
+    if bytes.length() != 3 {
+        return Err(Error::InvalidMidi.into());
+    }
+    let mut raw = [0; 3];
+    bytes.copy_to(&mut raw);
+    Ok(match MidiEvent::from_bytes(raw)? {
+        Some(event) => Some(event.into_ts()?),
+        None => None,
+    })
 }
 
 /// A stateful PCM processor that JavaScript uses as the `Tunelet` class.
@@ -121,10 +188,11 @@ impl WasmProcessor {
     ///
     /// `sample_rate` must be 44100 or 48000. `max_block_frames` must be an
     /// integer in 1..=4294967295. It is a limit for each call, and smaller
-    /// blocks and empty blocks are also valid. If you omit `config`, the
-    /// processor uses the default configuration. The constructor validates
-    /// the settings before it allocates the processor or the PCM buffers. In
-    /// TypeScript, use `new Tunelet(sampleRate, maxBlockFrames, config)`.
+    /// blocks and empty blocks are also valid. If you omit `config` or omit
+    /// fields inside it, the processor uses the default values for those
+    /// fields. The constructor validates the settings before it allocates the
+    /// processor or the PCM buffers. In TypeScript, use
+    /// `new Tunelet(sampleRate, maxBlockFrames, config)`.
     ///
     /// # Errors
     ///
@@ -132,7 +200,7 @@ impl WasmProcessor {
     ///
     /// - The rate is not 44100 or 48000.
     /// - The block limit is not an integer or is out of range.
-    /// - The configuration object is malformed or a field is missing.
+    /// - The configuration object is malformed.
     /// - The configuration is not valid.
     /// - The reservation of a PCM buffer fails.
     ///
@@ -142,7 +210,7 @@ impl WasmProcessor {
     pub fn new(
         sample_rate: f64,
         max_block_frames: f64,
-        config: Option<Ts<ProcessorConfig>>,
+        config: Option<PartialProcessorConfig>,
     ) -> Result<WasmProcessor, JsError> {
         // Accept JavaScript numbers without the u32 coercion of wasm-bindgen.
         // That coercion silently truncates fractions and wraps large values.
@@ -161,7 +229,7 @@ impl WasmProcessor {
         let max_block_frames = max_block_frames as usize;
         let preparation = PrepareConfig::new(rate, max_block_frames)?;
         let config = match config {
-            Some(value) => value.to_rust()?,
+            Some(value) => merge_processor_config(ProcessorConfig::default(), value.as_ref())?,
             None => ProcessorConfig::default(),
         };
         let processor = Processor::new(preparation, config)?;
@@ -202,8 +270,8 @@ impl WasmProcessor {
 
     /// Returns a copy of the active configuration as a new JavaScript object.
     ///
-    /// A change to the object has no effect until `setConfig` or a timed event
-    /// applies it.
+    /// A change to the object has no effect until `setConfig`, `updateConfig`
+    /// or a timed event applies it.
     ///
     /// # Errors
     ///
@@ -215,16 +283,36 @@ impl WasmProcessor {
     /// Decodes and validates a configuration, then replaces the complete
     /// configuration with it.
     ///
-    /// State retention and drain cancellation follow the native processor.
-    /// The conversion ignores additional properties of the JavaScript object.
+    /// Omitted fields use their defaults. State retention and drain
+    /// cancellation follow the native processor. The conversion ignores
+    /// additional properties of the JavaScript object.
     ///
     /// # Errors
     ///
-    /// The method throws if an object is not valid or a field is missing.
-    /// After an error, all processor state and any active drain stay the same.
+    /// The method throws if an object or field value is not valid. After an
+    /// error, all processor state and any active drain stay the same.
     #[wasm_bindgen(js_name = setConfig)]
     pub fn set_config(&mut self, config: Ts<ProcessorConfig>) -> Result<(), JsError> {
-        self.processor.set_config(config.to_rust()?)?;
+        let merged = merge_processor_config(ProcessorConfig::default(), &JsValue::from(config))?;
+        self.processor.set_config(merged)?;
+        Ok(())
+    }
+
+    /// Merges a partial configuration onto the active configuration, validates
+    /// the result and applies it.
+    ///
+    /// Omitted fields keep their active values. State retention and drain
+    /// cancellation follow `setConfig`.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if `config` is not an object or if a field value is
+    /// not valid. After an error, all processor state and any active drain
+    /// stay the same.
+    #[wasm_bindgen(js_name = updateConfig)]
+    pub fn update_config(&mut self, config: PartialProcessorConfig) -> Result<(), JsError> {
+        let merged = merge_processor_config(self.processor.config(), config.as_ref())?;
+        self.processor.set_config(merged)?;
         Ok(())
     }
 
@@ -356,8 +444,8 @@ impl WasmProcessor {
 
     /// Returns a new feedback object and does not clear the peak window.
     ///
-    /// `processedFrames` is a `bigint`, so its 64-bit count stays exact.
-    /// `latencyFrames` is a number. See `Feedback` for each measurement.
+    /// `processedFrames` and `latencyFrames` are numbers. See `Feedback` for
+    /// each measurement.
     ///
     /// `targetMidiNote` is `undefined` in these cases, which are also the
     /// cases where `voiced` is `false`:
@@ -394,7 +482,7 @@ impl WasmProcessor {
     ///
     /// The telemetry is for meters and displays. It gives the ratio and the
     /// gain of each voice, the input and output peaks, the pitch clarity and
-    /// the state of the effects. `processedFrames` is a `bigint`. See
+    /// the state of the effects. `processedFrames` is a number. See
     /// `Telemetry` for each measurement.
     ///
     /// # Errors
@@ -487,6 +575,55 @@ impl WasmProcessor {
     }
 }
 
+/// Returns `true` if `value` is a non-null, non-array, non-function object.
+fn is_plain_record(value: &JsValue) -> bool {
+    value.is_object() && !value.is_null() && !Array::is_array(value) && !value.is_function()
+}
+
+/// Copies defined known properties from `patch` into `target`, and merges
+/// nested configuration objects.
+fn merge_records(target: &JsValue, patch: &JsValue) -> Result<(), JsError> {
+    let (Some(target_object), Some(patch_object)) =
+        (target.dyn_ref::<Object>(), patch.dyn_ref::<Object>())
+    else {
+        return Err(JsError::new("expected a configuration object"));
+    };
+    for pair in Object::entries(patch_object).iter() {
+        let pair = Array::from(&pair);
+        let key = pair.get(0);
+        let value = pair.get(1);
+        if value.is_undefined() || !Object::has_own(target_object, &key) {
+            continue;
+        }
+        let current = Reflect::get(target, &key)
+            .map_err(|_| JsError::new("failed to read configuration field"))?;
+        if is_plain_record(&current) && is_plain_record(&value) {
+            merge_records(&current, &value)?;
+        } else {
+            let ok = Reflect::set(target, &key, &value)
+                .map_err(|_| JsError::new("failed to write configuration field"))?;
+            if !ok {
+                return Err(JsError::new("failed to write configuration field"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Merges a partial JavaScript configuration object onto `base` and decodes the
+/// result.
+fn merge_processor_config(
+    base: ProcessorConfig,
+    patch: &JsValue,
+) -> Result<ProcessorConfig, JsError> {
+    if !is_plain_record(patch) {
+        return Err(JsError::new("expected a configuration object"));
+    }
+    let target: JsValue = base.into_ts()?.into();
+    merge_records(&target, patch)?;
+    Ok(Ts::<ProcessorConfig>::new_unchecked(target).to_rust()?)
+}
+
 /// Decodes the optional block controls before the audio state changes.
 ///
 /// If there is no value, the result is an empty `Vec`, and no allocation
@@ -522,11 +659,17 @@ fn pcm_buffer(frames: usize) -> Result<Vec<i16>, JsError> {
     Ok(buffer)
 }
 
+/// Serializes the 64-bit processed frame counter as a JavaScript number.
+pub(crate) fn serialize_processed_frames<S: serde::Serializer>(
+    frames: &u64,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_f64(*frames as f64)
+}
+
 /// Serializes the bounded Wasm frame count as a JavaScript number.
 ///
-/// The serializer of the feedback structure keeps its other counter, a `u64`,
-/// as a `bigint`. This module compiles only for wasm32, where every `usize`
-/// fits in a `u32`.
+/// This module compiles only for wasm32, where every `usize` fits in a `u32`.
 pub(crate) fn serialize_frame_count<S: serde::Serializer>(
     frames: &usize,
     serializer: S,

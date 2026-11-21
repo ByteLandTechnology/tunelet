@@ -117,6 +117,19 @@ impl PrepareConfig {
             max_block_frames,
         })
     }
+
+    /// Sets the `sample_rate` and returns the preparation limits.
+    pub const fn with_sample_rate(mut self, sample_rate: SampleRate) -> Self {
+        self.sample_rate = sample_rate;
+        self
+    }
+
+    /// Sets the nonzero `max_block_frames` limit and returns the preparation
+    /// limits.
+    pub const fn with_max_block_frames(mut self, max_block_frames: NonZeroUsize) -> Self {
+        self.max_block_frames = max_block_frames;
+        self
+    }
 }
 
 /// The settings for the complete signal chain, in the order of the stages.
@@ -134,8 +147,7 @@ impl PrepareConfig {
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase"),
-    tsify(large_number_types_as_bigints)
+    serde(default, rename_all = "camelCase")
 )]
 pub struct ProcessorConfig {
     /// The input dynamics and saturation stage, which applies first.
@@ -184,6 +196,43 @@ impl Default for ProcessorConfig {
 }
 
 impl ProcessorConfig {
+    /// Sets the `punch` stage configuration and returns the configuration.
+    pub const fn with_punch(mut self, punch: PunchConfig) -> Self {
+        self.punch = punch;
+        self
+    }
+
+    /// Sets the `warm` stage configuration and returns the configuration.
+    pub const fn with_warm(mut self, warm: WarmConfig) -> Self {
+        self.warm = warm;
+        self
+    }
+
+    /// Sets the `resynthesis` stage configuration and returns the
+    /// configuration.
+    pub const fn with_resynthesis(mut self, resynthesis: ResynthesisConfig) -> Self {
+        self.resynthesis = resynthesis;
+        self
+    }
+
+    /// Sets the `alien` stage configuration and returns the configuration.
+    pub const fn with_alien(mut self, alien: AlienConfig) -> Self {
+        self.alien = alien;
+        self
+    }
+
+    /// Sets the `reverb` stage configuration and returns the configuration.
+    pub const fn with_reverb(mut self, reverb: ReverbConfig) -> Self {
+        self.reverb = reverb;
+        self
+    }
+
+    /// Sets the final linear gain, 0..=64, and returns the configuration.
+    pub const fn with_output_gain(mut self, output_gain: f32) -> Self {
+        self.output_gain = output_gain;
+        self
+    }
+
     /// Checks all stages and the final gain, and does not change state.
     ///
     /// The validation uses the signal order: Punch, Warm, resynthesis, Alien,

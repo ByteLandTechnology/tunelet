@@ -17,7 +17,7 @@ use crate::Error;
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase")
+    serde(default, rename_all = "camelCase")
 )]
 pub struct PitchConfig {
     /// The normalized cycle-difference threshold for acquisition, 0.002..=0.2.
@@ -43,15 +43,60 @@ pub struct PitchConfig {
 
 impl Default for PitchConfig {
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PitchConfig {
+    /// Returns the default pitch configuration.
+    const fn new() -> Self {
         Self {
             threshold: 0.1,
             min_frequency_hz: 40.0,
             max_frequency_hz: 1100.0,
         }
     }
-}
 
-impl PitchConfig {
+    /// Sets the acquisition threshold, 0.002..=0.2, and returns the
+    /// configuration.
+    pub const fn with_threshold(mut self, threshold: f32) -> Self {
+        self.threshold = threshold;
+        self
+    }
+
+    /// Sets the lower frequency bound in hertz, 40..=2000, and returns the
+    /// configuration.
+    ///
+    /// Validation requires a value strictly below `max_frequency_hz`.
+    pub const fn with_min_frequency_hz(mut self, min_frequency_hz: f32) -> Self {
+        self.min_frequency_hz = min_frequency_hz;
+        self
+    }
+
+    /// Sets the upper frequency bound in hertz, 40..=2000, and returns the
+    /// configuration.
+    ///
+    /// Validation requires a value strictly above `min_frequency_hz`.
+    pub const fn with_max_frequency_hz(mut self, max_frequency_hz: f32) -> Self {
+        self.max_frequency_hz = max_frequency_hz;
+        self
+    }
+
+    /// Sets the lower and upper frequency bounds in hertz, each in 40..=2000,
+    /// and returns the configuration.
+    ///
+    /// Validation requires `min_frequency_hz` strictly below
+    /// `max_frequency_hz`.
+    pub const fn with_frequency_range_hz(
+        mut self,
+        min_frequency_hz: f32,
+        max_frequency_hz: f32,
+    ) -> Self {
+        self.min_frequency_hz = min_frequency_hz;
+        self.max_frequency_hz = max_frequency_hz;
+        self
+    }
+
     /// Applies only the bounds for host reports to a kept estimate.
     ///
     /// If the estimate is not voiced or is out of range, the result is the

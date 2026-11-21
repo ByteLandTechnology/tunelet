@@ -47,7 +47,7 @@ pub enum ReverbMode {
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase")
+    serde(default, rename_all = "camelCase")
 )]
 pub struct ReverbConfig {
     /// Enables the selected network. The default is `false`. In bypass, the
@@ -85,6 +85,12 @@ pub struct ReverbConfig {
 }
 impl Default for ReverbConfig {
     fn default() -> Self {
+        Self::new()
+    }
+}
+impl ReverbConfig {
+    /// Returns the default disabled reverb settings.
+    const fn new() -> Self {
         Self {
             enabled: false,
             mode: ReverbMode::Echo,
@@ -94,8 +100,54 @@ impl Default for ReverbConfig {
             brightness_hz: 4000.0,
         }
     }
-}
-impl ReverbConfig {
+
+    /// Returns enabled reverb settings with [`ReverbMode::Echo`].
+    pub const fn enabled() -> Self {
+        Self::new().with_enabled(true)
+    }
+
+    /// Returns enabled reverb settings with `mode` and default controls.
+    pub const fn from_mode(mode: ReverbMode) -> Self {
+        Self::enabled().with_mode(mode)
+    }
+
+    /// Sets `enabled` and returns the configuration.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Sets the reverb network `mode` and returns the configuration.
+    pub const fn with_mode(mut self, mode: ReverbMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Sets the wet fraction, 0..=1, and returns the configuration.
+    pub const fn with_mix(mut self, mix: f32) -> Self {
+        self.mix = mix;
+        self
+    }
+
+    /// Sets the diffusion control, 0..=1, and returns the configuration.
+    pub const fn with_diffusion(mut self, diffusion: f32) -> Self {
+        self.diffusion = diffusion;
+        self
+    }
+
+    /// Sets the feedback control, 0..=1, and returns the configuration.
+    pub const fn with_decay(mut self, decay: f32) -> Self {
+        self.decay = decay;
+        self
+    }
+
+    /// Sets the low-pass cutoff in hertz, 80..=20000, and returns the
+    /// configuration.
+    pub const fn with_brightness_hz(mut self, brightness_hz: f32) -> Self {
+        self.brightness_hz = brightness_hz;
+        self
+    }
+
     /// Validates all fields, also when the stage is disabled or the selected
     /// mode does not use a field.
     ///

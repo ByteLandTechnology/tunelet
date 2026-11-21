@@ -38,7 +38,7 @@ use crate::numeric::fixed::{Q12, Q14, Q6, Q8};
 use crate::numeric::{ring, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
-use crate::scale::{CorrectionTable, NoteMask};
+use crate::scale::{CorrectionScale, CorrectionTable, NoteMask, PitchClass};
 use crate::{Error, SampleRate};
 use history::prepare_history;
 
@@ -84,7 +84,7 @@ pub enum MultiVoiceMode {
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase")
+    serde(default, rename_all = "camelCase")
 )]
 pub struct CorrectionConfig {
     /// Enables the selection of correction targets. The default is `true`.
@@ -110,15 +110,50 @@ pub struct CorrectionConfig {
 
 impl Default for CorrectionConfig {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            notes: NoteMask::default(),
-            retune_ms: 0.0,
-        }
+        Self::new()
     }
 }
 
 impl CorrectionConfig {
+    /// Returns the default chromatic correction settings.
+    const fn new() -> Self {
+        Self {
+            enabled: true,
+            notes: NoteMask::CHROMATIC,
+            retune_ms: 0.0,
+        }
+    }
+
+    /// Returns disabled correction settings with chromatic target notes.
+    pub const fn disabled() -> Self {
+        Self::new().with_enabled(false)
+    }
+
+    /// Returns enabled correction settings for `key` and `scale`, with a
+    /// retune time of zero.
+    pub const fn from_key_scale(key: PitchClass, scale: CorrectionScale) -> Self {
+        Self::new().with_notes(NoteMask::from_key_scale(key, scale))
+    }
+
+    /// Sets `enabled` and returns the configuration.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Sets the target pitch-class `notes` and returns the configuration.
+    pub const fn with_notes(mut self, notes: NoteMask) -> Self {
+        self.notes = notes;
+        self
+    }
+
+    /// Sets the smoothing half-life in milliseconds, 0..=400, and returns the
+    /// configuration.
+    pub const fn with_retune_ms(mut self, retune_ms: f32) -> Self {
+        self.retune_ms = retune_ms;
+        self
+    }
+
     /// Validates all fields, also if correction is disabled.
     ///
     /// All values of `enabled` and `notes` are valid. `retune_ms` must be
@@ -162,8 +197,7 @@ impl CorrectionConfig {
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase"),
-    tsify(large_number_types_as_bigints)
+    serde(default, rename_all = "camelCase")
 )]
 pub struct ResynthesisConfig {
     /// The acquisition sensitivity and the reporting bounds. The
@@ -245,37 +279,161 @@ pub struct ResynthesisConfig {
     /// The seed for choir drift and aspiration, which use the same stream.
     /// The default is `0x1234_abcd`.
     ///
-    /// Only the low 32 bits select the sequence. If a configuration change
-    /// gives a different 64-bit value, the processor starts the stream again
-    /// from the low 32 bits. This is also true for a change to only the high
-    /// bits. Reset keeps the current position in the stream. The enabled
-    /// stages set the number of random values that the code reads.
-    pub random_seed: u64,
+    /// If a configuration change gives a different seed, the processor starts
+    /// the stream again from the new seed. Reset keeps the current position in
+    /// the stream. The enabled stages set the number of random values that the
+    /// code reads.
+    pub random_seed: u32,
 }
 
 impl Default for ResynthesisConfig {
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ResynthesisConfig {
+    /// Returns the default resynthesis settings.
+    const fn new() -> Self {
         Self {
-            pitch: PitchConfig::default(),
-            correction: CorrectionConfig::default(),
+            pitch: PitchConfig {
+                threshold: 0.1,
+                min_frequency_hz: 40.0,
+                max_frequency_hz: 1100.0,
+            },
+            correction: CorrectionConfig::new(),
             pitch_ratio: 1.0,
-            formant: FormantConfig::default(),
+            formant: FormantConfig {
+                enabled: false,
+                width: 1.0,
+                stretch: 1.0,
+                aspiration_mix: 0.0,
+                aspiration_cutoff_hz: 4000.0,
+            },
             mode: MultiVoiceMode::Choir,
             choir_voices: 1,
             choir_detune: 50.0,
             choir_delay: 60.0,
             choir_spread_percent: 100.0,
             stereo_output: false,
-            harmony: HarmonyConfig::default(),
+            harmony: HarmonyConfig::midi_channels(),
             harmony_gain: 0.5,
             harmonic_modulation: 0.0,
             dry_mix: 0.0,
             random_seed: 0x1234_abcd,
         }
     }
-}
 
-impl ResynthesisConfig {
+    /// Returns resynthesis settings in [`MultiVoiceMode::Choir`] with `voices`
+    /// total voices, 1..=16.
+    pub const fn choir(voices: u8) -> Self {
+        Self::new()
+            .with_mode(MultiVoiceMode::Choir)
+            .with_choir_voices(voices)
+    }
+
+    /// Returns resynthesis settings in [`MultiVoiceMode::Harmony`] with
+    /// `harmony`.
+    pub const fn harmony(harmony: HarmonyConfig) -> Self {
+        Self::new()
+            .with_mode(MultiVoiceMode::Harmony)
+            .with_harmony(harmony)
+    }
+
+    /// Sets the `pitch` configuration and returns the configuration.
+    pub const fn with_pitch(mut self, pitch: PitchConfig) -> Self {
+        self.pitch = pitch;
+        self
+    }
+
+    /// Sets the `correction` configuration and returns the configuration.
+    pub const fn with_correction(mut self, correction: CorrectionConfig) -> Self {
+        self.correction = correction;
+        self
+    }
+
+    /// Sets the pitch multiplier, 0.25..=4, and returns the configuration.
+    pub const fn with_pitch_ratio(mut self, pitch_ratio: f32) -> Self {
+        self.pitch_ratio = pitch_ratio;
+        self
+    }
+
+    /// Sets the `formant` configuration and returns the configuration.
+    pub const fn with_formant(mut self, formant: FormantConfig) -> Self {
+        self.formant = formant;
+        self
+    }
+
+    /// Sets the voice arrangement `mode` and returns the configuration.
+    pub const fn with_mode(mut self, mode: MultiVoiceMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Sets the total choir voice count, 1..=16, and returns the
+    /// configuration.
+    pub const fn with_choir_voices(mut self, choir_voices: u8) -> Self {
+        self.choir_voices = choir_voices;
+        self
+    }
+
+    /// Sets the secondary choir drift control, 10..=100, and returns the
+    /// configuration.
+    pub const fn with_choir_detune(mut self, choir_detune: f32) -> Self {
+        self.choir_detune = choir_detune;
+        self
+    }
+
+    /// Sets the choir delay scale, 20..=200, and returns the configuration.
+    pub const fn with_choir_delay(mut self, choir_delay: f32) -> Self {
+        self.choir_delay = choir_delay;
+        self
+    }
+
+    /// Sets the choir stereo width percentage, 0..=100, and returns the
+    /// configuration.
+    pub const fn with_choir_spread_percent(mut self, choir_spread_percent: f32) -> Self {
+        self.choir_spread_percent = choir_spread_percent;
+        self
+    }
+
+    /// Sets `stereo_output` and returns the configuration.
+    pub const fn with_stereo_output(mut self, stereo_output: bool) -> Self {
+        self.stereo_output = stereo_output;
+        self
+    }
+
+    /// Sets the `harmony` configuration and returns the configuration.
+    pub const fn with_harmony(mut self, harmony: HarmonyConfig) -> Self {
+        self.harmony = harmony;
+        self
+    }
+
+    /// Sets the stereo harmony pan gain, 0..=1, and returns the configuration.
+    pub const fn with_harmony_gain(mut self, harmony_gain: f32) -> Self {
+        self.harmony_gain = harmony_gain;
+        self
+    }
+
+    /// Sets the harmonic modulation depth, 0..=24, and returns the
+    /// configuration.
+    pub const fn with_harmonic_modulation(mut self, harmonic_modulation: f32) -> Self {
+        self.harmonic_modulation = harmonic_modulation;
+        self
+    }
+
+    /// Sets the dry fraction, 0..=1, and returns the configuration.
+    pub const fn with_dry_mix(mut self, dry_mix: f32) -> Self {
+        self.dry_mix = dry_mix;
+        self
+    }
+
+    /// Sets the 32-bit `random_seed` and returns the configuration.
+    pub const fn with_random_seed(mut self, random_seed: u32) -> Self {
+        self.random_seed = random_seed;
+        self
+    }
+
     /// Validates all fields, also the settings for stages that are disabled
     /// or not active.
     ///

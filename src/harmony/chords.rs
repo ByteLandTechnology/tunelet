@@ -13,7 +13,7 @@ use crate::numeric::fixed::{Q12, Q6};
 /// Seven semitone offsets of the degrees for each `HarmonyScale`.
 /// `MajorWithoutSeventh` repeats its sixth in the last slot to keep seven
 /// degrees.
-pub(super) const SCALE_TONES: [[i32; 7]; 7] = [
+pub(crate) const SCALE_TONES: [[i32; 7]; 7] = [
     [0, 2, 4, 5, 7, 9, 11],
     [0, 2, 4, 5, 7, 9, 9],
     [0, 2, 4, 5, 7, 9, 10],

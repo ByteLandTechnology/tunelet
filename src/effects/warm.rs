@@ -21,7 +21,7 @@ const WINDOW_FRAMES: usize = 100;
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase")
+    serde(default, rename_all = "camelCase")
 )]
 pub struct WarmConfig {
     /// Enables the saturation stage. The default is `false`.
@@ -33,13 +33,35 @@ pub struct WarmConfig {
 }
 impl Default for WarmConfig {
     fn default() -> Self {
+        Self::new()
+    }
+}
+impl WarmConfig {
+    /// Returns the default disabled Warm settings.
+    const fn new() -> Self {
         Self {
             enabled: false,
             drive_db: 3.0,
         }
     }
-}
-impl WarmConfig {
+
+    /// Returns enabled Warm settings with default drive.
+    pub const fn enabled() -> Self {
+        Self::new().with_enabled(true)
+    }
+
+    /// Sets `enabled` and returns the configuration.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Sets the drive in decibels, 0..=6, and returns the configuration.
+    pub const fn with_drive_db(mut self, drive_db: f32) -> Self {
+        self.drive_db = drive_db;
+        self
+    }
+
     /// Validates all fields, also when Warm is disabled.
     ///
     /// `drive_db` must be finite and in its documented inclusive range.

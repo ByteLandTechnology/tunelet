@@ -10,19 +10,20 @@
 //!
 //! [`PrepareConfig`] sets the sample rate. It also sets the maximum number of
 //! frames for one process call or one drain call. To make a
-//! [`ProcessorConfig`], start from its default value and change its public
-//! stage fields. Then give it to [`Processor::new`]. All configuration ranges
-//! are inclusive, unless the documentation tells you differently.
-//! Floating-point controls must be finite.
+//! [`ProcessorConfig`], start from its default value and use its `with_*`
+//! builders or stage presets, or edit its public stage fields. Then give it to
+//! [`Processor::new`]. All configuration ranges are inclusive, unless the
+//! documentation tells you differently. Floating-point controls must be
+//! finite.
 //!
 //! Validation also examines disabled stages and the controls of voice modes
 //! that are not active.
 //!
 //! A configuration value is a copy. If you change it, the processor does not
-//! change until [`Processor::set_config`] or a configuration event applies it.
-//! You can change settings between blocks, or at a frame offset with a
-//! [`TimedEvent`]. To change the sample rate or the block limit, you
-//! must make a new processor.
+//! change until [`Processor::set_config`], [`Processor::update_config`] or a
+//! configuration event applies it. You can change settings between blocks, or
+//! at a frame offset with a [`TimedEvent`] and [`ParameterControl`]. To change
+//! the sample rate or the block limit, you must make a new processor.
 //!
 //! # Audio and timed controls
 //!
@@ -127,7 +128,7 @@ pub use effects::punch::PunchConfig;
 pub use effects::reverb::{ReverbConfig, ReverbMode};
 pub use effects::warm::WarmConfig;
 pub use error::{ConfigProblem, Error, EventProblem};
-pub use events::{ControlEvent, TimedEvent};
+pub use events::{ControlEvent, ParameterControl, TimedEvent};
 pub use formant::FormantConfig;
 pub use harmony::{
     ChordDegree, ChordName, HarmonyConfig, HarmonyScale, HarmonySource, Inversion, HARMONY_VOICES,

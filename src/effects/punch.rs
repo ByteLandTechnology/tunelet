@@ -28,7 +28,7 @@ const TWO_OVER_PI: Q14 = Q14::from_bits(10430);
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase")
+    serde(default, rename_all = "camelCase")
 )]
 pub struct PunchConfig {
     /// Enables this input stage. The default is `false`.
@@ -57,6 +57,12 @@ pub struct PunchConfig {
 }
 impl Default for PunchConfig {
     fn default() -> Self {
+        Self::new()
+    }
+}
+impl PunchConfig {
+    /// Returns the default disabled Punch settings.
+    const fn new() -> Self {
         Self {
             enabled: false,
             gain_db: 0.0,
@@ -65,8 +71,45 @@ impl Default for PunchConfig {
             attack_ms: 10.0,
         }
     }
-}
-impl PunchConfig {
+
+    /// Returns enabled Punch settings with default controls.
+    pub const fn enabled() -> Self {
+        Self::new().with_enabled(true)
+    }
+
+    /// Sets `enabled` and returns the configuration.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Sets the input gain in decibels, -96..=12, and returns the
+    /// configuration.
+    pub const fn with_gain_db(mut self, gain_db: f32) -> Self {
+        self.gain_db = gain_db;
+        self
+    }
+
+    /// Sets the transient emphasis, 0..=1, and returns the configuration.
+    pub const fn with_impact(mut self, impact: f32) -> Self {
+        self.impact = impact;
+        self
+    }
+
+    /// Sets the output ceiling in dBFS, -96..=0, and returns the
+    /// configuration.
+    pub const fn with_ceiling_db(mut self, ceiling_db: f32) -> Self {
+        self.ceiling_db = ceiling_db;
+        self
+    }
+
+    /// Sets the attack half-life in milliseconds, 0.01..=5000, and returns the
+    /// configuration.
+    pub const fn with_attack_ms(mut self, attack_ms: f32) -> Self {
+        self.attack_ms = attack_ms;
+        self
+    }
+
     /// Validates all fields, also when Punch is disabled.
     ///
     /// The floating-point controls must be finite and in their documented

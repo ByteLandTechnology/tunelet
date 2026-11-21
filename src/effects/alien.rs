@@ -21,7 +21,7 @@ const FADE_FRAMES: usize = 200;
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase")
+    serde(default, rename_all = "camelCase")
 )]
 pub struct AlienConfig {
     /// Selects reversed playback instead of the direct input. The default is
@@ -36,13 +36,36 @@ pub struct AlienConfig {
 }
 impl Default for AlienConfig {
     fn default() -> Self {
+        Self::new()
+    }
+}
+impl AlienConfig {
+    /// Returns the default disabled Alien settings.
+    const fn new() -> Self {
         Self {
             enabled: false,
             loop_frames: 95_999,
         }
     }
-}
-impl AlienConfig {
+
+    /// Returns enabled Alien settings with the default loop length.
+    pub const fn enabled() -> Self {
+        Self::new().with_enabled(true)
+    }
+
+    /// Sets `enabled` and returns the configuration.
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Sets the loop length in frames, 1..=96000, and returns the
+    /// configuration.
+    pub const fn with_loop_frames(mut self, loop_frames: u32) -> Self {
+        self.loop_frames = loop_frames;
+        self
+    }
+
     /// Validates all fields, also when Alien is disabled.
     ///
     /// `loop_frames` must be in its documented inclusive range. Validation

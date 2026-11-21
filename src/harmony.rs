@@ -9,7 +9,7 @@ mod chords;
 use crate::error::{check_count, check_range};
 use crate::midi::{note_period, velocity_gain, MidiEvent};
 use crate::numeric::fixed::{Q12, Q14, Q6};
-use crate::scale::PitchClass;
+use crate::scale::{NoteMask, PitchClass};
 use crate::{Error, SampleRate};
 use chords::SCALE_TONES;
 
@@ -109,6 +109,25 @@ pub enum HarmonyScale {
     /// This table keeps the natural sixth of the ascending melodic minor
     /// scale.
     MinorMajorSeventh,
+}
+
+impl HarmonyScale {
+    /// Returns the pitch-class mask of this scale with `key` as the tonic.
+    ///
+    /// The active pitch classes come from the semitone offsets of this scale.
+    /// [`Self::MajorWithoutSeventh`] enables six pitch classes, and the other
+    /// scales enable seven.
+    pub const fn note_mask(self, key: PitchClass) -> NoteMask {
+        let mut notes = [false; 12];
+        let root = key.semitone() as usize;
+        let tones = &SCALE_TONES[self as usize];
+        let mut index = 0;
+        while index < tones.len() {
+            notes[(root + tones[index] as usize) % 12] = true;
+            index += 1;
+        }
+        NoteMask(notes)
+    }
 }
 
 /// A named chord for [`HarmonySource::ChordByName`].
@@ -258,7 +277,7 @@ pub enum Inversion {
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase")
+    serde(default, rename_all = "camelCase")
 )]
 pub struct HarmonyConfig {
     /// The pitch source. The default is [`HarmonySource::MidiChannels`].
@@ -322,22 +341,19 @@ pub struct HarmonyConfig {
     /// other voices release with the usual gain envelope. The chord and MIDI
     /// sources ignore this field. In JavaScript, the field is optional and
     /// a missing value gives the default.
-    #[cfg_attr(
-        all(feature = "wasm", target_arch = "wasm32"),
-        serde(default = "default_voices"),
-        tsify(optional)
-    )]
     pub voices: u8,
-}
-
-/// The default count of interval voices: all of them.
-#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-fn default_voices() -> u8 {
-    HARMONY_VOICES as u8
 }
 
 impl Default for HarmonyConfig {
     fn default() -> Self {
+        Self::midi_channels()
+    }
+}
+
+impl HarmonyConfig {
+    /// Returns harmony settings for [`HarmonySource::MidiChannels`], which is
+    /// the default.
+    pub const fn midi_channels() -> Self {
         Self {
             source: HarmonySource::MidiChannels,
             key: PitchClass::C,
@@ -353,9 +369,145 @@ impl Default for HarmonyConfig {
             voices: HARMONY_VOICES as u8,
         }
     }
-}
 
-impl HarmonyConfig {
+    /// Returns harmony settings for [`HarmonySource::MidiOmni`].
+    pub const fn midi_omni() -> Self {
+        Self::midi_channels().with_source(HarmonySource::MidiOmni)
+    }
+
+    /// Returns harmony settings for [`HarmonySource::ChordViaMidi`].
+    pub const fn chord_via_midi() -> Self {
+        Self::midi_channels().with_source(HarmonySource::ChordViaMidi)
+    }
+
+    /// Returns harmony settings for [`HarmonySource::FixedInterval`] with four
+    /// semitone offsets, each in -24..=24.
+    pub const fn fixed_intervals(chromatic_intervals: [i8; HARMONY_VOICES]) -> Self {
+        Self::midi_channels()
+            .with_source(HarmonySource::FixedInterval)
+            .with_chromatic_intervals(chromatic_intervals)
+    }
+
+    /// Returns harmony settings for [`HarmonySource::SmartInterval`] in `key`
+    /// and `scale` with four scale-step offsets, each in -14..=14.
+    pub const fn smart_intervals(
+        key: PitchClass,
+        scale: HarmonyScale,
+        diatonic_intervals: [i8; HARMONY_VOICES],
+    ) -> Self {
+        Self::midi_channels()
+            .with_source(HarmonySource::SmartInterval)
+            .with_key(key)
+            .with_scale(scale)
+            .with_diatonic_intervals(diatonic_intervals)
+    }
+
+    /// Returns harmony settings for [`HarmonySource::ChordByDegree`] on
+    /// `degree` in `key` and `scale`.
+    pub const fn chord_by_degree(
+        key: PitchClass,
+        scale: HarmonyScale,
+        degree: ChordDegree,
+    ) -> Self {
+        Self::midi_channels()
+            .with_source(HarmonySource::ChordByDegree)
+            .with_key(key)
+            .with_scale(scale)
+            .with_degree(degree)
+    }
+
+    /// Returns harmony settings for [`HarmonySource::ChordByName`] with root
+    /// `key` and chord `chord`.
+    pub const fn chord_by_name(key: PitchClass, chord: ChordName) -> Self {
+        Self::midi_channels()
+            .with_source(HarmonySource::ChordByName)
+            .with_key(key)
+            .with_chord(chord)
+    }
+
+    /// Sets the harmony pitch `source` and returns the configuration.
+    pub const fn with_source(mut self, source: HarmonySource) -> Self {
+        self.source = source;
+        self
+    }
+
+    /// Sets the tonic `key` and returns the configuration.
+    pub const fn with_key(mut self, key: PitchClass) -> Self {
+        self.key = key;
+        self
+    }
+
+    /// Sets the harmony `scale` and returns the configuration.
+    pub const fn with_scale(mut self, scale: HarmonyScale) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    /// Sets the four chromatic semitone offsets, each in -24..=24, and returns
+    /// the configuration.
+    pub const fn with_chromatic_intervals(
+        mut self,
+        chromatic_intervals: [i8; HARMONY_VOICES],
+    ) -> Self {
+        self.chromatic_intervals = chromatic_intervals;
+        self
+    }
+
+    /// Sets the four diatonic scale-step offsets, each in -14..=14, and
+    /// returns the configuration.
+    pub const fn with_diatonic_intervals(
+        mut self,
+        diatonic_intervals: [i8; HARMONY_VOICES],
+    ) -> Self {
+        self.diatonic_intervals = diatonic_intervals;
+        self
+    }
+
+    /// Sets the named `chord` and returns the configuration.
+    pub const fn with_chord(mut self, chord: ChordName) -> Self {
+        self.chord = chord;
+        self
+    }
+
+    /// Sets the scale `degree` chord and returns the configuration.
+    pub const fn with_degree(mut self, degree: ChordDegree) -> Self {
+        self.degree = degree;
+        self
+    }
+
+    /// Sets the chord `inversion` and returns the configuration.
+    pub const fn with_inversion(mut self, inversion: Inversion) -> Self {
+        self.inversion = inversion;
+        self
+    }
+
+    /// Sets the chord register percentage, 0..=100, and returns the
+    /// configuration.
+    pub const fn with_register_percent(mut self, register_percent: f32) -> Self {
+        self.register_percent = register_percent;
+        self
+    }
+
+    /// Sets the voicing spread percentage, 0..=100, and returns the
+    /// configuration.
+    pub const fn with_voicing_spread_percent(mut self, voicing_spread_percent: f32) -> Self {
+        self.voicing_spread_percent = voicing_spread_percent;
+        self
+    }
+
+    /// Sets the portamento half-life in milliseconds, 0..=10000, and returns
+    /// the configuration.
+    pub const fn with_portamento_ms(mut self, portamento_ms: f32) -> Self {
+        self.portamento_ms = portamento_ms;
+        self
+    }
+
+    /// Sets the interval voice count, 0..=4, and returns the configuration.
+    pub const fn with_voices(mut self, voices: u8) -> Self {
+        self.voices = voices;
+        self
+    }
+
     /// Validates all fields, which includes the fields that the selected
     /// source does not use.
     ///

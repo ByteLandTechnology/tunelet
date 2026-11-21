@@ -97,8 +97,8 @@ If you use the scoped package, import from `@bytelandtechnology/tunelet`.
 
 ```rust
 use tunelet::{
-    CorrectionScale, NoteMask, PitchClass, PrepareConfig, Processor, ProcessorConfig,
-    SampleRate,
+    CorrectionConfig, CorrectionScale, PitchClass, PrepareConfig, Processor, ProcessorConfig,
+    ResynthesisConfig, SampleRate,
 };
 
 fn main() -> Result<(), tunelet::Error> {
@@ -106,11 +106,11 @@ fn main() -> Result<(), tunelet::Error> {
     let rate = SampleRate::try_from(48_000)?;
     let preparation = PrepareConfig::new(rate, 1024)?;
 
-    // 2. Start from the default configuration and change fields.
-    let mut config = ProcessorConfig::default();
-    config.resynthesis.correction.notes =
-        NoteMask::from_key_scale(PitchClass::A, CorrectionScale::Minor);
-    config.resynthesis.correction.retune_ms = 20.0;
+    // 2. Build a configuration from presets and builders.
+    let correction =
+        CorrectionConfig::from_key_scale(PitchClass::A, CorrectionScale::Minor).with_retune_ms(20.0);
+    let config = ProcessorConfig::default()
+        .with_resynthesis(ResynthesisConfig::default().with_correction(correction));
 
     // 3. Construct the processor. Only this step allocates memory.
     let mut processor = Processor::new(preparation, config)?;
@@ -136,12 +136,12 @@ fn main() -> Result<(), tunelet::Error> {
 ### TypeScript
 
 ```ts
-import { loadTunelet, Tunelet, defaultConfig } from "tunelet";
+import { loadTunelet, Tunelet } from "tunelet";
 
 await loadTunelet();
-const config = defaultConfig();
-config.resynthesis.pitchRatio = 1.25;
-const processor = new Tunelet(48000, 1024, config);
+const processor = new Tunelet(48000, 1024, {
+  resynthesis: { pitchRatio: 1.25 },
+});
 
 const input = new Int16Array(1024);
 const left = new Int16Array(1024);
@@ -203,9 +203,10 @@ To prepare a processor, do these steps:
    limit.
 3. Create a `Processor` with that preparation and a `ProcessorConfig`.
 
-Configuration structures implement `Default`. To select voices and effects,
-edit their fields. To change the sample rate or the block limit, make a new
-processor.
+Configuration structures implement `Default`, `with_*` builders and stage
+presets. To change active settings between blocks, call
+`Processor::update_config` or `Processor::set_config`. To change the sample
+rate or the block limit, make a new processor.
 
 Select the process function for your output layout:
 
@@ -237,8 +238,9 @@ These rules apply to the offsets:
 - An offset must not be less than the offset before it.
 
 Events with equal offsets execute in slice order. An empty block accepts no
-events. A stage event replaces all settings of that stage. To change one
-field, start from `processor.config()`.
+events. A stage or sub-stage event replaces all settings of that section.
+`ControlEvent::Parameter` changes one parameter and keeps all other active
+settings.
 
 Harmony MIDI uses `ControlEvent::Midi`. MIDI for the correction keyboard uses
 `ControlEvent::CorrectionMidi`. For example, this event starts a harmony note
@@ -406,19 +408,20 @@ page that opens the JavaScript.
 
 ### TypeScript API
 
-| Operation                         | TypeScript API                                           |
-| --------------------------------- | -------------------------------------------------------- |
-| Shared initialization             | `loadTunelet(source?)`                                   |
-| Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
-| In-place mono downmix             | `processMono(audio, events?)`                            |
-| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
-| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
-| Feedback                          | `feedback()`, `takeFeedback()`                           |
-| Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
-| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`         |
-| Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)` |
-| Configured tail budget            | `tailFrames()`                                           |
-| Reset or release memory           | `reset()`, `free()`                                      |
+| Operation                         | TypeScript API                                                   |
+| --------------------------------- | ---------------------------------------------------------------- |
+| Shared initialization             | `loadTunelet(source?)`                                           |
+| Mono PCM to planar stereo         | `process(input, left, right, events?)`                           |
+| In-place mono downmix             | `processMono(audio, events?)`                                    |
+| Configuration                     | `config()`, `setConfig(config)`, `updateConfig(config)`, `defaultConfig()` |
+| Scale masks and MIDI decode       | `noteMaskFromKeyScale(key, scale)`, `parseMidiBytes(bytes)`      |
+| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`                  |
+| Feedback                          | `feedback()`, `takeFeedback()`                                   |
+| Telemetry                         | `telemetry()`, `takeTelemetry()`                                 |
+| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`                 |
+| Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)`         |
+| Configured tail budget            | `tailFrames()`                                                   |
+| Reset or release memory           | `reset()`, `free()`                                              |
 
 ### Audio buffers
 
@@ -436,34 +439,37 @@ audio device.
 
 ### Configuration objects
 
-Configuration objects contain all required fields. They use camelCase names
-and show enums as string literals. To change the configuration, do these steps:
+Configuration objects use camelCase names and show enums as string literals.
+`new Tunelet` and `updateConfig` accept `DeepPartial<ProcessorConfig>`:
 
-1. Start from `defaultConfig()` or `config()`.
-2. Edit the necessary fields.
-3. Call `setConfig()`.
+- In `new Tunelet` and `setConfig`, omitted fields use their defaults.
+- In `updateConfig`, omitted fields keep their active values.
+- `defaultConfig()` and `config()` return complete configuration snapshots.
 
-If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+`noteMaskFromKeyScale(key, scale)` builds a 12-boolean `NoteMask` for any
+`CorrectionScale` or `HarmonyScale` mode. If a field value is not valid, the
+call throws a JavaScript `Error` before state changes. The conversion ignores
+extra object properties. The generated declarations contain the parameter
+documentation from the Rust types.
 
-`resynthesis.randomSeed` and the `processedFrames` field of feedback and
-telemetry use `bigint`. Frame offsets, block lengths and latency use
-`number`.
+All numeric fields, `resynthesis.randomSeed` and `processedFrames` in feedback
+and telemetry use `number`. Thus, `defaultConfig()`, `config()`, `feedback()`
+and `telemetry()` work directly with `JSON.stringify`.
 
 ### Events
 
 The optional event argument is a `TimedEvent[]`. Controls use a `type`
-discriminant and a `value` payload. The reset control has no payload. For
-example, this event changes the final gain before the first frame:
+discriminant and a `value` payload. The reset control has no payload. Stage and
+sub-stage events replace that section, and `parameter` events update one field
+without a `config()` copy:
 
 ```ts
-{ offset: 0, event: { type: "outputGain", value: 0.5 } }
+{ offset: 0, event: { type: "parameter", value: { type: "pitchRatio", value: 1.25 } } }
 ```
 
-A harmony Note On event has this form:
+`parseMidiBytes(bytes)` decodes a 3-byte `Uint8Array` into a `MidiEvent` or
+`undefined` for unsupported valid messages, and throws an `Error` for invalid
+bytes. A harmony Note On event has this form:
 
 ```ts
 { offset: 0, event: { type: "midi", value: { type: "noteOn", channel: 0, note: 60, velocity: 100 } } }
