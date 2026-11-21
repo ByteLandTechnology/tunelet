@@ -101,19 +101,19 @@ cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
 ```
 
-If you change the Wasm, TypeScript or package files, also run these
-commands. `npm run check:wasm` runs Clippy and rustdoc for
-`wasm32-unknown-unknown`. `npm run build` compiles `src/wasm.rs` and
-`src/index.ts`. `npm run verify:pack` checks the npm archive,
-`loadTunelet` and the TypeScript declarations:
+If you change the Wasm or TypeScript code, also run these commands.
+`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
+`npm run build` compiles `src/wasm.rs` and `src/index.ts`.
+`npm run verify:pack` runs `npm run build` and checks the archives:
 
 ```sh
 npm ci
-npm run check:wasm
-npm run build
+RUSTDOCFLAGS="-D warnings" npm run check:wasm
 npm run verify:pack
 ```
 
+- `.github/workflows/ci.yml` runs these checks on each pull request and each
+  push to `main`.
 - Make sure that there are no new warnings. This includes broken
   rustdoc links.
 - The crate has no tests (`test = false`). Do not add tests or test
