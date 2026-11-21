@@ -50,8 +50,9 @@ browsers and Node.js.
 - **No dependencies**: The default Rust build has no dependencies and uses
   only safe Rust.
 
-The input is mono signed 16-bit PCM at 44.1 kHz or 48 kHz. The output is
-stereo or mono 16-bit PCM.
+The input is mono signed 16-bit PCM or normalized `f32` audio at 44.1, 48,
+88.2, 96, 176.4 or 192 kHz. The output is stereo or mono 16-bit PCM or `f32`
+audio.
 
 ## Installation
 
@@ -133,7 +134,16 @@ fn main() -> Result<(), tunelet::Error> {
 }
 ```
 
-### TypeScript
+### Web Audio
+
+```ts
+import { createTuneletNode } from "tunelet";
+
+const node = await createTuneletNode(audioContext);
+microphone.connect(node).connect(audioContext.destination);
+```
+
+### TypeScript (`Tunelet`)
 
 ```ts
 import { loadTunelet, Tunelet, defaultConfig } from "tunelet";
@@ -141,13 +151,13 @@ import { loadTunelet, Tunelet, defaultConfig } from "tunelet";
 await loadTunelet();
 const config = defaultConfig();
 config.resynthesis.pitchRatio = 1.25;
-const processor = new Tunelet(48000, 1024, config);
+const processor = new Tunelet(48000, 128, config);
 
-const input = new Int16Array(1024);
-const left = new Int16Array(1024);
-const right = new Int16Array(1024);
-// Fill input with mono PCM before each call; reuse all three arrays.
-processor.process(input, left, right);
+const input = new Float32Array(128);
+const left = new Float32Array(128);
+const right = new Float32Array(128);
+// Fill input with mono audio before each call; reuse all three arrays.
+processor.processFloat32(input, left, right);
 
 // After all processing and optional drain calls:
 processor.free();
@@ -209,11 +219,14 @@ processor.
 
 Select the process function for your output layout:
 
-| Output layout                  | Function for input      | Function for the tail |
-| ------------------------------ | ----------------------- | --------------------- |
-| `[[i16; 2]]` stereo frames     | `process`               | `drain`               |
-| Separate left and right slices | `process_planar`        | `drain_planar`        |
-| Mono slice                     | `process_mono_in_place` | `drain_mono`          |
+| Output layout                        | Function for input          | Function for the tail |
+| ------------------------------------ | --------------------------- | --------------------- |
+| `[[i16; 2]]` stereo frames           | `process`                   | `drain`               |
+| `[[f32; 2]]` stereo frames           | `process_f32`               | `drain_f32`           |
+| Separate `i16` left and right slices | `process_planar`            | `drain_planar`        |
+| Separate `f32` left and right slices | `process_planar_f32`        | `drain_planar_f32`    |
+| Mono `i16` slice                     | `process_mono_in_place`     | `drain_mono`          |
+| Mono `f32` slice                     | `process_mono_in_place_f32` | `drain_mono_f32`      |
 
 These rules apply to each call:
 
@@ -292,7 +305,7 @@ These calls read the state of the processor. They do not change the audio.
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
-| `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
+| `latency_frames()`   | Nominal latency in host frames (1,593 at 1x, 3,190 at 2x, 6,384 at 4x) |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
 
 The telemetry includes these items:
@@ -357,7 +370,8 @@ these items:
 
 - One Wasm binary.
 - The generated bindings.
-- A shared `loadTunelet` entry point.
+- A shared `loadTunelet` entry point and `createTuneletNode` helper.
+- A built-in `tunelet/worklet` runtime with an internal UTF-8 shim.
 
 ### Load the module
 
@@ -406,33 +420,39 @@ page that opens the JavaScript.
 
 ### TypeScript API
 
-| Operation                         | TypeScript API                                           |
-| --------------------------------- | -------------------------------------------------------- |
-| Shared initialization             | `loadTunelet(source?)`                                   |
-| Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
-| In-place mono downmix             | `processMono(audio, events?)`                            |
-| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
-| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
-| Feedback                          | `feedback()`, `takeFeedback()`                           |
-| Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
-| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`         |
-| Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)` |
-| Configured tail budget            | `tailFrames()`                                           |
-| Reset or release memory           | `reset()`, `free()`                                      |
+| Operation                         | TypeScript API                                                       |
+| --------------------------------- | -------------------------------------------------------------------- |
+| Web Audio worklet node            | `createTuneletNode(context, options?)`, `TuneletWorkletNode`         |
+| Shared initialization             | `loadTunelet(source?)`                                               |
+| Mono PCM to planar stereo         | `process(input, left, right, events?)`                               |
+| Mono Float32 to planar stereo     | `processFloat32(input, left, right, events?)`                        |
+| In-place mono downmix             | `processMono(audio, events?)`, `processMonoFloat32(audio, events?)`  |
+| Immediate 3-byte MIDI             | `applyMidi(bytes)`, `applyCorrectionMidi(bytes)`                     |
+| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`                   |
+| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`                      |
+| Feedback                          | `feedback()`, `takeFeedback()`, `feedbackInto(out)`, `takeFeedbackInto(out)` |
+| Telemetry                         | `telemetry()`, `takeTelemetry()`, `telemetryInto(out)`, `takeTelemetryInto(out)` |
+| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`                     |
+| Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainFloat32(left, right)`, `drainMono(audio)`, `drainMonoFloat32(audio)` |
+| Configured tail budget            | `tailFrames()`                                                       |
+| Reset or release memory           | `reset()`, `free()`                                                  |
 
-### Audio buffers
+### Audio buffers and Web Audio
 
-All audio buffers are `Int16Array` buffers, and they must fit in the prepared
-frame limit. These rules apply:
+Audio buffers use `Float32Array` (`-1.0..=1.0`) or `Int16Array`, and they must
+fit in the prepared frame limit. Supported sample rates are 44.1, 48, 88.2,
+96, 176.4 and 192 kHz. These rules apply:
 
 - Stereo output arrays must not overlap.
 - The input can overlap an output, because the binding copies the input
   first.
 - Buffers must stay attached during each call.
 
-Web Audio uses Float32 samples, which you must convert to and from 16-bit
-PCM. This package does not install an AudioWorklet or an integration with an
-audio device.
+In browsers, call `await createTuneletNode(audioContext)` to compile Wasm,
+register `tunelet/worklet` and construct a stereo `TuneletWorkletNode`. The
+worklet module installs an internal UTF-8 shim before the generated bindings
+evaluate, so `AudioWorkletGlobalScope` needs no `TextDecoder`, `TextEncoder` or
+`fetch` polyfill.
 
 ### Configuration objects
 
@@ -469,13 +489,20 @@ A harmony Note On event has this form:
 { offset: 0, event: { type: "midi", value: { type: "noteOn", channel: 0, note: 60, velocity: 100 } } }
 ```
 
-Use `correctionMidi` for the separate correction keyboard. The native rules
-for event order and for the validation of the whole block also apply to these
-bindings.
+Use `correctionMidi` for the separate correction keyboard. For zero-allocation
+block MIDI, give a `Uint32Array` of `[offset, status, data1, data2]` tuples as
+`events`. For immediate 3-byte MIDI, call `applyMidi(bytes)` or
+`applyCorrectionMidi(bytes)` with a `Uint8Array`. In `Uint32Array` events,
+combine `status` with `CORRECTION_MIDI_FLAG` (`0x100`) to select the correction
+keyboard. The native rules for event order and for the validation of the whole
+block also apply to these bindings.
 
 ### Feedback, telemetry and formant envelopes
 
-`telemetry()` and `takeTelemetry()` return a `Telemetry` object.
+`telemetry()` and `takeTelemetry()` return a `Telemetry` object. For
+zero-allocation meter updates, `feedbackInto(out)` and `takeFeedbackInto(out)`
+write 8 values into a `Float64Array`, and `telemetryInto(out)` and
+`takeTelemetryInto(out)` write 45 values into a `Float64Array`.
 
 In feedback, `targetMidiNote` is `undefined` in these cases, which are also
 the cases where `voiced` is `false`:
@@ -495,16 +522,17 @@ call with more points than before reserve memory.
 
 ### Memory allocation
 
-The constructor allocates reusable PCM buffers. A successful call that
-processes audio without events does not allocate new Rust PCM storage.
-However, the call copies the audio across the boundary between JavaScript and
-Wasm. These items can allocate:
+The constructor allocates reusable 16-bit PCM, `f32` and MIDI buffers. Calls
+to `processFloat32`, `process`, `applyMidi`, `feedbackInto` and
+`telemetryInto` with typed arrays do not allocate Wasm memory. `applyMidi`,
+`feedbackInto` and `telemetryInto` also allocate no JavaScript objects.
+These items can allocate:
 
-- Object conversion.
-- Supplied events.
+- Configuration conversion.
+- `TimedEvent[]` object arrays.
 - Errors.
-- Feedback and telemetry.
-- The formant envelopes.
+- `feedback`, `takeFeedback`, `telemetry` and `takeTelemetry` objects.
+- The formant envelopes on the first or larger call.
 
 The generated glue can also make temporary views. This binding is for general
 use, and it does not guarantee hard real-time behavior for allocation or

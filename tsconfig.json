@@ -11,5 +11,5 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "include": ["src/index.ts"]
+  "include": ["src/index.ts", "src/worklet.ts", "src/utf8-shim.ts"]
 }
