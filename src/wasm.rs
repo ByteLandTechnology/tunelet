@@ -41,6 +41,7 @@
 //! allocation. If you do not need a processor any more, call the generated
 //! `free()` method.
 
+use crate::processor::EnvelopeKey;
 use crate::{
     Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
 };
@@ -113,6 +114,9 @@ pub struct WasmProcessor {
     /// when a call needs more points, and they do not become shorter.
     envelope_input: Vec<f32>,
     envelope_output: Vec<f32>,
+    /// The key and the result of the last formant envelope that the buffers
+    /// hold.
+    envelope_cache: Option<(EnvelopeKey, bool)>,
 }
 
 #[wasm_bindgen(js_class = Tunelet)]
@@ -172,6 +176,7 @@ impl WasmProcessor {
             right: pcm_buffer(max_block_frames)?,
             envelope_input: Vec::new(),
             envelope_output: Vec::new(),
+            envelope_cache: None,
         })
     }
 
@@ -454,14 +459,25 @@ impl WasmProcessor {
     ) -> Result<bool, JsError> {
         let points = input.length() as usize;
         // Check before the buffers become longer for a call that cannot succeed.
-        Error::check_length(points, output.length() as usize)?;
+        let key =
+            self.processor
+                .envelope_key(max_frequency_hz, points, output.length() as usize)?;
+        if let Some((cached, valid)) = self.envelope_cache {
+            if cached == key {
+                input.copy_from(&self.envelope_input[..points]);
+                output.copy_from(&self.envelope_output[..points]);
+                return Ok(valid);
+            }
+        }
         let analysis = envelope_buffer(&mut self.envelope_input, points)?;
         let synthesis = envelope_buffer(&mut self.envelope_output, points)?;
+        self.envelope_cache = None;
         let valid = self
             .processor
             .formant_envelope(max_frequency_hz, analysis, synthesis)?;
-        input.copy_from(analysis);
-        output.copy_from(synthesis);
+        self.envelope_cache = Some((key, valid));
+        input.copy_from(&self.envelope_input[..points]);
+        output.copy_from(&self.envelope_output[..points]);
         Ok(valid)
     }
 
