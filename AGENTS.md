@@ -138,9 +138,10 @@ npm run build
 - Release tools: `.github/workflows/release.yml` uses a 40-character
   commit SHA and a version comment for each GitHub Action. The publish
   jobs use fixed versions of Rust (`1.99.1`), `wasm-pack` (`0.15.1`),
-  Node.js (`24.22.2`) and `npm` (`12.2.3`). Keep the Rust version in
-  `rust-toolchain.toml` and `.github/workflows/release.yml` equal.
-  `.github/dependabot.yml` updates the action commits each week.
+  Binaryen `wasm-opt` (`version_133`), Node.js (`24.22.2`) and `npm`
+  (`12.2.3`). Keep the Rust version in `rust-toolchain.toml` and
+  `.github/workflows/release.yml` equal. `.github/dependabot.yml`
+  updates the action commits each week.
 
 ## Prohibited changes
 

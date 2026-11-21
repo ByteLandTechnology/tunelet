@@ -56,6 +56,12 @@ jobs:
         with:
           tool: wasm-pack@0.15.1
           checksum: true
+      # Install Binaryen wasm-opt 133 and verify its SHA-256 checksum.
+      - run: |
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz
+          echo "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  $RUNNER_TEMP/binaryen.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24.22.2"
@@ -88,6 +94,12 @@ jobs:
         with:
           tool: wasm-pack@0.15.1
           checksum: true
+      # Install Binaryen wasm-opt 133 and verify its SHA-256 checksum.
+      - run: |
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz
+          echo "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  $RUNNER_TEMP/binaryen.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24.22.2"
