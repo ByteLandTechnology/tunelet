@@ -126,7 +126,7 @@ pub use effects::alien::AlienConfig;
 pub use effects::punch::PunchConfig;
 pub use effects::reverb::{ReverbConfig, ReverbMode};
 pub use effects::warm::WarmConfig;
-pub use error::{ConfigProblem, Error, EventProblem};
+pub use error::{ConfigProblem, Error, EventProblem, MidiProblem};
 pub use events::{ControlEvent, TimedEvent};
 pub use formant::FormantConfig;
 pub use harmony::{

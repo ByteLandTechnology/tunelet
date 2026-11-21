@@ -1,7 +1,7 @@
 //! MIDI note messages, pitch periods and the conversion of velocity to gain.
 
 use crate::numeric::fixed::{Q12, Q6};
-use crate::Error;
+use crate::{Error, MidiProblem};
 
 /// The supported MIDI note controls, with zero-based channel numbers.
 ///
@@ -66,8 +66,14 @@ impl MidiEvent {
     /// Returns [`Error::InvalidMidi`] if the status is below `0x80` or a data
     /// byte is more than 127. This also applies to an unsupported message.
     pub fn from_bytes(bytes: [u8; 3]) -> Result<Option<Self>, Error> {
-        if bytes[0] < 0x80 || bytes[1] > 127 || bytes[2] > 127 {
-            return Err(Error::InvalidMidi);
+        if bytes[0] < 0x80 {
+            return Err(Error::midi(MidiProblem::StatusByte { byte: bytes[0] }));
+        }
+        if bytes[1] > 127 {
+            return Err(Error::midi(MidiProblem::DataByte { byte: bytes[1] }));
+        }
+        if bytes[2] > 127 {
+            return Err(Error::midi(MidiProblem::DataByte { byte: bytes[2] }));
         }
         let channel = bytes[0] & 15;
         Ok(match bytes[0] & 0xf0 {
@@ -89,20 +95,37 @@ impl MidiEvent {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidMidi`] if a channel is more than 15, or if a
-    /// note or a velocity is more than 127. Zero velocity and All Notes Off
-    /// are valid.
+    /// Returns [`Error::InvalidMidi`] with the [`MidiProblem`] if a channel is
+    /// more than 15, or if a note or a velocity is more than 127. Zero
+    /// velocity and All Notes Off are valid.
     pub fn validate(&self) -> Result<(), Error> {
         match *self {
             Self::NoteOn {
                 channel,
                 note,
                 velocity,
-            } if channel > 15 || note > 127 || velocity > 127 => Err(Error::InvalidMidi),
-            Self::NoteOff { channel, note } if channel > 15 || note > 127 => {
-                Err(Error::InvalidMidi)
+            } => {
+                if channel > 15 {
+                    return Err(Error::midi(MidiProblem::Channel { channel }));
+                }
+                if note > 127 {
+                    return Err(Error::midi(MidiProblem::Note { note }));
+                }
+                if velocity > 127 {
+                    return Err(Error::midi(MidiProblem::Velocity { velocity }));
+                }
+                Ok(())
             }
-            _ => Ok(()),
+            Self::NoteOff { channel, note } => {
+                if channel > 15 {
+                    return Err(Error::midi(MidiProblem::Channel { channel }));
+                }
+                if note > 127 {
+                    return Err(Error::midi(MidiProblem::Note { note }));
+                }
+                Ok(())
+            }
+            Self::AllNotesOff => Ok(()),
         }
     }
 }

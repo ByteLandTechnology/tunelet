@@ -6,7 +6,7 @@
 
 mod chords;
 
-use crate::error::{check_count, check_range};
+use crate::error::{check_count, check_indexed_count, check_range};
 use crate::midi::{note_period, velocity_gain, MidiEvent};
 use crate::numeric::fixed::{Q12, Q14, Q6};
 use crate::scale::PitchClass;
@@ -367,16 +367,16 @@ impl HarmonyConfig {
     /// # Errors
     ///
     /// Returns the first [`Error::InvalidConfig`] with its dotted field path
-    /// and the problem. For an array control, the error identifies the array
-    /// field, not the index of an element.
+    /// and the problem. For an interval array control, `index` gives the
+    /// zero-based voice index `0..=3`.
     pub fn validate(self) -> Result<(), Error> {
-        for interval in self.chromatic_intervals {
+        for (index, interval) in self.chromatic_intervals.into_iter().enumerate() {
             let field = "resynthesis.harmony.chromatic_intervals";
-            check_count(field, i64::from(interval), -24, 24)?;
+            check_indexed_count(field, index, i64::from(interval), -24, 24)?;
         }
-        for interval in self.diatonic_intervals {
+        for (index, interval) in self.diatonic_intervals.into_iter().enumerate() {
             let field = "resynthesis.harmony.diatonic_intervals";
-            check_count(field, i64::from(interval), -14, 14)?;
+            check_indexed_count(field, index, i64::from(interval), -14, 14)?;
         }
         let field = "resynthesis.harmony.voices";
         check_count(field, i64::from(self.voices), 0, HARMONY_VOICES as i64)?;

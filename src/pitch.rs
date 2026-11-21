@@ -87,7 +87,14 @@ impl PitchConfig {
         check_range(min, self.min_frequency_hz, 40.0, 2000.0)?;
         check_range(max, self.max_frequency_hz, 40.0, 2000.0)?;
         if self.min_frequency_hz >= self.max_frequency_hz {
-            return Err(Error::config(min, ConfigProblem::Unordered { other: max }));
+            return Err(Error::config(
+                min,
+                ConfigProblem::Unordered {
+                    value: self.min_frequency_hz,
+                    other: max,
+                    other_value: self.max_frequency_hz,
+                },
+            ));
         }
         Ok(())
     }

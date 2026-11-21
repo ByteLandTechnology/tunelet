@@ -143,23 +143,31 @@ impl<'a> ValidatedEvents<'a> {
     pub(crate) fn new(events: &'a [TimedEvent], frames: usize) -> Result<Self, Error> {
         let mut previous = 0;
         for (index, event) in events.iter().enumerate() {
-            let problem = if event.offset >= frames {
-                Some(EventProblem::OffsetOutsideBlock)
-            } else if event.offset < previous {
-                Some(EventProblem::OffsetDecreasing)
+            let offset = event.offset;
+            let problem = if offset >= frames {
+                Some(EventProblem::OffsetOutsideBlock { offset, frames })
+            } else if offset < previous {
+                Some(EventProblem::OffsetDecreasing { offset, previous })
             } else {
                 match event.event.validate() {
                     Ok(()) => None,
-                    Err(Error::InvalidConfig { field, problem }) => {
-                        Some(EventProblem::Config { field, problem })
-                    }
-                    Err(_) => Some(EventProblem::Midi),
+                    Err(Error::InvalidConfig {
+                        field,
+                        index,
+                        problem,
+                    }) => Some(EventProblem::Config {
+                        field,
+                        index,
+                        problem,
+                    }),
+                    Err(Error::InvalidMidi { problem }) => Some(EventProblem::Midi { problem }),
+                    Err(_) => None,
                 }
             };
             if let Some(problem) = problem {
                 return Err(Error::InvalidEvent { index, problem });
             }
-            previous = event.offset;
+            previous = offset;
         }
         Ok(Self { remaining: events })
     }

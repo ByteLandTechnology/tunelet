@@ -252,8 +252,8 @@ impl WasmProcessor {
         events: Option<Ts<BlockEvents>>,
     ) -> Result<(), JsError> {
         let frames = input.length() as usize;
-        Error::check_length(frames, left.length() as usize)?;
-        Error::check_length(frames, right.length() as usize)?;
+        Error::check_length("left", frames, left.length() as usize)?;
+        Error::check_length("right", frames, right.length() as usize)?;
         self.check_frames(frames)?;
         let events = decode_events(events)?;
         input.copy_to(&mut self.input[..frames]);
@@ -326,7 +326,7 @@ impl WasmProcessor {
     /// drain state do not change.
     pub fn drain(&mut self, left: &Int16Array, right: &Int16Array) -> Result<usize, JsError> {
         let frames = left.length() as usize;
-        Error::check_length(frames, right.length() as usize)?;
+        Error::check_length("right", frames, right.length() as usize)?;
         self.check_frames(frames)?;
         let count = self
             .processor
@@ -454,7 +454,7 @@ impl WasmProcessor {
     ) -> Result<bool, JsError> {
         let points = input.length() as usize;
         // Check before the buffers become longer for a call that cannot succeed.
-        Error::check_length(points, output.length() as usize)?;
+        Error::check_length("output", points, output.length() as usize)?;
         let analysis = envelope_buffer(&mut self.envelope_input, points)?;
         let synthesis = envelope_buffer(&mut self.envelope_output, points)?;
         let valid = self

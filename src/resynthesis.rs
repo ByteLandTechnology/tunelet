@@ -286,8 +286,8 @@ impl ResynthesisConfig {
     /// # Errors
     ///
     /// Returns the first [`Error::InvalidConfig`], with the dotted path of the
-    /// field and the problem. For an array control in `harmony`, the error
-    /// identifies the array field, not the index of an element.
+    /// field and the problem. For an interval array control in `harmony`,
+    /// `index` gives the zero-based voice index `0..=3`.
     pub fn validate(self) -> Result<(), Error> {
         self.pitch.validate()?;
         self.correction.validate()?;

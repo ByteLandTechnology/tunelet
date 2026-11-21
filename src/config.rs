@@ -106,9 +106,10 @@ impl PrepareConfig {
         let max_block_frames = NonZeroUsize::new(max_block_frames).ok_or_else(|| {
             Error::config(
                 "prepare.max_block_frames",
-                ConfigProblem::OutOfRange {
-                    min: 1.0,
-                    max: usize::MAX as f64,
+                ConfigProblem::SizeOutOfRange {
+                    value: max_block_frames,
+                    min: 1,
+                    max: usize::MAX,
                 },
             )
         })?;

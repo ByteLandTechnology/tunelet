@@ -149,7 +149,7 @@ impl Processor {
         output: &mut [[i16; 2]],
         events: &[TimedEvent],
     ) -> Result<(), Error> {
-        Error::check_length(input.len(), output.len())?;
+        Error::check_length("output", input.len(), output.len())?;
         self.process_into(input, events, |index, frame| output[index] = frame)
     }
 
@@ -173,8 +173,8 @@ impl Processor {
         right: &mut [i16],
         events: &[TimedEvent],
     ) -> Result<(), Error> {
-        Error::check_length(input.len(), left.len())?;
-        Error::check_length(input.len(), right.len())?;
+        Error::check_length("left", input.len(), left.len())?;
+        Error::check_length("right", input.len(), right.len())?;
         self.process_into(input, events, |index, frame| {
             left[index] = frame[0];
             right[index] = frame[1];
@@ -260,7 +260,7 @@ impl Processor {
     /// [`Error::BlockTooLarge`]. If either error occurs, the two channels and
     /// the drain state do not change.
     pub fn drain_planar(&mut self, left: &mut [i16], right: &mut [i16]) -> Result<usize, Error> {
-        Error::check_length(left.len(), right.len())?;
+        Error::check_length("right", left.len(), right.len())?;
         let count = self.drain_into(left.len(), |index, frame| {
             left[index] = frame[0];
             right[index] = frame[1];
@@ -441,7 +441,7 @@ impl Processor {
         input: &mut [f32],
         output: &mut [f32],
     ) -> Result<bool, Error> {
-        Error::check_length(input.len(), output.len())?;
+        Error::check_length("output", input.len(), output.len())?;
         let nyquist = self.preparation.sample_rate.hz() / 2.0;
         if !max_frequency_hz.is_finite() || max_frequency_hz <= 0.0 || max_frequency_hz > nyquist {
             return Err(Error::InvalidFrequency {
