@@ -191,10 +191,11 @@ impl WasmProcessor {
         self.input.len()
     }
 
-    /// The nominal resynthesis delay in frames: 1,593 frames at both rates.
+    /// The nominal resynthesis latency: 1,593 frames at both sample rates.
     ///
-    /// The dry path uses the same 1,593-frame delay. Resampled voices, choir
-    /// delays and effects have different delays.
+    /// The dry path has the same delay of 1,593 frames. Resampled voices, choir
+    /// delays and effects have different delays. Thus, this value does not
+    /// align all paths.
     #[wasm_bindgen(getter, js_name = latencyFrames)]
     pub fn latency_frames(&self) -> usize {
         self.processor.latency_frames()
@@ -297,8 +298,8 @@ impl WasmProcessor {
     /// Starts a finite tail budget and returns its frame count as a number.
     ///
     /// Call this method one time after the final input block. Another call
-    /// starts the full budget again, but it does not clear the histories. See
-    /// `beginDrain` for completion.
+    /// starts the full budget again, but it does not clear the histories. Refer
+    /// to `drain` for completion.
     #[wasm_bindgen(js_name = beginDrain)]
     pub fn begin_drain(&mut self) -> usize {
         self.processor.begin_drain()
@@ -338,8 +339,9 @@ impl WasmProcessor {
 
     /// Renders a mono tail block and returns its frame count.
     ///
-    /// The method fills the unused output with zeros. The mono reverb bus,
-    /// completion and feedback behavior match `processMono` and `beginDrain`.
+    /// The method fills the unused output with zeros. The mono reverb bus, the
+    /// peak feedback and the telemetry are the same as for `processMono`. The
+    /// return values, empty arrays and completion are the same as for `drain`.
     ///
     /// # Errors
     ///
