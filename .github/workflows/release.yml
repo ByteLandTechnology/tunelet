@@ -1,24 +1,30 @@
 # Release automation with release-please, an unprivileged build job and
 # isolated environment jobs.
 #
-# Each push to main updates the release pull request. When you merge that
-# pull request, release-please creates the tag and the GitHub release. Then
-# build-release checks the crate package and packs both npm archives without
-# write permissions.
+# Concurrency puts runs on main in a queue and does not cancel active
+# runs. Each push to main updates the release pull request. When you
+# merge that pull request, release-please creates the tag and the
+# GitHub release. Then build-release checks the crate package and packs
+# both npm archives without write permissions.
 #
 # Three jobs publish the release from dedicated GitHub Environments:
 # - publish-npm publishes tunelet to npmjs.org through OIDC.
-# - publish-github publishes @bytelandtechnology/tunelet to GitHub Packages.
+# - publish-github publishes @bytelandtechnology/tunelet to GitHub
+#   Packages.
 # - publish-crate publishes the crate to crates.io through OIDC.
 #
-# The trusted publishers on npmjs.org and crates.io must name release.yml
-# and the npm and crates-io environments.
+# The trusted publishers on npmjs.org and crates.io must name
+# release.yml and the npm and crates-io environments.
 name: Release
 
 on:
   push:
     branches:
       - main
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions: {}
 
@@ -61,6 +67,12 @@ jobs:
         with:
           cache-bin: "false"
       - run: cargo install wasm-pack --version 0.15.1 --locked
+      # Install Binaryen wasm-opt 133 and verify its SHA-256 checksum.
+      - run: |
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz
+          echo "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  $RUNNER_TEMP/binaryen.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24.22.2"
