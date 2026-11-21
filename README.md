@@ -169,7 +169,11 @@ voice. It disables the effects and the formant stage.
 | Formant        | Changes the vocal tract with an LPC model and aspiration    | Disabled       | `resynthesis.formant`    |
 | Alien          | Plays recent audio in reverse loops                         | Disabled       | `alien`                  |
 | Reverb         | Echo, Schroeder, SmallRoom, Binaural, MediumHall, LargeHall | Disabled       | `reverb`                 |
-| Output gain    | Linear gain, 0..=64                                         | 1              | `output_gain`            |
+| Output gain    | Linear gain, 0..=64, before `-32767..=32767` clipping       | 1              | `output_gain`            |
+
+The internal Q14 stages use `i64` products and saturate at the `i32`
+limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
+multi-voice mixes.
 
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
 dry path starts after Warm and has a delay of 1,543 frames.
@@ -194,13 +198,14 @@ The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
 voices. The other voices release with the usual gain envelope. The chord
 and MIDI sources ignore this field.
 
-`resynthesis.lead_gain` (`0..=1`, default `1`) and `resynthesis.harmony_gain`
-(`0..=1`, default `0.5`) scale the lead voice and the harmony voices in mono
-and stereo modes. On `resynthesis.harmony`, `voice_gains` (`0..=1`),
-`voice_pans` (`-1..=1`) and `voice_mutes` control each of the four harmony
-voices. When `resynthesis.formant.enabled` is `true`, `voice_formant_stretch`
-and `voice_formant_width` (`0.5..=2`, default `1`) set separate vocal-tract
-length and width models for the four harmony voices.
+`resynthesis.lead_gain` (`0..=1`, default `1`) scales the lead voice in mono
+and in stereo. `resynthesis.harmony_gain` (`0..=1`, default `0.5`) scales the
+four harmony voices in mono and in stereo. It does not scale the lead voice. On
+`resynthesis.harmony`, `voice_gains` (`0..=1`), `voice_pans` (`-1..=1`) and
+`voice_mutes` control each of the four harmony voices. If
+`resynthesis.formant.enabled` is `true`, `voice_formant_stretch` and
+`voice_formant_width` (`0.5..=2`, default `1`) set separate vocal-tract length
+and width models for the four harmony voices.
 
 ## Process audio
 
@@ -565,9 +570,10 @@ ignores both directories. The archive contains only these items:
 - The package metadata.
 - The README.
 
-The `build:wasm` script uses `--no-opt`. This flag disables the separate
-Binaryen pass, but Rust still builds in release mode. The TypeScript and
-Node.js type declarations are only development dependencies.
+The `build:wasm` script builds the crate in release mode with LTO and one
+codegen unit. Then `wasm-pack` runs Binaryen `wasm-opt` on
+`pkg/tunelet_bg.wasm`. The TypeScript and Node.js type declarations are only
+development dependencies.
 
 ## License
 
