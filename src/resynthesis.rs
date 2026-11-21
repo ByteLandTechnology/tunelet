@@ -28,6 +28,7 @@
 //! - The order of the wrapping arithmetic.
 
 mod history;
+mod vibrato;
 
 use crate::error::{check_count, check_range};
 use crate::filter::{Biquad, Design};
@@ -41,6 +42,7 @@ use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
 use crate::{Error, SampleRate};
 use history::prepare_history;
+use vibrato::PeriodFilter;
 
 /// The method that resynthesis uses to render its voices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -106,6 +108,18 @@ pub struct CorrectionConfig {
     /// tracking update. A value that is not zero is a half-life. It is not a
     /// fixed time to get exactly to the target.
     pub retune_ms: f32,
+    /// The fraction of 4..=8 Hz vibrato that bypasses correction, 0..=1.
+    ///
+    /// The default is 0, which applies full correction to the vibrato. A
+    /// value of 1 keeps the 4..=8 Hz vibrato while the mean pitch moves to
+    /// the active target note. In JavaScript, the field is optional and an
+    /// absent value gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default),
+        tsify(optional)
+    )]
+    pub vibrato_preserve: f32,
 }
 
 impl Default for CorrectionConfig {
@@ -114,6 +128,7 @@ impl Default for CorrectionConfig {
             enabled: true,
             notes: NoteMask::default(),
             retune_ms: 0.0,
+            vibrato_preserve: 0.0,
         }
     }
 }
@@ -121,20 +136,27 @@ impl Default for CorrectionConfig {
 impl CorrectionConfig {
     /// Validates all fields, also if correction is disabled.
     ///
-    /// All values of `enabled` and `notes` are valid. `retune_ms` must be
-    /// finite and in its documented inclusive range. Validation does not
-    /// clamp values. It does not change the state of the processor.
+    /// All values of `enabled` and `notes` are valid. `retune_ms` and
+    /// `vibrato_preserve` must be finite and in their documented inclusive
+    /// ranges. Validation does not clamp values. It does not change the state
+    /// of the processor.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfig`], with the dotted path of the field and
-    /// the problem, if `retune_ms` is not valid.
+    /// the problem, if a field is not valid.
     pub fn validate(self) -> Result<(), Error> {
         check_range(
             "resynthesis.correction.retune_ms",
             self.retune_ms,
             0.0,
             400.0,
+        )?;
+        check_range(
+            "resynthesis.correction.vibrato_preserve",
+            self.vibrato_preserve,
+            0.0,
+            1.0,
         )
     }
 }
@@ -440,6 +462,17 @@ pub(crate) struct Resynthesis {
     /// The current smoothed Q14 correction ratio. It does not include the
     /// global shift or the voice ratios.
     correction: Q14,
+    /// The smoothed Q24 ratio of the secular pitch contour when vibrato
+    /// preservation is active.
+    secular_correction: i64,
+    /// The smoothed Q24 modulation ratio when vibrato preservation is active.
+    vibrato_ratio: i64,
+    /// If `true`, `vibrato_preserve` is nonzero and the contour filter runs.
+    vibrato_enabled: bool,
+    /// The Q24 vibrato preservation weight.
+    vibrato_preserve: i64,
+    /// The Q24 contour filter that separates secular periods from vibrato.
+    period_filter: PeriodFilter,
     /// The Q14 half-life coefficient for correction updates. These updates
     /// usually occur every five frames.
     correction_decay: Q14,
@@ -533,6 +566,11 @@ impl Resynthesis {
             formant_position: 0,
             post: [Biquad::new(), Biquad::new()],
             correction: Q14::ONE,
+            secular_correction: 1 << 24,
+            vibrato_ratio: 1 << 24,
+            vibrato_enabled: false,
+            vibrato_preserve: 0,
+            period_filter: PeriodFilter::new(rate),
             correction_decay: Q14::ZERO,
             scale_initialized: false,
             scale_index: 0,
@@ -572,6 +610,24 @@ impl Resynthesis {
             let t = self.config.correction.retune_ms / 1000.0;
             Q14::from_f64(0.5_f64.powf(1.0 / ((self.rate.hz() / 5.0) * t) as f64))
         };
+        let was_vibrato_enabled = self.vibrato_enabled;
+        self.period_filter.configure(self.rate);
+        if self.config.correction.vibrato_preserve == 0.0 {
+            self.vibrato_enabled = false;
+            self.vibrato_preserve = 0;
+            if was_vibrato_enabled {
+                self.period_filter.reset();
+                self.vibrato_ratio = 1 << 24;
+            }
+        } else {
+            self.vibrato_enabled = true;
+            self.vibrato_preserve =
+                vibrato::quantize_preserve(self.config.correction.vibrato_preserve);
+            if !was_vibrato_enabled {
+                self.secular_correction = i64::from(self.correction.to_bits()) << 10;
+                self.vibrato_ratio = 1 << 24;
+            }
+        }
         let base = (self.rate.hz() / 100.0) as f64 * 0.2;
         let decay = (-std::f64::consts::LN_2 / base).exp();
         self.drift_decay = Q14::from_f64(decay);
@@ -715,7 +771,10 @@ impl Resynthesis {
         self.voice_ratios.fill(Q14::ONE);
         self.formant_position = 0;
         self.current_output_period = Q6::ZERO;
+        self.period_filter.reset();
         self.correction = Q14::ONE;
+        self.secular_correction = 1 << 24;
+        self.vibrato_ratio = 1 << 24;
         self.scale_initialized = false;
     }
 
@@ -853,18 +912,13 @@ impl Resynthesis {
         self.formant
             .envelope(self.formant_position, max_frequency_hz, input, output)
     }
-    /// Selects a target in the period domain and smooths the Q14 correction
-    /// ratio.
+    /// Selects a target in the period domain and returns the Q14 target ratio.
     ///
-    /// The Q6 input period must be a usable tracking result. The target
-    /// search moves through the midpoints, also across octave limits. The
-    /// global shift is part of the normalization.
-    ///
-    /// If correction is disabled or the active table is empty, the ratio moves
-    /// toward 1.0. If the target selection starts again and the shifted
-    /// period is not positive, the ratio becomes 1.0 immediately. A
-    /// multiplication by fixed-point 1.0 still wraps. Do not remove it.
-    fn update_correction(&mut self, period: Q6) {
+    /// Returns `None` if target selection starts again and the shifted period
+    /// is not positive. If correction is disabled or the active table is
+    /// empty, returns `Some(Q14::ONE)`. A multiplication by fixed-point 1.0
+    /// still wraps. Do not remove it.
+    fn select_target_ratio(&mut self, period: Q6) -> Option<Q14> {
         let mut target_ratio = Q14::ONE;
         if self.config.correction.enabled && self.scale.count != 0 {
             let count = self.scale.count;
@@ -878,8 +932,7 @@ impl Resynthesis {
                 self.octave = 0;
                 target = self.shift.mul(period);
                 if target <= Q6::ZERO {
-                    self.correction = Q14::ONE;
-                    return;
+                    return None;
                 }
                 while table_period(1) > target {
                     self.octave += 1;
@@ -917,7 +970,47 @@ impl Resynthesis {
                 target_ratio = target.div(denominator);
             }
         }
-        self.correction = self.correction_decay.mul(self.correction - target_ratio) + target_ratio;
+        Some(target_ratio)
+    }
+
+    /// Selects a target in the period domain and smooths the Q14 correction
+    /// ratio.
+    ///
+    /// When `vibrato_preserve` is zero, this method skips the contour filter
+    /// and the modulation product to keep the Q14 wrap order unchanged. When
+    /// `vibrato_preserve` is nonzero, the contour filter supplies a secular
+    /// period for target selection and a modulation ratio for vibrato.
+    fn update_correction(&mut self, period: Q6) {
+        if !self.vibrato_enabled {
+            let Some(target_ratio) = self.select_target_ratio(period) else {
+                self.correction = Q14::ONE;
+                return;
+            };
+            self.correction =
+                self.correction_decay.mul(self.correction - target_ratio) + target_ratio;
+            return;
+        }
+        let (secular_period, mod_ratio) = self.period_filter.split(period, self.vibrato_preserve);
+        let Some(target_ratio) = self.select_target_ratio(secular_period) else {
+            self.secular_correction = 1 << 24;
+            self.vibrato_ratio = 1 << 24;
+            self.correction = Q14::ONE;
+            return;
+        };
+        let target_mod = if self.config.correction.enabled && self.scale.count != 0 {
+            mod_ratio
+        } else {
+            Q14::ONE
+        };
+        let decay = i64::from(self.correction_decay.to_bits());
+        let target_q24 = i64::from(target_ratio.to_bits()) << 10;
+        self.secular_correction =
+            target_q24 + ((self.secular_correction - target_q24) * decay) / 16_384;
+        let mod_q24 = i64::from(target_mod.to_bits()) << 10;
+        self.vibrato_ratio = mod_q24 + ((self.vibrato_ratio - mod_q24) * decay) / 16_384;
+        let secular_q14 = Q14::from_bits(((self.secular_correction + 512) >> 10) as i32);
+        let mod_q14 = Q14::from_bits(((self.vibrato_ratio + 512) >> 10) as i32);
+        self.correction = secular_q14.mul(mod_q14);
     }
 
     /// Selects the period and the correction.
@@ -1064,10 +1157,22 @@ impl Resynthesis {
             self.old_position = self.old_position - position_of(HISTORY as i32);
         }
         if step.restarted {
+            if self.vibrato_enabled {
+                self.period_filter.reset();
+                self.secular_correction = 1 << 24;
+                self.vibrato_ratio = 1 << 24;
+            }
             self.correction = Q14::ONE;
             self.scale_initialized = false;
         }
         if step.acquired {
+            if self.vibrato_enabled {
+                if step.period > Q6::ZERO {
+                    self.period_filter.seed(step.period);
+                } else {
+                    self.period_filter.reset();
+                }
+            }
             self.formant.detection_mode_off();
         }
         if step.tracking_update {

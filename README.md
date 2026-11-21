@@ -174,6 +174,11 @@ voice. It disables the effects and the formant stage.
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
 dry path starts after Warm and has a delay of 1,543 frames.
 
+`resynthesis.correction.vibrato_preserve` sets the fraction of 4..=8 Hz
+vibrato that bypasses correction, in `0..=1`. The default is 0. At 1,
+correction moves the mean pitch to the target note and keeps natural
+vibrato, also at zero retune time.
+
 ### Harmony sources
 
 Set `resynthesis.mode` to `Harmony`. Then select the source of the voices
@@ -444,10 +449,11 @@ and show enums as string literals. To change the configuration, do these steps:
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+JavaScript `Error`. If an optional field is absent, it gets its default:
+`resynthesis.correction.vibratoPreserve` defaults to 0, and
+`resynthesis.harmony.voices` defaults to 4. The conversion ignores extra
+object properties. The generated declarations contain the parameter
+documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
