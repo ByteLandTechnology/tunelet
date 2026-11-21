@@ -260,7 +260,7 @@ async function initializeFromAttempt(
     const fs: typeof import("node:fs/promises") = await import(
       /* webpackIgnore: true */ /* @vite-ignore */ moduleName
     );
-    output = wasmInitSync({ module: await fs.readFile(input) });
+    output = await wasmInit({ module_or_path: await fs.readFile(input) });
   } else {
     output = await wasmInit({ module_or_path: input });
   }
