@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.3.0](https://github.com/ByteLandTechnology/tunelet/compare/v0.2.0...v0.3.0) (2026-11-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **resynthesis:** harmony_gain now scales mono harmony voices.
+
+### Features
+
+* **resynthesis:** apply harmony_gain in mono mode ([8d29125](https://github.com/ByteLandTechnology/tunelet/commit/8d291256f6a10e10fb68e34fb0b375f2762362b6))
+
+
+### Bug Fixes
+
+* **npm:** pack the Wasm bindings and check the release archives ([b1a7790](https://github.com/ByteLandTechnology/tunelet/commit/b1a77900ce7da31f6b0b612575d9da369d5f8419))
+* widen fixed-point math to i64 with saturated bounds ([6ea30d8](https://github.com/ByteLandTechnology/tunelet/commit/6ea30d834110393c5110f0c00aa1ce187a339820))
+
+
+### Performance Improvements
+
+* **cargo:** enable LTO in the release profile ([7b8e1f5](https://github.com/ByteLandTechnology/tunelet/commit/7b8e1f588882d3af4b72f94ebfebd6cdcfe29141))
+* enable release LTO and Binaryen wasm-opt ([ba350a4](https://github.com/ByteLandTechnology/tunelet/commit/ba350a431a390515d2d58e28a211fea1deb19024))
+
 ## [0.2.0](https://github.com/ByteLandTechnology/tunelet/compare/v0.1.1...v0.2.0) (2026-11-11)
 
 

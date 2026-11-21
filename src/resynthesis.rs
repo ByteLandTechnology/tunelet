@@ -975,6 +975,57 @@ impl Resynthesis {
         }
     }
 
+    /// Returns the upper limit, the lower limit and the Q14 period jump for a
+    /// reader.
+    ///
+    /// `offset` is an integer voice delay behind the writer.
+    #[inline]
+    fn reader_bounds(&self, period: Q6, offset: i32) -> (Q14, Q14, Q14) {
+        let write = self.write as i32;
+        let upper = position_of(write - 40 - offset);
+        let span = (period.to_bits() >> 6).wrapping_mul(12).wrapping_div(10);
+        let lower = position_of(
+            write
+                .wrapping_sub(span)
+                .wrapping_sub(40)
+                .wrapping_sub(offset),
+        );
+        (upper, lower, period.rescale())
+    }
+
+    /// Advances one Q14 reader by its ratio and keeps it in `bounds`.
+    ///
+    /// `bounds` holds the upper limit, the lower limit and the Q14 period
+    /// jump. `voice` must identify an allocated reader slot. If `fade` is
+    /// `true` and the reader jumps, the function saves the old position and
+    /// starts the crossfade again.
+    #[inline]
+    fn step_reader(
+        &mut self,
+        voice: usize,
+        ratio: Q14,
+        bounds: (Q14, Q14, Q14),
+        fade: bool,
+    ) -> Q14 {
+        let (upper, lower, jump) = bounds;
+        let mut position = self.positions[voice] + ratio;
+        if position >= upper {
+            if fade {
+                self.old_position = position;
+                self.fade = Q14::ZERO;
+            }
+            position = position - jump;
+        } else if position <= lower {
+            if fade {
+                self.old_position = position;
+                self.fade = Q14::ZERO;
+            }
+            position = position + jump;
+        }
+        self.positions[voice] = position;
+        position
+    }
+
     /// Advances one Q14 reader by its ratio and keeps it near the writer.
     ///
     /// If the reader gets to one of the two limits, it jumps by one Q6 pitch
@@ -990,31 +1041,8 @@ impl Resynthesis {
         offset: i32,
         fade: bool,
     ) -> Q14 {
-        let mut position = self.positions[voice] + ratio;
-        let write = self.write as i32;
-        let upper = position_of(write - 40 - offset);
-        let span = (period.to_bits() >> 6).wrapping_mul(12).wrapping_div(10);
-        let lower = position_of(
-            write
-                .wrapping_sub(span)
-                .wrapping_sub(40)
-                .wrapping_sub(offset),
-        );
-        if position >= upper {
-            if fade {
-                self.old_position = position;
-                self.fade = Q14::ZERO;
-            }
-            position = position - period.rescale();
-        } else if position <= lower {
-            if fade {
-                self.old_position = position;
-                self.fade = Q14::ZERO;
-            }
-            position = position + period.rescale();
-        }
-        self.positions[voice] = position;
-        position
+        let bounds = self.reader_bounds(period, offset);
+        self.step_reader(voice, ratio, bounds, fade)
     }
 
     /// Renders the choir lead before a secondary voice reads its history.
@@ -1245,17 +1273,18 @@ impl Resynthesis {
             self.control_counter += 1;
             if counter == CONTROL_DUE {
                 self.control_counter = 0;
+                let corrected_period = if ratio == Q14::ZERO {
+                    Q6::ZERO
+                } else {
+                    period.div(ratio)
+                };
                 for voice in 0..HARMONY_VOICES {
-                    let corrected_period = if ratio == Q14::ZERO {
-                        Q6::ZERO
-                    } else {
-                        period.div(ratio)
-                    };
-                    let (ratio, gain) = self.harmony.advance_voice(corrected_period, voice);
-                    self.harmony_ratios[voice] = ratio;
+                    let (voice_ratio, gain) = self.harmony.advance_voice(corrected_period, voice);
+                    self.harmony_ratios[voice] = voice_ratio;
                     self.harmony_gains[voice] = gain;
                 }
             }
+            let bounds = self.reader_bounds(period, 0);
             let mut values = [Q14::ZERO; SYNTHESIS_BANKS];
             let mut formant_positions = [0_i32; SYNTHESIS_BANKS];
             for slot in 0..SYNTHESIS_BANKS {
@@ -1270,7 +1299,22 @@ impl Resynthesis {
                 }
                 final_ratio = current;
                 self.voice_ratios[slot] = current;
-                let position = self.move_reader(slot, current, period, 0, false);
+                let position = self.step_reader(slot, current, bounds, false);
+                // If formants are disabled and the mix gain of the slot is
+                // zero, the slot adds zero to the mix.
+                if !self.config.formant.enabled {
+                    let silent = if slot == 0 {
+                        self.lead_gain == Q14::ZERO
+                    } else {
+                        let voice = slot - 1;
+                        let pan = self.harmony_pan[voice];
+                        self.harmony_gains[voice] == Q12::ZERO
+                            || (pan[0].to_bits() | pan[1].to_bits()) == 0
+                    };
+                    if silent {
+                        continue;
+                    }
+                }
                 let (value, center) = history::interpolation(&self.filtered, position);
                 values[slot] = value;
                 formant_positions[slot] = center - FORMANT_OFFSET_FRAMES;
