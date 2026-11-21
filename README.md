@@ -358,6 +358,7 @@ these items:
 - One Wasm binary.
 - The generated bindings.
 - A shared `loadTunelet` entry point.
+- A browser `AudioWorklet` adapter (`createTuneletNode` and `tunelet/worklet`).
 
 ### Load the module
 
@@ -409,6 +410,7 @@ page that opens the JavaScript.
 | Operation                         | TypeScript API                                           |
 | --------------------------------- | -------------------------------------------------------- |
 | Shared initialization             | `loadTunelet(source?)`                                   |
+| Browser AudioWorklet node         | `createTuneletNode(context, options?)`                   |
 | Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
 | In-place mono downmix             | `processMono(audio, events?)`                            |
 | Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
@@ -430,9 +432,24 @@ frame limit. These rules apply:
   first.
 - Buffers must stay attached during each call.
 
-Web Audio uses Float32 samples, which you must convert to and from 16-bit
-PCM. This package does not install an AudioWorklet or an integration with an
-audio device.
+Direct `Tunelet` calls use `Int16Array` samples. For Web Audio `Float32Array`
+graphs in browsers, call `createTuneletNode(audioContext)` to register
+`tunelet/worklet` and construct a `TuneletWorkletNode`:
+
+```ts
+import { createTuneletNode } from "tunelet";
+
+const context = new AudioContext();
+const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+const node = await createTuneletNode(context);
+context.createMediaStreamSource(mic).connect(node).connect(context.destination);
+```
+
+`TuneletWorkletProcessor` installs an internal UTF-8 shim, reuses pre-allocated
+`Int16Array` buffers and throttles `feedback` and `telemetry` reports to a UI
+interval (50 ms by default). Contexts at 44.1 kHz or 48 kHz run at their native
+rate. Contexts at other rates (such as 88.2 kHz or 96 kHz) resample each block
+to and from an internal 48 kHz `Tunelet` instance.
 
 ### Configuration objects
 
