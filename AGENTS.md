@@ -97,18 +97,25 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
-cargo doc --locked --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
+rustup target add wasm32-unknown-unknown
+cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
 ```
 
 If you change the Wasm or TypeScript code, also run these commands.
-`npm run build` compiles `src/wasm.rs` and `src/index.ts`:
+`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
+`npm run build` compiles `src/wasm.rs` and `src/index.ts`.
+`npm run verify:pack` runs `npm run build` and checks the archives:
 
 ```sh
-rustup target add wasm32-unknown-unknown
 npm ci
-npm run build
+RUSTDOCFLAGS="-D warnings" npm run check:wasm
+npm run verify:pack
 ```
 
+- `.github/workflows/ci.yml` runs these checks on each pull request and each
+  push to `main`.
 - Make sure that there are no new warnings. This includes broken
   rustdoc links.
 - The crate has no tests (`test = false`). Do not add tests or test
@@ -137,12 +144,12 @@ npm run build
   release workflow is `.github/workflows/release.yml`. It publishes to
   npm and crates.io through trusted publishing, so do not rename it.
 - Release tools: `.github/workflows/release.yml` uses a 40-character
-  commit SHA and a version comment for each GitHub Action. The publish
+  commit SHA and a version comment for each GitHub Action. The release
   jobs use fixed versions of Rust (`1.99.1`), `wasm-pack` (`0.15.1`),
   Binaryen `wasm-opt` (`version_133`), Node.js (`24.22.2`) and `npm`
-  (`12.2.3`). Keep the Rust version in `rust-toolchain.toml` and
-  `.github/workflows/release.yml` equal. `.github/dependabot.yml`
-  updates the action commits each week.
+  (`12.2.3`). Keep the Rust version in `rust-toolchain.toml`,
+  `.github/workflows/ci.yml` and `.github/workflows/release.yml` equal.
+  `.github/dependabot.yml` updates the action commits each week.
 
 ## Prohibited changes
 
