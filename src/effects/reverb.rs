@@ -148,6 +148,8 @@ pub(crate) struct Reverb {
     /// The largest absolute Q14 wet contribution in the telemetry window. No
     /// audio calculation reads it.
     wet_peak: i32,
+    /// If `true`, the delay buffer changed since construction or the last clear.
+    dirty: bool,
 }
 
 /// The capacity of the shared circular delay ring, in frames.
@@ -187,6 +189,7 @@ impl Reverb {
             binaural_offset: layout.binaural_offset,
             scratch: layout.capacity - 1,
             wet_peak: 0,
+            dirty: false,
         };
         result.set_config(config);
         result
@@ -210,12 +213,20 @@ impl Reverb {
     /// Clears only the delay contents, and keeps the write cursor and the
     /// damping memories.
     pub(crate) fn flush(&mut self) {
-        self.delay.flush();
+        if self.dirty {
+            self.delay.flush();
+            self.dirty = false;
+        }
     }
     /// Clears the delay contents, the write cursor, the damping memories and
     /// the wet peak.
     pub(crate) fn reset(&mut self) {
-        self.delay.reset();
+        if self.dirty {
+            self.delay.reset();
+            self.dirty = false;
+        } else {
+            self.delay.write = 0;
+        }
         self.lpf1.reset();
         self.lpf2.reset();
         self.wet_peak = 0;
@@ -235,15 +246,16 @@ impl Reverb {
     /// averages use integer division toward zero. The PCM downmix in the
     /// processor uses a shift.
     pub(crate) fn process_sample(&mut self, frame: [Q14; 2]) -> [Q14; 2] {
+        if !self.config.enabled {
+            return frame;
+        }
+        self.dirty = true;
         let [left, right] = frame;
         let mono =
             Q14::from_bits(((i64::from(left.to_bits()) + i64::from(right.to_bits())) / 2) as i32);
         let t = self.taps;
         let dry = Q14::ONE - self.mix;
         let d = &mut self.delay;
-        if !self.config.enabled {
-            return frame;
-        }
         let mut result = match self.config.mode {
             ReverbMode::Echo => {
                 d.put(mono, t[0]);
