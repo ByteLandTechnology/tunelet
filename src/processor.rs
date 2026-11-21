@@ -490,6 +490,11 @@ impl Processor {
         }
         if self.config.resynthesis != config.resynthesis {
             self.resynthesis.apply_config(config.resynthesis);
+            if self.last_resample_ratio != 0.0
+                && self.config.resynthesis.pitch != config.resynthesis.pitch
+            {
+                self.last_resample_ratio = self.resynthesis.resample_ratio();
+            }
         }
         if self.config.resynthesis.stereo_output != config.resynthesis.stereo_output {
             // Resynthesis resets its histories if its stereo setting changes.
@@ -720,7 +725,7 @@ pub struct Feedback {
     pub resample_ratio: f32,
     /// The reported input pitch period in samples, with fractional samples.
     ///
-    /// It is zero if the input is unvoiced or outside the reporting bounds of
+    /// It is zero if the input is unvoiced or outside the frequency bounds of
     /// [`crate::PitchConfig`].
     pub period_samples: f32,
     /// The reported input pitch frequency in hertz.
@@ -744,11 +749,11 @@ pub struct Feedback {
     ///
     /// The value is `None` if [`voiced`](Self::voiced) is `false`, and only
     /// then. This occurs if the input is unvoiced or if its frequency is
-    /// outside the current reporting bounds. A target table that has no
+    /// outside the current frequency bounds. A target table that has no
     /// selected target does not give `None`.
     pub target_midi_note: Option<f32>,
     /// This field is `true` if the current pitch estimate is positive and
-    /// inside the current reporting bounds.
+    /// inside the current frequency bounds.
     ///
     /// This is not an amplitude gate or a confidence score. A tracking result
     /// can stay between detector updates.

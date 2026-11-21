@@ -482,7 +482,7 @@ the cases where `voiced` is `false`:
 
 - The kept pitch estimate is unvoiced. This includes the time before the
   first detection and after a reset or a drain completion.
-- The estimated frequency is outside the inclusive reporting bounds
+- The estimated frequency is outside the inclusive frequency bounds
   `resynthesis.pitch.minFrequencyHz` and `resynthesis.pitch.maxFrequencyHz`.
 
 `formantEnvelope(maxFrequencyHz, input, output)` fills two `Float32Array`

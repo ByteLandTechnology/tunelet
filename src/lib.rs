@@ -50,9 +50,9 @@
 //!
 //! [`Processor::feedback`] gives the pitch, the correction ratio, the
 //! accumulated stereo peak and the frame count.
-//! [`Processor::take_feedback`] also clears the peak window. The pitch
-//! reporting bounds change only the reports. They do not change the detection
-//! or the audio signal. [`Processor::latency_frames`] gives a nominal
+//! [`Processor::take_feedback`] also clears the peak window. If an estimate
+//! is outside the pitch bounds, correction stays at unity and feedback
+//! reports the input as unvoiced. [`Processor::latency_frames`] gives a nominal
 //! resynthesis delay. Voice delays, pitch changes and effects have their own
 //! timing.
 //!

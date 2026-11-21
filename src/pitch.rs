@@ -2,8 +2,8 @@
 //! estimates.
 //!
 //! Acquisition checks that repeated minima agree. Tracking refines the period
-//! in a window of 40 lags. The reporting bounds filter only the feedback to
-//! the host.
+//! in a window of 40 lags. The frequency bounds limit pitch correction and
+//! the feedback to the host.
 
 mod search;
 pub(crate) mod tracker;
@@ -11,7 +11,8 @@ pub(crate) mod tracker;
 use crate::error::{check_range, ConfigProblem};
 use crate::Error;
 
-/// The acquisition sensitivity and the bounds for pitch reports to the host.
+/// The acquisition sensitivity and the frequency bounds for pitch correction
+/// and host feedback.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -26,18 +27,18 @@ pub struct PitchConfig {
     /// This value controls acquisition. It is not an output gain or an
     /// amplitude gate.
     pub threshold: f32,
-    /// The lower bound of the feedback in hertz (inclusive), 40..=2000.
+    /// The lower frequency bound in hertz (inclusive), 40..=2000.
     ///
     /// The default is 40. It must be strictly less than `max_frequency_hz`.
-    /// These bounds do not change the tracking, the correction or the
-    /// resampling. A feedback query applies the current bounds to the kept
-    /// analysis. It does not process another sample.
+    /// If an estimate is outside the bounds, pitch correction stays at unity
+    /// and feedback reports the input as unvoiced.
     pub min_frequency_hz: f32,
-    /// The upper bound of the feedback in hertz (inclusive), 40..=2000.
+    /// The upper frequency bound in hertz (inclusive), 40..=2000.
     ///
     /// The default is 1100. It must be strictly greater than
-    /// `min_frequency_hz`. Results outside the bounds are reported as
-    /// unvoiced, with zero frequency and zero period.
+    /// `min_frequency_hz`. If an estimate is outside the bounds, pitch
+    /// correction stays at unity. Feedback then reports the input as unvoiced,
+    /// with zero frequency and zero period.
     pub max_frequency_hz: f32,
 }
 
@@ -52,16 +53,24 @@ impl Default for PitchConfig {
 }
 
 impl PitchConfig {
-    /// Applies only the bounds for host reports to a kept estimate.
+    /// Applies the frequency bounds to a kept estimate for correction and host
+    /// reports.
     ///
-    /// If the estimate is not voiced or is out of range, the result is the
-    /// unvoiced value with all fields zero. The function does not change the
-    /// tracker state or the correction state.
-    pub(crate) fn report(self, estimate: PitchEstimate) -> PitchEstimate {
-        if estimate.voiced
-            && estimate.frequency_hz >= self.min_frequency_hz
-            && estimate.frequency_hz <= self.max_frequency_hz
-        {
+    /// A tolerance of 0.6 samples keeps boundary tones stable across
+    /// sub-sample tracker updates. The function clamps a valid frequency to
+    /// the inclusive bounds. If the estimate is not voiced or is out of
+    /// range, all fields of the result are zero.
+    pub(crate) fn report(self, mut estimate: PitchEstimate) -> PitchEstimate {
+        if !estimate.voiced || estimate.period_samples <= 0.0 || estimate.frequency_hz <= 0.0 {
+            return PitchEstimate::default();
+        }
+        let rate = estimate.frequency_hz * estimate.period_samples;
+        let min_period = rate / self.max_frequency_hz - 0.6;
+        let max_period = rate / self.min_frequency_hz + 0.6;
+        if estimate.period_samples >= min_period && estimate.period_samples <= max_period {
+            estimate.frequency_hz = estimate
+                .frequency_hz
+                .clamp(self.min_frequency_hz, self.max_frequency_hz);
             estimate
         } else {
             PitchEstimate::default()

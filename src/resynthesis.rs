@@ -166,7 +166,7 @@ impl CorrectionConfig {
     tsify(large_number_types_as_bigints)
 )]
 pub struct ResynthesisConfig {
-    /// The acquisition sensitivity and the reporting bounds. The
+    /// The acquisition sensitivity and the frequency bounds. The
     /// default is [`PitchConfig::default`].
     pub pitch: PitchConfig,
     /// The target notes and the retune time. The default is enabled
@@ -642,6 +642,11 @@ impl Resynthesis {
         let old = self.config;
         self.config = config;
         self.pitch.set_config(config.pitch);
+        if self.periods[self.write] != Q6::ZERO && !self.period_in_bounds(self.periods[self.write])
+        {
+            self.correction = Q14::ONE;
+            self.scale_initialized = false;
+        }
         self.formant.set_config(config.formant);
         self.harmony.apply_config(config.harmony);
         if old.correction.notes != config.correction.notes
@@ -755,12 +760,10 @@ impl Resynthesis {
                 0
             }
     }
-    /// Converts the latest period to samples and hertz and applies the
-    /// current report limits.
-    ///
-    /// The analysis does not advance, and the correction does not change.
-    pub(crate) fn estimate(&self) -> PitchEstimate {
-        let period = (self.periods[self.write].to_bits() as f64 / 64.0) as f32;
+    /// Converts a Q6 period to samples and hertz and applies the current
+    /// frequency bounds.
+    fn reported_period(&self, period: Q6) -> PitchEstimate {
+        let period = (period.to_bits() as f64 / 64.0) as f32;
         self.config.pitch.report(PitchEstimate {
             period_samples: period,
             frequency_hz: if period > 0.0 {
@@ -770,6 +773,18 @@ impl Resynthesis {
             },
             voiced: period > 0.0,
         })
+    }
+    /// Returns `true` if a Q6 period is voiced and inside the current
+    /// frequency bounds.
+    fn period_in_bounds(&self, period: Q6) -> bool {
+        self.reported_period(period).voiced
+    }
+    /// Converts the latest period to samples and hertz and applies the
+    /// current frequency bounds.
+    ///
+    /// The analysis does not advance, and the correction does not change.
+    pub(crate) fn estimate(&self) -> PitchEstimate {
+        self.reported_period(self.periods[self.write])
     }
     /// Returns the current Q14 correction factor as f32. The result does not
     /// include other ratios.
@@ -865,6 +880,11 @@ impl Resynthesis {
     /// period is not positive, the ratio becomes 1.0 immediately. A
     /// multiplication by fixed-point 1.0 still wraps. Do not remove it.
     fn update_correction(&mut self, period: Q6) {
+        if !self.period_in_bounds(period) {
+            self.correction = Q14::ONE;
+            self.scale_initialized = false;
+            return;
+        }
         let mut target_ratio = Q14::ONE;
         if self.config.correction.enabled && self.scale.count != 0 {
             let count = self.scale.count;
@@ -926,12 +946,17 @@ impl Resynthesis {
     /// the current audio. If that is also unvoiced, it uses the last usable
     /// delayed period. The indices must be less than HISTORY.
     fn period_for(&self, delayed: usize, current: usize) -> (Q6, Q14) {
-        if self.periods[delayed] != Q6::ZERO {
+        let (period, ratio) = if self.periods[delayed] != Q6::ZERO {
             (self.periods[delayed], self.ratios[delayed])
         } else if self.periods[current] != Q6::ZERO {
             (self.periods[current], self.ratios[current])
         } else {
             (self.previous_periods[delayed], self.ratios[delayed])
+        };
+        if period != Q6::ZERO && !self.period_in_bounds(period) {
+            (period, Q14::ONE)
+        } else {
+            (period, ratio)
         }
     }
 
@@ -1070,7 +1095,10 @@ impl Resynthesis {
         if step.acquired {
             self.formant.detection_mode_off();
         }
-        if step.tracking_update {
+        if step.period != Q6::ZERO && !self.period_in_bounds(step.period) {
+            self.correction = Q14::ONE;
+            self.scale_initialized = false;
+        } else if step.tracking_update {
             self.update_correction(step.period);
         }
         // Use the state from before this sample. If acquisition occurs on
