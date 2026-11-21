@@ -159,7 +159,7 @@ impl Processor {
         events: &[TimedEvent],
     ) -> Result<(), Error> {
         Error::check_length(input.len(), output.len())?;
-        self.process_into(input, events, |index, frame| output[index] = frame)
+        self.process_into(input.len(), events, (input, output))
     }
 
     /// Processes mono PCM into separate left and right output slices.
@@ -184,10 +184,7 @@ impl Processor {
     ) -> Result<(), Error> {
         Error::check_length(input.len(), left.len())?;
         Error::check_length(input.len(), right.len())?;
-        self.process_into(input, events, |index, frame| {
-            left[index] = frame[0];
-            right[index] = frame[1];
-        })
+        self.process_into(input.len(), events, (input, left, right))
     }
 
     /// Replaces mono PCM with the stereo result after the downmix.
@@ -208,32 +205,7 @@ impl Processor {
         audio: &mut [i16],
         events: &[TimedEvent],
     ) -> Result<(), Error> {
-        let mut events = self.validate(audio, events)?;
-        self.drain_remaining = None;
-        if self.resampler.is_none() {
-            for (index, sample) in audio.iter_mut().enumerate() {
-                while let Some(event) = events.next_at(index) {
-                    self.apply(event);
-                }
-                let output = self.next(*sample);
-                *sample = ((output[0] as i32 + output[1] as i32) >> 1) as i16;
-            }
-            return Ok(());
-        }
-        let mut cursor = 0;
-        while cursor < audio.len() {
-            while let Some(event) = events.next_at(cursor) {
-                self.apply(event);
-            }
-            let end = events.peek_offset().unwrap_or(audio.len());
-            let core_count = self.run_resampled_core(&audio[cursor..end]);
-            let slice = &mut audio[cursor..end];
-            self.finish_resampled_output(core_count, slice.len(), |index, frame| {
-                slice[index] = ((i32::from(frame[0]) + i32::from(frame[1])) >> 1) as i16;
-            });
-            cursor = end;
-        }
-        Ok(())
+        self.process_into(audio.len(), events, audio)
     }
 
     /// Starts a tail with the current [`tail_frames`](Self::tail_frames)
@@ -310,7 +282,7 @@ impl Processor {
     /// returns [`Error::BlockTooLarge`] before it changes output or state.
     pub fn drain_mono(&mut self, output: &mut [i16]) -> Result<usize, Error> {
         let count = self.drain_into(output.len(), |index, frame| {
-            output[index] = ((i32::from(frame[0]) + i32::from(frame[1])) >> 1) as i16;
+            output[index] = downmix(frame);
         })?;
         output[count..].fill(0);
         Ok(count)
@@ -532,11 +504,7 @@ impl Processor {
         }
         if self.config.resynthesis.stereo_output != config.resynthesis.stereo_output {
             // Resynthesis resets its histories if its stereo setting changes.
-            self.alien.reset();
-            self.reverb.reset();
-            self.peak = 0;
-            self.clear_telemetry_peaks();
-            self.last_resample_ratio = 0.0;
+            self.reset_post_resynthesis();
         }
         if self.config.resynthesis.random_seed != config.resynthesis.random_seed {
             self.numeric.random = RandomStream::new(config.resynthesis.random_seed as u32);
@@ -581,13 +549,21 @@ impl Processor {
         self.punch.reset();
         self.warm.reset();
         self.resynthesis.reset();
+        self.reset_post_resynthesis();
+        self.frames = 0;
+        self.drain_remaining = None;
+    }
+
+    /// Clears the stages, the peak windows and the ratio after resynthesis.
+    ///
+    /// Both a full reset and a change of stereo output clear this state. The
+    /// frame count does not change here.
+    fn reset_post_resynthesis(&mut self) {
         self.alien.reset();
         self.reverb.reset();
         self.peak = 0;
         self.clear_telemetry_peaks();
-        self.frames = 0;
         self.last_resample_ratio = 0.0;
-        self.drain_remaining = None;
     }
 
     /// Checks the block size, then checks all events without a change.
@@ -595,17 +571,17 @@ impl Processor {
     /// The returned cursor is the only source of validated control tokens.
     fn validate<'a>(
         &self,
-        input: &[i16],
+        frames: usize,
         events: &'a [TimedEvent],
     ) -> Result<ValidatedEvents<'a>, Error> {
-        self.check_block(input.len())?;
-        ValidatedEvents::new(events, input.len())
+        self.check_block(frames)?;
+        ValidatedEvents::new(events, frames)
     }
 
     /// Enforces the prepared block limit for each call.
     ///
     /// Zero frames are valid.
-    fn check_block(&self, frames: usize) -> Result<(), Error> {
+    pub(crate) fn check_block(&self, frames: usize) -> Result<(), Error> {
         let max = self.preparation.max_block_frames.get();
         if frames > max {
             return Err(Error::BlockTooLarge { frames, max });
@@ -689,8 +665,7 @@ impl Processor {
         result
     }
 
-    /// Resamples a host input segment and runs the internal core stages on the
-    /// generated core frames.
+    /// Resamples a host input slice and runs the core stages on those frames.
     fn run_resampled_core(&mut self, input: &[i16]) -> usize {
         for &sample in input {
             self.input_peak = self.input_peak.max(i32::from(sample).abs());
@@ -716,7 +691,7 @@ impl Processor {
     }
 
     /// Resamples the current `core_output` prefix to `host_frames` stereo
-    /// frames and updates output meters.
+    /// frames and updates the output peaks and the frame count.
     fn finish_resampled_output(
         &mut self,
         core_count: usize,
@@ -744,36 +719,38 @@ impl Processor {
         self.frames = frames;
     }
 
-    /// Checks the block, applies all controls at each offset and writes each
-    /// rendered frame.
+    /// Checks the block, applies all controls at each offset and renders each
+    /// frame.
     ///
-    /// A callback for the buffer layout writes the frames.
+    /// `block` reads the mono input and writes the output for its buffer
+    /// layout.
     fn process_into(
         &mut self,
-        input: &[i16],
+        frames: usize,
         events: &[TimedEvent],
-        mut write: impl FnMut(usize, [i16; 2]),
+        mut block: impl BlockBuffer,
     ) -> Result<(), Error> {
-        let mut events = self.validate(input, events)?;
+        let mut events = self.validate(frames, events)?;
         self.drain_remaining = None;
         if self.resampler.is_none() {
-            for (index, sample) in input.iter().enumerate() {
+            for index in 0..frames {
                 while let Some(event) = events.next_at(index) {
                     self.apply(event);
                 }
-                write(index, self.next(*sample));
+                let frame = self.next(block.sample(index));
+                block.write(index, frame);
             }
             return Ok(());
         }
         let mut cursor = 0;
-        while cursor < input.len() {
+        while cursor < frames {
             while let Some(event) = events.next_at(cursor) {
                 self.apply(event);
             }
-            let end = events.peek_offset().unwrap_or(input.len());
-            let core_count = self.run_resampled_core(&input[cursor..end]);
+            let end = events.peek_offset().unwrap_or(frames);
+            let core_count = self.run_resampled_core(block.slice(cursor, end));
             self.finish_resampled_output(core_count, end - cursor, |index, frame| {
-                write(cursor + index, frame);
+                block.write(cursor + index, frame);
             });
             cursor = end;
         }
@@ -836,6 +813,75 @@ impl Processor {
             self.drain_remaining = Some(remaining);
         }
         Ok(count)
+    }
+}
+
+/// Mixes a stereo frame to mono and rounds toward negative infinity.
+fn downmix(frame: [i16; 2]) -> i16 {
+    ((i32::from(frame[0]) + i32::from(frame[1])) >> 1) as i16
+}
+
+/// Reads the mono input and writes the output frames for one buffer layout.
+trait BlockBuffer {
+    /// Returns the mono input sample at `index`.
+    fn sample(&self, index: usize) -> i16;
+
+    /// Returns the mono input slice for `start..end`.
+    fn slice(&self, start: usize, end: usize) -> &[i16];
+
+    /// Writes one stereo output frame at `index`.
+    fn write(&mut self, index: usize, frame: [i16; 2]);
+}
+
+impl BlockBuffer for (&[i16], &mut [[i16; 2]]) {
+    #[inline]
+    fn sample(&self, index: usize) -> i16 {
+        self.0[index]
+    }
+
+    #[inline]
+    fn slice(&self, start: usize, end: usize) -> &[i16] {
+        &self.0[start..end]
+    }
+
+    #[inline]
+    fn write(&mut self, index: usize, frame: [i16; 2]) {
+        self.1[index] = frame;
+    }
+}
+
+impl BlockBuffer for (&[i16], &mut [i16], &mut [i16]) {
+    #[inline]
+    fn sample(&self, index: usize) -> i16 {
+        self.0[index]
+    }
+
+    #[inline]
+    fn slice(&self, start: usize, end: usize) -> &[i16] {
+        &self.0[start..end]
+    }
+
+    #[inline]
+    fn write(&mut self, index: usize, frame: [i16; 2]) {
+        self.1[index] = frame[0];
+        self.2[index] = frame[1];
+    }
+}
+
+impl BlockBuffer for &mut [i16] {
+    #[inline]
+    fn sample(&self, index: usize) -> i16 {
+        self[index]
+    }
+
+    #[inline]
+    fn slice(&self, start: usize, end: usize) -> &[i16] {
+        &self[start..end]
+    }
+
+    #[inline]
+    fn write(&mut self, index: usize, frame: [i16; 2]) {
+        self[index] = downmix(frame);
     }
 }
 
