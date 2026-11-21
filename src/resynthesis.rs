@@ -70,13 +70,13 @@ pub enum MultiVoiceMode {
 ///
 /// Correction MIDI replaces the active note table. It does not change this
 /// configuration. A change to `notes` or to `enabled` loads the configured
-/// mask again. Reset releases the correction keys 0..=126. It keeps key 127
-/// and the active note table. Key 127 has no effect on the note table.
+/// mask again. A reset clears all 128 correction keys and loads `notes` again
+/// with the rate rule below. Key 127 has no effect on the note table.
 ///
-/// At construction, the chromatic table uses 44.1 kHz periods, also for a
-/// 48 kHz processor. Each of these events loads the periods for the prepared
-/// rate:
-/// - An initial mask that is not chromatic.
+/// At construction and at a reset, the chromatic table uses 44.1 kHz periods,
+/// also for a 48 kHz processor. Each of these events loads the periods for the
+/// prepared rate:
+/// - A configured mask that is not chromatic.
 /// - A later change to the mask or to `enabled`.
 /// - A correction MIDI event.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,7 +97,7 @@ pub struct CorrectionConfig {
     /// [`NoteMask::CHROMATIC`].
     ///
     /// All boolean masks are valid. MIDI can replace the active table. This
-    /// replacement stays until this mask or `enabled` changes.
+    /// replacement stays until a reset or a change to this mask or `enabled`.
     pub notes: NoteMask,
     /// The half-life of the smoothing in milliseconds, 0..=400. The default
     /// is 0.
@@ -248,7 +248,7 @@ pub struct ResynthesisConfig {
     /// Only the low 32 bits select the sequence. If a configuration change
     /// gives a different 64-bit value, the processor starts the stream again
     /// from the low 32 bits. This is also true for a change to only the high
-    /// bits. Reset keeps the current position in the stream. The enabled
+    /// bits. A reset starts the stream again from the low 32 bits. The enabled
     /// stages set the number of random values that the code reads.
     pub random_seed: u64,
 }
@@ -414,7 +414,7 @@ pub(crate) struct Resynthesis {
     /// The Q14 random choir drift offsets of the secondary voices.
     drift: [Q14; 16],
     /// The Q14 multipliers, each equal to 1.0 plus the drift. An audio reset
-    /// sets them to 1.0, but it keeps the drift state.
+    /// clears the drift and sets these multipliers to 1.0.
     drift_ratio: [Q14; 16],
     /// The Q14 left and right gains of the choir voices. The code reads them
     /// only if the stereo pan is enabled.
@@ -425,7 +425,7 @@ pub(crate) struct Resynthesis {
     /// The last Q14 target ratios from the harmony controller.
     harmony_ratios: [Q14; HARMONY_VOICES],
     /// The last Q12 gain envelopes from the harmony controller. An audio
-    /// reset keeps them.
+    /// reset clears them.
     harmony_gains: [Q12; HARMONY_VOICES],
     /// The effective Q14 ratios of the lead and the four harmony readers from
     /// the last frame. In Choir mode, only the lead slot changes. Only the
@@ -456,7 +456,7 @@ pub(crate) struct Resynthesis {
     /// The plain integer modulation depth. It is the public control times
     /// two, truncated.
     modulation: i32,
-    /// The Q14 phase in the cosine cycle. An audio reset keeps it.
+    /// The Q14 phase in the cosine cycle. An audio reset clears it.
     modulation_phase: Q14,
     /// The Q8 weight of the delayed raw audio. The wet weight is 1.0 minus
     /// this weight.
@@ -669,27 +669,29 @@ impl Resynthesis {
         }
     }
 
-    /// Releases the correction keys 0..=126 and resets the audio state.
+    /// Clears all 128 correction keys, loads the configured note mask again
+    /// and resets the audio state.
     ///
-    /// The active correction table, key 127 and the items that
-    /// `reset_audio` keeps do not change.
+    /// The chromatic mask uses 44.1 kHz periods, and any other mask uses the
+    /// prepared rate, as at construction.
     pub(crate) fn reset(&mut self) {
         self.scale.reset();
+        self.scale.set_sample_rate(SampleRate::Hz44100);
+        self.scale.set_notes(NoteMask::default());
+        self.scale.set_sample_rate(self.rate);
+        if self.config.correction.notes != NoteMask::default() {
+            self.scale.set_notes(self.config.correction.notes);
+        }
         self.reset_audio();
     }
 
-    /// Clears the audio and period histories, the tracker, the formant
-    /// synthesis and the filter history. Then initializes the readers and
-    /// the correction again.
+    /// Clears the audio and period histories, the tracker, the formant stage,
+    /// the harmony voices, the drift, the modulation phase and the filter
+    /// history. Then initializes the readers, the control counter and the
+    /// correction state again.
     ///
-    /// These items do not change:
-    /// - The correction keyboard.
-    /// - The active note table.
-    /// - The random state that the caller holds.
-    /// - The choir drift.
-    /// - The modulation phase.
-    /// - The control counter.
-    /// - The harmony release envelopes and the last harmony gains.
+    /// The correction keyboard, the active note table and the random state
+    /// that the caller holds do not change here.
     fn reset_audio(&mut self) {
         self.pitch.reset();
         self.raw.fill(Q14::ZERO);
@@ -708,15 +710,21 @@ impl Resynthesis {
             filter.reset();
         }
         self.create_delays();
+        self.drift.fill(Q14::ZERO);
         self.drift_ratio.fill(Q14::ONE);
         self.old_position = self.positions[0];
         self.fade = Q14::ONE;
         self.harmony_ratios.fill(Q14::ONE);
+        self.harmony_gains.fill(Q12::ZERO);
         self.voice_ratios.fill(Q14::ONE);
         self.formant_position = 0;
         self.current_output_period = Q6::ZERO;
+        self.control_counter = CONTROL_DUE;
+        self.modulation_phase = Q14::ZERO;
         self.correction = Q14::ONE;
         self.scale_initialized = false;
+        self.scale_index = 0;
+        self.octave = 0;
     }
 
     /// Applies a MIDI event that the API or the block code checked before.

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 320" width="900" height="320" role="img" aria-labelledby="title desc">
   <title id="title">The processor lifecycle</title>
-  <desc id="desc">Construction allocates the storage. Then the processor processes blocks. After the last block, begin_drain starts the tail. Drain calls return frames until the budget is used. Then the processor resets and can process again.</desc>
+  <desc id="desc">Construction allocates the storage. Then the processor processes blocks. After the last block, begin_drain starts the tail. Drain calls return frames until the budget is zero. Then the next non-empty drain call returns 0, resets the processor and finishes the drain.</desc>
   <style>
     svg { --text: #1f2328; --muted: #59636e; --line: #8c959f; --fill: #f6f8fa; --accent: #0969da; --accent-fill: #ddf4ff; --warn: #9a6700; --ok: #1a7f37; }
     @media (prefers-color-scheme: dark) {
@@ -67,6 +67,6 @@
   <text class="warntext" x="570" y="222">cancels the drain</text>
 
   <path class="wire" d="M770,224 V276 H370 V226" marker-end="url(#arrow)"/>
-  <text class="label" x="570" y="268">the last drain call uses the budget and does a <tspan class="code">reset()</tspan></text>
-  <text class="item" x="570" y="294">the next drain calls return 0</text>
+  <text class="label" x="570" y="268">after the budget, the next non-empty call returns 0 and calls <tspan class="code">reset()</tspan></text>
+  <text class="item" x="570" y="294">later drain calls return 0</text>
 </svg>

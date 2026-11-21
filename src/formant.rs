@@ -308,8 +308,8 @@ impl Formant {
         self.noise_filter
             .set_design(Design::high_pass(self.rate.hz(), frequency as f32, 0.707));
     }
-    /// Clears the audio, the stamps, the synthesis history and the history of
-    /// the aspiration filter.
+    /// Clears the audio, the stamps, the synthesis history, the history of
+    /// the aspiration filter and the analysis generation count.
     ///
     /// The function also selects and clears the initial bank pair, and starts
     /// the correlation smoothing again. The other banks stay allocated. The
@@ -326,6 +326,7 @@ impl Formant {
         self.design_counter = 0;
         self.noise_filter.reset();
         self.smooth_reset = true;
+        self.generation = 0;
     }
     /// Starts a new model and a new correlation window when pitch acquisition
     /// locks.

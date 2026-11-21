@@ -314,10 +314,11 @@ impl WasmProcessor {
     /// Renders stereo tail frames into `Int16Array` buffers of equal length.
     ///
     /// The method returns the number of rendered frames and fills the unused
-    /// output with zeros. If the drain is not active or is complete, the method
-    /// returns zero. Empty arrays do not use the budget. Completion resets the
-    /// histories and the feedback in the final drain call, also when that call
-    /// returns audio.
+    /// output with zeros. Every call that returns positive frames keeps the
+    /// feedback and the telemetry of that block. After the last tail frames,
+    /// the next non-empty call returns zero and resets the processor. Before a
+    /// drain starts or after that reset, the method returns zero. Empty arrays
+    /// do not use the budget and do not finish the drain.
     ///
     /// # Errors
     ///
@@ -338,8 +339,9 @@ impl WasmProcessor {
 
     /// Renders a mono tail block and returns its frame count.
     ///
-    /// The method fills the unused output with zeros. The downmix, completion
-    /// and feedback behavior are the same as for `drainMono`.
+    /// The method fills the unused output with zeros. The downmix, empty
+    /// buffers, feedback retention and reset on the next non-empty zero call
+    /// are the same as for `drain`.
     ///
     /// # Errors
     ///
@@ -465,11 +467,14 @@ impl WasmProcessor {
         Ok(valid)
     }
 
-    /// Resets the audio histories and feedback, as the native processor does.
+    /// Resets all audio histories, filter memories, MIDI state, feedback and
+    /// telemetry, as the native processor does.
     ///
-    /// The configuration, the random stream and some controller and filter
-    /// state do not change. This method cancels any active drain. For a fully
-    /// new instance, construct a new `Tunelet`.
+    /// The method clears all correction keys, loads the configured correction
+    /// notes again and starts the random stream again from `randomSeed`. It
+    /// cancels any active drain and keeps the preparation and the active
+    /// configuration. After this call, the instance gives the same PCM output
+    /// as a new `Tunelet` with the same configuration.
     pub fn reset(&mut self) {
         self.processor.reset();
     }

@@ -163,7 +163,7 @@ pub(crate) struct CorrectionTable {
     base_periods: [i32; 12],
     /// The held MIDI keys.
     ///
-    /// A reset keeps key 127, and mask creation excludes it.
+    /// A reset clears all 128 keys, and mask creation excludes key 127.
     pub keyboard: [bool; 128],
 }
 
@@ -219,11 +219,9 @@ impl CorrectionTable {
             self.midpoints[0] = self.midpoints[self.count] / 2;
         }
     }
-    /// Releases keys 0..=126, and keeps key 127 and the active target table.
-    ///
-    /// A later MIDI event builds the table again from the new keyboard state.
+    /// Clears all 128 keys on the correction keyboard.
     pub(crate) fn reset(&mut self) {
-        self.keyboard[..127].fill(false);
+        self.keyboard.fill(false);
     }
     /// Applies an event whose MIDI ranges were already checked.
     pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent) {
@@ -232,10 +230,10 @@ impl CorrectionTable {
                 self.keyboard[note as usize] = velocity != 0
             }
             MidiEvent::NoteOff { note, .. } => self.keyboard[note as usize] = false,
-            MidiEvent::AllNotesOff => self.reset(),
+            MidiEvent::AllNotesOff => self.keyboard[..127].fill(false),
         }
         let mut mask = [false; 12];
-        // Correction excludes key 127, and a reset keeps that key.
+        // Correction excludes key 127, and All Notes Off keeps that key.
         for i in 0..127 {
             mask[i % 12] |= self.keyboard[i];
         }

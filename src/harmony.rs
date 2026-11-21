@@ -423,8 +423,8 @@ pub(crate) struct HarmonyState {
     /// The last usable Q14 ratio of the input period to the smoothed target
     /// period for each voice.
     current_ratio: [Q14; HARMONY_VOICES],
-    /// The Q12 attack and release envelope. A MIDI release or a reset does
-    /// not clear it.
+    /// The Q12 attack and release envelope. A MIDI release does not clear it,
+    /// and a reset sets it to zero.
     smoothed_gain: [Q12; HARMONY_VOICES],
     /// The last active Q6 target. It is kept while the gain of a released
     /// voice decreases to zero.
@@ -509,8 +509,8 @@ impl HarmonyState {
     /// Applies a configuration that validation already accepted.
     ///
     /// If the source changes to an interval source or to a named or degree
-    /// chord source, the function calls `reset`. It prepares the tables
-    /// again only for the fields that changed.
+    /// chord source, the function releases all MIDI notes. It prepares the
+    /// tables again only for the fields that changed.
     pub(crate) fn apply_config(&mut self, config: HarmonyConfig) {
         let old = self.config;
         self.config = config;
@@ -523,7 +523,7 @@ impl HarmonyState {
                     | HarmonySource::ChordByName
             )
         {
-            self.reset();
+            self.release_all_notes();
         }
         if old.key != config.key
             || old.scale != config.scale
@@ -543,24 +543,30 @@ impl HarmonyState {
             self.setup_chord();
         }
     }
-    /// Releases all MIDI notes and starts the MIDI assignment order again.
-    ///
-    /// The function clears these items:
-    ///
-    /// - The active MIDI periods, which releases the voices.
-    /// - The pending stolen notes and their assignment orders.
-    /// - The portamento start state.
-    /// - The MIDI event counter.
-    ///
-    /// It keeps the gain envelopes, the current ratios, the output and target
-    /// periods, the scale tables and the last note numbers, gains and orders.
-    /// Thus each released voice decays with the gain release.
-    ///
-    /// For [`HarmonySource::ChordViaMidi`], the function also prepares the
-    /// chord again from the released notes. Thus the chord voices decay
-    /// with the gain release. The other chord sources keep their chord
-    /// preparation.
+    /// Clears the voice envelopes, ratios, periods, MIDI state and scale search
+    /// state, then prepares the configured chord again.
     pub(crate) fn reset(&mut self) {
+        self.midi_note.fill(0);
+        self.midi_period.fill(Q6::ZERO);
+        self.midi_gain.fill(Q12::ZERO);
+        self.midi_order.fill(0);
+        self.portamento_period.fill(Q6::ZERO);
+        self.current_ratio.fill(Q14::ONE);
+        self.smoothed_gain.fill(Q12::ZERO);
+        self.period_output.fill(Q6::ZERO);
+        self.target_period.fill(Q6::ZERO);
+        self.chord_gain.fill(Q12::from_bits(-16_384));
+        self.current_idx.fill(39);
+        self.scale_target.fill(Q6::ZERO);
+        self.scale_note.fill(0);
+        self.pending_gain.fill(Q12::ZERO);
+        self.pending_order.fill(0);
+        self.event_counter = 0;
+        self.setup_chord();
+    }
+    /// Releases all MIDI notes and starts the MIDI assignment order again,
+    /// while each active voice keeps its release envelope.
+    fn release_all_notes(&mut self) {
         self.midi_period.fill(Q6::ZERO);
         self.portamento_period.fill(Q6::ZERO);
         self.pending_gain.fill(Q12::ZERO);
@@ -701,12 +707,12 @@ impl HarmonyState {
     /// the omni sources. The omni sources steal the oldest voice and resume
     /// the newest pending note. If two orders are equal, strict comparisons
     /// keep the lowest voice index or pitch. Each Note Off clears the pending
-    /// entry of its pitch. All Notes Off calls `reset` and returns `false`.
-    /// The gain releases occur at the next control steps.
+    /// entry of its pitch. All Notes Off releases all MIDI notes and returns
+    /// `false`. The gain releases occur at the next control steps.
     pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent) -> bool {
         let (channel, note, velocity) = match event {
             MidiEvent::AllNotesOff => {
-                self.reset();
+                self.release_all_notes();
                 return false;
             }
             MidiEvent::NoteOn {

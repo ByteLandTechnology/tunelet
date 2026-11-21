@@ -51,8 +51,9 @@ pub enum ControlEvent {
     /// The held notes 0..=126 become pitch classes. Channels and nonzero
     /// velocities do not change the selected classes. Key 127 is stored, but
     /// the classes do not include it. Each event replaces the active
-    /// correction table. If a later change sets new configured notes, or
-    /// enables or disables correction, the configured mask loads again.
+    /// correction table. If a later reset occurs, or a change sets new
+    /// configured notes or enables or disables correction, the configured mask
+    /// loads again.
     CorrectionMidi(MidiEvent),
     /// This event resets immediately before the event frame, with the semantics of
     /// [`crate::Processor::reset`].
