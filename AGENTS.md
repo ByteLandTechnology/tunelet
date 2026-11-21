@@ -89,6 +89,9 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 
 ## Build and verify
 
+`rust-toolchain.toml` sets Rust `1.99.1`, `clippy`, `rustfmt` and the
+`wasm32-unknown-unknown` target.
+
 ```sh
 cargo build --locked --release
 cargo fmt --check
@@ -132,6 +135,12 @@ npm run build
   by hand. The commit types and the `!` mark set the next version. The
   release workflow is `.github/workflows/release.yml`. It publishes to
   npm and crates.io through trusted publishing, so do not rename it.
+- Release tools: `.github/workflows/release.yml` uses a 40-character
+  commit SHA and a version comment for each GitHub Action. The publish
+  jobs use fixed versions of Rust (`1.99.1`), `wasm-pack` (`0.15.1`),
+  Node.js (`24.22.2`) and `npm` (`12.2.3`). Keep the Rust version in
+  `rust-toolchain.toml` and `.github/workflows/release.yml` equal.
+  `.github/dependabot.yml` updates the action commits each week.
 
 ## Prohibited changes
 
