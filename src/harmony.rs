@@ -822,8 +822,8 @@ impl HarmonyState {
     /// Projects the 16-channel keybed onto up to four omni voices.
     fn reproject_omni_voices(&mut self) {
         let mut any_held = 0_u128;
-        for ch in 0..16 {
-            any_held |= self.keybed.held[ch];
+        for &held in &self.keybed.held {
+            any_held |= held;
         }
         let mut selected_note = [0_usize; HARMONY_VOICES];
         let mut selected_gain = [Q12::ZERO; HARMONY_VOICES];
