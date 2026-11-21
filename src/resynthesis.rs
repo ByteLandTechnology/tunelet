@@ -627,15 +627,15 @@ impl Resynthesis {
                 ..
             } => {
                 self.drift_amount = Q14::from_f64((1.0 - decay) * 0.008 * detune as f64);
-                for voice in 0..voices as usize {
+                for (voice, pan) in self.pan.iter_mut().enumerate().take(voices as usize) {
                     if voices > 1 {
                         let normalized =
                             (voice as f64 + voice as f64) / (voices as f64 - 1.0) - 1.0;
                         let angle = 0.785398163565
                             - (spread_percent as f64 * 0.785398163565 * 0.01) * normalized;
-                        self.pan[voice] = [Q14::from_f64(angle.cos()), Q14::from_f64(angle.sin())];
+                        *pan = [Q14::from_f64(angle.cos()), Q14::from_f64(angle.sin())];
                     } else {
-                        self.pan[voice] = [Q14::ONE; 2];
+                        *pan = [Q14::ONE; 2];
                     }
                 }
             }
