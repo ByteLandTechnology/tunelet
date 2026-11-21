@@ -169,7 +169,11 @@ voice. It disables the effects and the formant stage.
 | Formant        | Changes the vocal tract with an LPC model and aspiration    | Disabled       | `resynthesis.formant`    |
 | Alien          | Plays recent audio in reverse loops                         | Disabled       | `alien`                  |
 | Reverb         | Echo, Schroeder, SmallRoom, Binaural, MediumHall, LargeHall | Disabled       | `reverb`                 |
-| Output gain    | Linear gain, 0..=64                                         | 1              | `output_gain`            |
+| Output gain    | Linear gain, 0..=64, before `-32767..=32767` clipping       | 1              | `output_gain`            |
+
+The internal Q14 stages use `i64` products and saturate at the `i32`
+limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
+multi-voice mixes.
 
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
 dry path starts after Warm and has a delay of 1,543 frames.
@@ -193,6 +197,9 @@ with `resynthesis.harmony.source`:
 The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
 voices. The other voices release with the usual gain envelope. The chord
 and MIDI sources ignore this field.
+
+`resynthesis.harmony_gain` scales the four harmony voices in mono and in
+stereo. It does not scale the lead voice.
 
 ## Process audio
 
@@ -515,28 +522,42 @@ Rust functions.
 
 ### Rust crate
 
-To build the crate and check the format and the lints, run these commands:
+To build the crate and check the format, the lints and the documentation,
+run these commands:
 
 ```sh
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
+cargo doc --locked --no-deps
 ```
 
-Native Rust builds use Cargo and do not need Node.js or npm.
+To check the `wasm` feature for `wasm32-unknown-unknown` with Cargo, run
+these commands:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
+```
+
+Native Rust builds and these Wasm checks use Cargo and do not need Node.js
+or npm.
 
 ### npm package
 
-Install Node.js and `wasm-pack`. Then run these commands to add the
-`wasm32-unknown-unknown` Rust target, install the development dependencies
-and make the archive:
+Install Node.js and `wasm-pack`. Then add the `wasm32-unknown-unknown`
+target, install the dependencies, check the Wasm bindings and make the
+archive:
 
 ```sh
 rustup target add wasm32-unknown-unknown
 npm ci
+npm run check:wasm
 npm pack
 ```
 
+`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
 `npm pack` builds the Wasm bindings and the TypeScript entry point. Then it
 creates `tunelet-<version>.tgz`. To use this archive in a browser project or
 a Node.js project, install it with this command:
