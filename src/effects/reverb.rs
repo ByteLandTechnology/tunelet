@@ -186,7 +186,7 @@ fn quantize_mix(mix: f32) -> Q14 {
     Q14::from_f64((mix * 100.0) as f64 / 100.0)
 }
 
-/// Multiplies two Q14 values with a wrapping 32-bit product before the shift.
+/// Multiplies two Q14 values in `i64` and clamps the shifted result to `i32`.
 #[inline]
 fn mul(left: Q14, right: Q14) -> Q14 {
     left.mul(right)
@@ -362,7 +362,8 @@ impl Reverb {
         }
 
         let [left, right] = frame;
-        let mono = (left + right).div::<0, 14>(TWO);
+        let mono =
+            Q14::from_bits(((i64::from(left.to_bits()) + i64::from(right.to_bits())) / 2) as i32);
         let t = self.taps;
         let dry = Q14::ONE - self.mix;
 
@@ -520,7 +521,7 @@ impl Reverb {
                 [left, right]
             };
             for (value, input) in result.iter().zip(dry_input) {
-                let wet = (*value - mul(input, dry)).to_bits().wrapping_abs();
+                let wet = (*value - mul(input, dry)).abs().to_bits();
                 self.wet_peak = self.wet_peak.max(wet);
             }
             return result;
@@ -532,7 +533,9 @@ impl Reverb {
         let (net_left, net_right, net_mono) = if self.config.enabled {
             let nl = mul(left, self.enable_fade);
             let nr = mul(right, self.enable_fade);
-            (nl, nr, (nl + nr).div::<0, 14>(TWO))
+            let nm =
+                Q14::from_bits(((i64::from(nl.to_bits()) + i64::from(nr.to_bits())) / 2) as i32);
+            (nl, nr, nm)
         } else {
             (Q14::ZERO, Q14::ZERO, Q14::ZERO)
         };
@@ -688,10 +691,12 @@ impl Reverb {
             }
         };
         d.step();
+        // Telemetry only. The wet contribution is the output minus the dry
+        // term. While the reverb is disabled, the window gets no new values.
         let result = [dry_terms[0] + wet_terms[0], dry_terms[1] + wet_terms[1]];
         if self.config.enabled {
             for wet in wet_terms {
-                self.wet_peak = self.wet_peak.max(wet.to_bits().wrapping_abs());
+                self.wet_peak = self.wet_peak.max(wet.abs().to_bits());
             }
         }
         if self.fading_out_mode && self.mode_fade == Q14::ZERO {
@@ -705,8 +710,7 @@ impl Reverb {
                 self.mode_fade = Q14::ONE;
             }
         } else if !self.config.enabled && self.bypass_remaining > 0 {
-            let quiet = wet_terms[0].to_bits().wrapping_abs() <= 2
-                && wet_terms[1].to_bits().wrapping_abs() <= 2;
+            let quiet = wet_terms[0].abs().to_bits() <= 2 && wet_terms[1].abs().to_bits() <= 2;
             if quiet {
                 self.bypass_quiet_frames += 1;
             } else {
