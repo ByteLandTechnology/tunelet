@@ -42,20 +42,113 @@ use crate::scale::{CorrectionTable, NoteMask};
 use crate::{Error, SampleRate};
 use history::prepare_history;
 
-/// The method that resynthesis uses to render its voices.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The method that resynthesis uses to render its voices, with the controls
+/// that apply to that mode.
+///
+/// The default is [`Self::Choir`], with one voice, a detune of 50, a delay of
+/// 60 and a spread of 100%.
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase")
+    serde(
+        rename_all = "camelCase",
+        rename_all_fields = "camelCase",
+        tag = "type"
+    )
 )]
-pub enum MultiVoiceMode {
+pub enum VoiceModeConfig {
     /// Voices at the pitch of the lead voice, with random drift, delays and
     /// an optional stereo pan.
-    #[default]
-    Choir,
+    Choir {
+        /// The total number of choir voices, with the lead voice, 1..=16.
+        ///
+        /// The default is 1. The secondary voices read the delayed lead
+        /// history with random pitch drift. The code adds the voices and does
+        /// not divide the sum by the number of voices. Thus, more voices can
+        /// increase the output level.
+        voices: u8,
+        /// The drift control for secondary voices, 10..=100, without a unit.
+        ///
+        /// The default is 50. The unit is not cents. The lead voice has no
+        /// random choir drift. Thus, a choir with one voice does not get this
+        /// detune.
+        detune: f32,
+        /// The scale of the choir delay table, 20..=200, without a unit.
+        ///
+        /// The default is 60. A value of 200 uses the full fixed table of
+        /// frame offsets. The unit is not milliseconds. The table offset of
+        /// the lead voice is zero at all settings.
+        delay: f32,
+        /// The stereo width of the choir, 0..=100%.
+        ///
+        /// The default is 100%. The code uses this value only if
+        /// `stereo_output` enables the voice pan and the choir has more than
+        /// one voice.
+        spread_percent: f32,
+    },
     /// Voices that follow musical intervals, chords or MIDI notes.
-    Harmony,
+    Harmony {
+        /// The controls for the four harmony voices.
+        harmony: HarmonyConfig,
+        /// The linear gain of the harmony voices, 0..=1.
+        ///
+        /// This control scales the four harmony voices whether `stereo_output`
+        /// is `false` or `true`. It does not scale the lead voice.
+        harmony_gain: f32,
+    },
+}
+
+impl Default for VoiceModeConfig {
+    fn default() -> Self {
+        Self::Choir {
+            voices: 1,
+            detune: 50.0,
+            delay: 60.0,
+            spread_percent: 100.0,
+        }
+    }
+}
+
+impl VoiceModeConfig {
+    /// Validates the controls of the selected voice mode.
+    ///
+    /// Each floating-point control must be finite and in its documented
+    /// inclusive range. In [`Self::Choir`], `voices` must be in 1..=16.
+    /// Validation does not clamp values and does not change the processor
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`Error::InvalidConfig`], with the dotted path of the
+    /// field and the problem.
+    pub fn validate(self) -> Result<(), Error> {
+        match self {
+            Self::Choir {
+                voices,
+                detune,
+                delay,
+                spread_percent,
+            } => {
+                check_range("resynthesis.mode.detune", detune, 10.0, 100.0)?;
+                check_range("resynthesis.mode.delay", delay, 20.0, 200.0)?;
+                check_range(
+                    "resynthesis.mode.spread_percent",
+                    spread_percent,
+                    0.0,
+                    100.0,
+                )?;
+                check_count("resynthesis.mode.voices", i64::from(voices), 1, 16)
+            }
+            Self::Harmony {
+                harmony,
+                harmony_gain,
+            } => {
+                harmony.validate()?;
+                check_range("resynthesis.mode.harmony_gain", harmony_gain, 0.0, 1.0)
+            }
+        }
+    }
 }
 
 /// The controls for pitch-class correction, with target selection in the
@@ -150,8 +243,8 @@ impl CorrectionConfig {
 /// - No dry mix.
 /// - No stereo pan.
 ///
-/// Validation applies to all controls, also when their stage or voice mode
-/// is not active.
+/// Validation applies to the controls of disabled stages and to the selected
+/// voice mode.
 ///
 /// The dry path takes the audio after Punch and Warm and delays it by 1,543
 /// frames. The wet voice readers have more delay, which changes with the
@@ -166,8 +259,8 @@ impl CorrectionConfig {
     tsify(large_number_types_as_bigints)
 )]
 pub struct ResynthesisConfig {
-    /// The acquisition sensitivity and the reporting bounds. The
-    /// default is [`PitchConfig::default`].
+    /// The acquisition sensitivity and the pitch bounds. The default is
+    /// [`PitchConfig::default`].
     pub pitch: PitchConfig,
     /// The target notes and the retune time. The default is enabled
     /// chromatic correction with a retune time of zero.
@@ -181,54 +274,18 @@ pub struct ResynthesisConfig {
     pub pitch_ratio: f32,
     /// The vocal-tract changes and aspiration. They are disabled by default.
     pub formant: FormantConfig,
-    /// The voice arrangement. The default is [`MultiVoiceMode::Choir`].
+    /// The voice mode and its controls. The default is
+    /// [`VoiceModeConfig::default`].
     ///
-    /// Harmony renders the lead voice and a maximum of four harmony voices.
-    pub mode: MultiVoiceMode,
-    /// The total number of choir voices, with the lead voice, 1..=16. The
-    /// default is 1.
-    ///
-    /// The other voices read the delayed lead history with random pitch
-    /// drift. The code adds the voices and does not divide the sum by the
-    /// number of voices. Thus, more voices can increase the output level and
-    /// the clipping. Harmony does not use this value.
-    pub choir_voices: u8,
-    /// The drift control for secondary voices, 10..=100, without a unit. The
-    /// default is 50.
-    ///
-    /// The unit is not cents. The lead voice has no random choir drift. Thus,
-    /// a choir with one voice does not get this detune.
-    pub choir_detune: f32,
-    /// The scale of the choir delay table, 20..=200, without a unit. The
-    /// default is 60.
-    ///
-    /// A value of 200 uses the full fixed table of frame offsets. The unit is
-    /// not milliseconds. The table offset of the lead voice is zero at all
-    /// settings.
-    pub choir_delay: f32,
-    /// The stereo width of the choir, 0..=100%. The default is 100%.
-    ///
-    /// The code uses this value only if `stereo_output` enables the voice pan
-    /// and the choir has more than one voice.
-    pub choir_spread_percent: f32,
+    /// [`VoiceModeConfig::Harmony`] renders the lead voice and a maximum of
+    /// four harmony voices.
+    pub mode: VoiceModeConfig,
     /// Enables a stereo pan for each voice. The default is `false`.
     ///
     /// This value is independent of the buffer layout of the process method.
     /// A change to this value resets some audio histories and the feedback.
     /// [`crate::Processor::set_config`] gives the details.
     pub stereo_output: bool,
-    /// The controls for the four harmony voices. The default is MIDI-channel
-    /// allocation.
-    ///
-    /// Validation applies to these controls, and they can receive MIDI, also
-    /// while Choir is selected.
-    pub harmony: HarmonyConfig,
-    /// The pan gain of the harmony voices, 0..=1. The default is 0.5.
-    ///
-    /// The code applies this gain only if `stereo_output` is `true`. The
-    /// harmony path without pan does not use this control. It does not scale
-    /// the lead voice.
-    pub harmony_gain: f32,
     /// The modulation depth, 0..=24, without a unit. The default is 0 (off).
     ///
     /// The code multiplies the control by two and truncates it to an integer.
@@ -260,14 +317,8 @@ impl Default for ResynthesisConfig {
             correction: CorrectionConfig::default(),
             pitch_ratio: 1.0,
             formant: FormantConfig::default(),
-            mode: MultiVoiceMode::Choir,
-            choir_voices: 1,
-            choir_detune: 50.0,
-            choir_delay: 60.0,
-            choir_spread_percent: 100.0,
+            mode: VoiceModeConfig::default(),
             stereo_output: false,
-            harmony: HarmonyConfig::default(),
-            harmony_gain: 0.5,
             harmonic_modulation: 0.0,
             dry_mix: 0.0,
             random_seed: 0x1234_abcd,
@@ -276,38 +327,27 @@ impl Default for ResynthesisConfig {
 }
 
 impl ResynthesisConfig {
-    /// Validates all fields, also the settings for stages that are disabled
-    /// or not active.
+    /// Validates all fields, also the settings for stages that are disabled.
     ///
     /// Each floating-point control must be finite and in its documented
-    /// inclusive range. `choir_voices` must be in 1..=16. Validation does not
-    /// clamp values. It does not change the state of the processor.
+    /// inclusive range. Validation checks the active [`VoiceModeConfig`]
+    /// variant. It does not clamp values and does not change the state of the
+    /// processor.
     ///
     /// # Errors
     ///
     /// Returns the first [`Error::InvalidConfig`], with the dotted path of the
-    /// field and the problem. For an array control in `harmony`, the error
+    /// field and the problem. For an array control in harmony, the error
     /// identifies the array field, not the index of an element.
     pub fn validate(self) -> Result<(), Error> {
         self.pitch.validate()?;
         self.correction.validate()?;
         self.formant.validate()?;
-        self.harmony.validate()?;
+        self.mode.validate()?;
         check_range("resynthesis.pitch_ratio", self.pitch_ratio, 0.25, 4.0)?;
-        check_range("resynthesis.choir_detune", self.choir_detune, 10.0, 100.0)?;
-        check_range("resynthesis.choir_delay", self.choir_delay, 20.0, 200.0)?;
-        let field = "resynthesis.choir_spread_percent";
-        check_range(field, self.choir_spread_percent, 0.0, 100.0)?;
-        check_range("resynthesis.harmony_gain", self.harmony_gain, 0.0, 1.0)?;
         let field = "resynthesis.harmonic_modulation";
         check_range(field, self.harmonic_modulation, 0.0, 24.0)?;
-        check_range("resynthesis.dry_mix", self.dry_mix, 0.0, 1.0)?;
-        check_count(
-            "resynthesis.choir_voices",
-            i64::from(self.choir_voices),
-            1,
-            16,
-        )
+        check_range("resynthesis.dry_mix", self.dry_mix, 0.0, 1.0)
     }
 }
 
@@ -419,8 +459,10 @@ pub(crate) struct Resynthesis {
     /// The Q14 left and right gains of the choir voices. The code reads them
     /// only if the stereo pan is enabled.
     pan: [[Q14; 2]; 16],
-    /// The Q14 pan gains of the harmony voices. They include the configured
-    /// harmony level.
+    /// The Q14 linear gain of the harmony voices in mono mode.
+    harmony_level: Q14,
+    /// The Q14 stereo pan gains of the harmony voices. They include the
+    /// configured harmony level.
     harmony_pan: [[Q14; 2]; HARMONY_VOICES],
     /// The last Q14 target ratios from the harmony controller.
     harmony_ratios: [Q14; HARMONY_VOICES],
@@ -431,9 +473,6 @@ pub(crate) struct Resynthesis {
     /// the last frame. In Choir mode, only the lead slot changes. Only the
     /// telemetry reads them.
     voice_ratios: [Q14; HARMONY_VOICES + 1],
-    /// The signed history frame that the formant model used for the last
-    /// frame. The audio path sets it, and only the formant envelope reads it.
-    formant_position: i32,
     /// Two cascaded anti-alias filter sections. If the shift is not upward,
     /// they have coefficients of 1.0 and zero.
     post: [Biquad; 2],
@@ -487,6 +526,10 @@ pub(crate) struct Resynthesis {
 impl Resynthesis {
     /// Creates the state from a configuration that the public API validated.
     pub(crate) fn new(rate: SampleRate, config: ResynthesisConfig) -> Self {
+        let initial_harmony = match config.mode {
+            VoiceModeConfig::Harmony { harmony, .. } => harmony,
+            VoiceModeConfig::Choir { .. } => HarmonyConfig::default(),
+        };
         let mut result = Self {
             rate,
             config,
@@ -502,7 +545,7 @@ impl Resynthesis {
                 })
             },
             formant: Formant::new(rate, config.formant),
-            harmony: HarmonyState::new(rate, config.harmony),
+            harmony: HarmonyState::new(rate, initial_harmony),
             scale: {
                 // The initial chromatic table uses 44.1 kHz periods at the two
                 // rates. If the notes load again, the periods for the
@@ -526,11 +569,11 @@ impl Resynthesis {
             drift: [Q14::ZERO; 16],
             drift_ratio: [Q14::ONE; 16],
             pan: [[Q14::ONE; 2]; 16],
+            harmony_level: Q14::from_f64(0.5),
             harmony_pan: [[Q14::ZERO; 2]; HARMONY_VOICES],
             harmony_ratios: [Q14::ONE; HARMONY_VOICES],
             harmony_gains: [Q12::ZERO; HARMONY_VOICES],
             voice_ratios: [Q14::ONE; HARMONY_VOICES + 1],
-            formant_position: 0,
             post: [Biquad::new(), Biquad::new()],
             correction: Q14::ONE,
             correction_decay: Q14::ZERO,
@@ -555,13 +598,11 @@ impl Resynthesis {
         result
     }
 
-    /// Quantizes the controls and calculates the decay coefficients and the
-    /// voice pan gains again.
+    /// Quantizes the controls and calculates the decay coefficients, the
+    /// harmony level and the voice pan gains again.
     ///
     /// The coefficients are the correction decay, the drift decay and the
     /// drift amount. The histories and the controller phase do not change.
-    /// The harmony level is part of the stereo pan gains. Thus, the path
-    /// without pan never applies that control.
     fn configure_coefficients(&mut self) {
         self.shift = Q14::from_f64(self.config.pitch_ratio as f64);
         self.modulation = (self.config.harmonic_modulation as f64 / 8.0 * 16.0) as i32;
@@ -575,29 +616,40 @@ impl Resynthesis {
         let base = (self.rate.hz() / 100.0) as f64 * 0.2;
         let decay = (-std::f64::consts::LN_2 / base).exp();
         self.drift_decay = Q14::from_f64(decay);
-        self.drift_amount = Q14::from_f64((1.0 - decay) * 0.008 * self.config.choir_detune as f64);
-        for voice in 0..self.config.choir_voices as usize {
-            if self.config.choir_voices > 1 {
-                let normalized =
-                    (voice as f64 + voice as f64) / (self.config.choir_voices as f64 - 1.0) - 1.0;
-                let angle = 0.785398163565
-                    - (self.config.choir_spread_percent as f64 * 0.785398163565 * 0.01)
-                        * normalized;
-                self.pan[voice] = [Q14::from_f64(angle.cos()), Q14::from_f64(angle.sin())];
-            } else {
-                self.pan[voice] = [Q14::ONE; 2];
+        match self.config.mode {
+            VoiceModeConfig::Choir {
+                voices,
+                detune,
+                spread_percent,
+                ..
+            } => {
+                self.drift_amount = Q14::from_f64((1.0 - decay) * 0.008 * detune as f64);
+                for voice in 0..voices as usize {
+                    if voices > 1 {
+                        let normalized =
+                            (voice as f64 + voice as f64) / (voices as f64 - 1.0) - 1.0;
+                        let angle = 0.785398163565
+                            - (spread_percent as f64 * 0.785398163565 * 0.01) * normalized;
+                        self.pan[voice] = [Q14::from_f64(angle.cos()), Q14::from_f64(angle.sin())];
+                    } else {
+                        self.pan[voice] = [Q14::ONE; 2];
+                    }
+                }
             }
-        }
-        for (voice, fraction) in [0.3333333333333333, 0.6666666666666666, 0.0, 1.0]
-            .into_iter()
-            .enumerate()
-        {
-            let angle: f64 = 1.57079632713 * fraction;
-            let gain = self.config.harmony_gain as f64;
-            self.harmony_pan[voice] = [
-                Q14::from_f64(gain * angle.cos()),
-                Q14::from_f64(gain * angle.sin()),
-            ];
+            VoiceModeConfig::Harmony { harmony_gain, .. } => {
+                let gain = harmony_gain as f64;
+                self.harmony_level = Q14::from_f64(gain);
+                for (voice, fraction) in [0.3333333333333333, 0.6666666666666666, 0.0, 1.0]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let angle: f64 = 1.57079632713 * fraction;
+                    self.harmony_pan[voice] = [
+                        Q14::from_f64(gain * angle.cos()),
+                        Q14::from_f64(gain * angle.sin()),
+                    ];
+                }
+            }
         }
     }
 
@@ -625,10 +677,9 @@ impl Resynthesis {
     /// Harmony uses offsets of zero. This function moves the readers. It does
     /// not clear the audio histories, the drift or the overlap buffer.
     fn create_delays(&mut self) {
-        let parameter = if self.config.mode == MultiVoiceMode::Choir {
-            self.config.choir_delay
-        } else {
-            0.0
+        let parameter = match self.config.mode {
+            VoiceModeConfig::Choir { delay, .. } => delay,
+            VoiceModeConfig::Harmony { .. } => 0.0,
         };
         for (voice, seed) in SEEDS.iter().enumerate() {
             self.delays[voice] = (*seed as f64 * (parameter as f64 * 0.005)) as i32;
@@ -641,9 +692,17 @@ impl Resynthesis {
     pub(crate) fn apply_config(&mut self, config: ResynthesisConfig) {
         let old = self.config;
         self.config = config;
+        let was_tracking = !self.pitch.is_detecting();
         self.pitch.set_config(config.pitch);
+        if was_tracking && self.pitch.is_detecting() {
+            self.correction = Q14::ONE;
+            self.scale_initialized = false;
+            self.periods[self.write] = Q6::ZERO;
+        }
         self.formant.set_config(config.formant);
-        self.harmony.apply_config(config.harmony);
+        if let VoiceModeConfig::Harmony { harmony, .. } = config.mode {
+            self.harmony.apply_config(harmony);
+        }
         if old.correction.notes != config.correction.notes
             || old.correction.enabled != config.correction.enabled
         {
@@ -653,12 +712,34 @@ impl Resynthesis {
         if old.pitch_ratio != config.pitch_ratio {
             self.configure_shift_filters();
         }
-        if old.mode != config.mode || old.choir_delay != config.choir_delay {
+        let delay_changed = match (old.mode, config.mode) {
+            (
+                VoiceModeConfig::Choir {
+                    delay: old_delay, ..
+                },
+                VoiceModeConfig::Choir {
+                    delay: new_delay, ..
+                },
+            ) => old_delay != new_delay,
+            (VoiceModeConfig::Harmony { .. }, VoiceModeConfig::Harmony { .. }) => false,
+            _ => true,
+        };
+        if delay_changed {
             self.create_delays();
         }
-        if old.choir_voices < config.choir_voices {
-            for voice in old.choir_voices as usize..config.choir_voices as usize {
-                self.positions[voice] = self.positions[0];
+        if let (
+            VoiceModeConfig::Choir {
+                voices: old_voices, ..
+            },
+            VoiceModeConfig::Choir {
+                voices: new_voices, ..
+            },
+        ) = (old.mode, config.mode)
+        {
+            if old_voices < new_voices {
+                for voice in old_voices as usize..new_voices as usize {
+                    self.positions[voice] = self.positions[0];
+                }
             }
         }
         self.configure_coefficients();
@@ -713,7 +794,6 @@ impl Resynthesis {
         self.fade = Q14::ONE;
         self.harmony_ratios.fill(Q14::ONE);
         self.voice_ratios.fill(Q14::ONE);
-        self.formant_position = 0;
         self.current_output_period = Q6::ZERO;
         self.correction = Q14::ONE;
         self.scale_initialized = false;
@@ -756,20 +836,13 @@ impl Resynthesis {
             }
     }
     /// Converts the latest period to samples and hertz and applies the
-    /// current report limits.
+    /// current pitch limits.
     ///
     /// The analysis does not advance, and the correction does not change.
     pub(crate) fn estimate(&self) -> PitchEstimate {
-        let period = (self.periods[self.write].to_bits() as f64 / 64.0) as f32;
-        self.config.pitch.report(PitchEstimate {
-            period_samples: period,
-            frequency_hz: if period > 0.0 {
-                self.rate.hz() / period
-            } else {
-                0.0
-            },
-            voiced: period > 0.0,
-        })
+        self.config
+            .pitch
+            .estimate(self.rate, self.periods[self.write])
     }
     /// Returns the current Q14 correction factor as f32. The result does not
     /// include other ratios.
@@ -801,41 +874,49 @@ impl Resynthesis {
     pub(crate) fn is_tracking(&self) -> bool {
         !self.pitch.is_detecting()
     }
-    /// Writes the effective ratio and the linear gain of each voice from the
-    /// last frame, and returns the number of voices.
+    /// Writes the effective ratio and the linear gain of each active voice
+    /// from the last frame, and returns the number of voices.
     ///
-    /// Slot zero is the lead. In Harmony mode, slots 1 to 4 are the harmony
-    /// voices, and the gain is the envelope of the harmony controller. In
-    /// Choir mode, the slots after the lead are the secondary voices with a
-    /// gain of 1. Each ratio includes the correction, the global shift and
-    /// the ratio of the voice. The entries after the count do not change.
+    /// Slot zero is the lead. In Harmony mode, the slots after the lead are
+    /// the harmony voices that sound, and the gain is the envelope of the
+    /// harmony controller. In Choir mode, the slots after the lead are the
+    /// secondary voices with a gain of 1. Each ratio includes the correction,
+    /// the global shift and the ratio of the voice. The entries after the
+    /// count do not change.
     pub(crate) fn voices(&self, ratios: &mut [f32; 16], gains: &mut [f32; 16]) -> u8 {
         let lead = (self.voice_ratios[0].to_bits() as f64 / 16384.0) as f32;
         ratios[0] = lead;
         gains[0] = 1.0;
-        if self.config.mode == MultiVoiceMode::Choir {
-            let count = self.config.choir_voices as usize;
-            for voice in 1..count {
-                ratios[voice] =
-                    (lead as f64 * self.drift_ratio[voice].to_bits() as f64 / 16384.0) as f32;
-                gains[voice] = 1.0;
+        match self.config.mode {
+            VoiceModeConfig::Choir { voices, .. } => {
+                let count = voices as usize;
+                for voice in 1..count {
+                    ratios[voice] =
+                        (lead as f64 * self.drift_ratio[voice].to_bits() as f64 / 16384.0) as f32;
+                    gains[voice] = 1.0;
+                }
+                count as u8
             }
-            count as u8
-        } else {
-            for voice in 0..HARMONY_VOICES {
-                ratios[voice + 1] =
-                    (self.voice_ratios[voice + 1].to_bits() as f64 / 16384.0) as f32;
-                gains[voice + 1] = (self.harmony_gains[voice].to_bits() as f64 / 4096.0) as f32;
+            VoiceModeConfig::Harmony { .. } => {
+                let mut count = 1;
+                for voice in 0..HARMONY_VOICES {
+                    if self.harmony_gains[voice] > Q12::ZERO {
+                        ratios[count] =
+                            (self.voice_ratios[voice + 1].to_bits() as f64 / 16384.0) as f32;
+                        gains[count] = (self.harmony_gains[voice].to_bits() as f64 / 4096.0) as f32;
+                        count += 1;
+                    }
+                }
+                count as u8
             }
-            (HARMONY_VOICES + 1) as u8
         }
     }
-    /// Returns the wrapping count of formant model designs.
+    /// Returns the wrapping count of formant model designs and preview updates.
     pub(crate) fn formant_generation(&self) -> u32 {
         self.formant.generation()
     }
-    /// Writes the formant envelopes of the model that the audio used for the
-    /// last frame. Refer to `Formant::envelope`.
+    /// Writes the formant envelopes of the latest analysis predictor and the
+    /// current preview model. Refer to `Formant::envelope`.
     ///
     /// Returns `false` and fills the slices with zeros if the formant stage
     /// is disabled or has no model. The slices must have the same length.
@@ -850,8 +931,7 @@ impl Resynthesis {
             output.fill(0.0);
             return false;
         }
-        self.formant
-            .envelope(self.formant_position, max_frequency_hz, input, output)
+        self.formant.envelope(max_frequency_hz, input, output)
     }
     /// Selects a target in the period domain and smooths the Q14 correction
     /// ratio.
@@ -1008,10 +1088,10 @@ impl Resynthesis {
             self.fade = (self.fade + FADE_STEP).min(Q14::ONE);
         }
         if self.config.formant.enabled {
-            self.formant_position = center - FORMANT_OFFSET_FRAMES;
+            let formant_position = center - FORMANT_OFFSET_FRAMES;
             value = Q14::from_bits(self.formant.forward(
                 value.to_bits(),
-                self.formant_position,
+                formant_position,
                 numeric,
             ));
             value = Q14::from_bits(
@@ -1053,10 +1133,9 @@ impl Resynthesis {
         // to each fractional position. This keeps the distances that the jump
         // detection uses.
         if write == 0 {
-            let voices = if self.config.mode == MultiVoiceMode::Choir {
-                self.config.choir_voices as usize
-            } else {
-                5
+            let voices = match self.config.mode {
+                VoiceModeConfig::Choir { voices, .. } => voices as usize,
+                VoiceModeConfig::Harmony { .. } => 5,
             };
             for voice in 0..voices {
                 self.positions[voice] = self.positions[voice] - position_of(HISTORY as i32);
@@ -1077,19 +1156,21 @@ impl Resynthesis {
         // this frame, the choir drift counter starts on the next frame. Read
         // random values in voice order, so that the stream that aspiration
         // also uses stays aligned.
-        if was_tracking && self.config.mode == MultiVoiceMode::Choir {
-            let counter = self.control_counter;
-            self.control_counter += 1;
-            if counter == CONTROL_DUE {
-                self.control_counter = 0;
-                for voice in 1..self.config.choir_voices as usize {
-                    let random = Q14::from_bits((numeric.random.next_u31() >> 17) - 8192);
-                    self.drift[voice] = (self.drift_decay.mul(self.drift[voice])
-                        + self.drift_amount.mul(random))
-                    .clamp(-DRIFT_LIMIT, DRIFT_LIMIT);
-                    self.drift_ratio[voice] = self.drift[voice] + Q14::ONE;
+        if was_tracking {
+            if let VoiceModeConfig::Choir { voices, .. } = self.config.mode {
+                let counter = self.control_counter;
+                self.control_counter += 1;
+                if counter == CONTROL_DUE {
+                    self.control_counter = 0;
+                    for voice in 1..voices as usize {
+                        let random = Q14::from_bits((numeric.random.next_u31() >> 17) - 8192);
+                        self.drift[voice] = (self.drift_decay.mul(self.drift[voice])
+                            + self.drift_amount.mul(random))
+                        .clamp(-DRIFT_LIMIT, DRIFT_LIMIT);
+                        self.drift_ratio[voice] = self.drift[voice] + Q14::ONE;
+                    }
+                    self.drift_ratio[0] = Q14::ONE;
                 }
-                self.drift_ratio[0] = Q14::ONE;
             }
         }
         self.periods[write] = step.period;
@@ -1124,8 +1205,8 @@ impl Resynthesis {
         let dry = self.raw[delayed];
         let mut mix = [Q14::ZERO; 2];
         let mut final_ratio = Q14::ONE;
-        if self.config.mode == MultiVoiceMode::Choir {
-            let voice_count = self.config.choir_voices as usize;
+        if let VoiceModeConfig::Choir { voices, .. } = self.config.mode {
+            let voice_count = voices as usize;
             // Secondary voices read the lead history written by voice zero.
             {
                 let (value, ratio) = self.render_lead(delayed, numeric);
@@ -1239,18 +1320,20 @@ impl Resynthesis {
                 }
                 for (channel, sum) in mix.iter_mut().enumerate() {
                     *sum = *sum
-                        + if self.config.stereo_output && slot > 0 {
+                        + if slot == 0 {
+                            value
+                        } else if self.config.stereo_output {
                             value.mul(self.harmony_pan[slot - 1][channel])
                         } else {
-                            value
+                            value.mul(self.harmony_level)
                         };
                 }
             }
             if self.config.formant.enabled {
-                self.formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
+                let formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
                 mix = self
                     .formant
-                    .forward_stereo(mix.map(Q14::to_bits), self.formant_position, numeric)
+                    .forward_stereo(mix.map(Q14::to_bits), formant_position, numeric)
                     .map(Q14::from_bits);
                 for (channel, value) in mix.iter_mut().enumerate() {
                     *value =

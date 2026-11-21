@@ -17,9 +17,9 @@
 //! Configuration objects obey these rules:
 //!
 //! - Field names use camelCase.
-//! - Enum values are strings.
-//! - Each object must contain all required fields.
-//! - The optional harmony `voices` field defaults to 4.
+//! - Enum values are strings, and mode unions use a `type` tag.
+//! - Each object must contain all required fields of its selected variant.
+//! - On interval harmony sources, the optional `voices` field defaults to 4.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
 //! `{ type, value }`, and the reset control has no `value`. MIDI messages use
@@ -364,7 +364,7 @@ impl WasmProcessor {
     ///
     /// - The kept pitch estimate is unvoiced. This includes the time before
     ///   the first detection and after a reset or a drain completion.
-    /// - The estimated frequency is outside the inclusive reporting bounds
+    /// - The estimated frequency is outside the inclusive pitch bounds
     ///   `minFrequencyHz` and `maxFrequencyHz` of the pitch configuration.
     ///
     /// # Errors

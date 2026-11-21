@@ -24,7 +24,7 @@ pub enum Error {
     /// A configuration field is not valid.
     ///
     /// `field` is the dotted path of the field from the root configuration,
-    /// for example `"resynthesis.choir_detune"`, `"reverb.mix"` or
+    /// for example `"resynthesis.mode.detune"`, `"reverb.mix"` or
     /// `"prepare.max_block_frames"`.
     InvalidConfig {
         /// The dotted path of the field from the root configuration.

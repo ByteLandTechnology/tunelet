@@ -7,7 +7,7 @@
 //! sorted. If two candidates have the same score, the traversal order selects
 //! the result.
 
-use super::{HarmonyConfig, HarmonySource, HARMONY_VOICES};
+use super::{HarmonyConfig, HarmonySourceConfig, HARMONY_VOICES};
 use crate::numeric::fixed::{Q12, Q6};
 
 /// Seven semitone offsets of the degrees for each `HarmonyScale`.
@@ -86,20 +86,52 @@ pub(super) fn voice_chord(
 ) -> ([i32; HARMONY_VOICES], [Q12; HARMONY_VOICES], usize) {
     let mut tones = [0; HARMONY_VOICES];
     let mut gains = [-Q12::ONE; HARMONY_VOICES];
-    let count = match config.source {
-        HarmonySource::ChordByDegree => {
-            let chord = DEGREE[config.degree as usize];
-            for (tone, &degree) in tones.iter_mut().zip(chord) {
-                *tone = degree / 7 * 12 + SCALE_TONES[config.scale as usize][(degree % 7) as usize];
+    let (count, register_percent, voicing_spread_percent) = match config.source {
+        HarmonySourceConfig::ChordByDegree {
+            key,
+            scale,
+            degree,
+            inversion,
+            register_percent,
+            voicing_spread_percent,
+        } => {
+            let chord = DEGREE[degree as usize];
+            for (tone, &step) in tones.iter_mut().zip(chord) {
+                *tone = step / 7 * 12 + SCALE_TONES[scale as usize][(step % 7) as usize];
             }
-            chord.len()
+            let count = chord.len();
+            for _ in 0..inversion as u8 {
+                tones[..count].rotate_left(1);
+                tones[count - 1] += 12;
+            }
+            for tone in &mut tones[..count] {
+                *tone += i32::from(key.semitone());
+            }
+            (count, register_percent, voicing_spread_percent)
         }
-        HarmonySource::ChordByName => {
-            let chord = NAMED[config.chord as usize];
-            tones[..chord.len()].copy_from_slice(chord);
-            chord.len()
+        HarmonySourceConfig::ChordByName {
+            key,
+            chord,
+            inversion,
+            register_percent,
+            voicing_spread_percent,
+        } => {
+            let chord = NAMED[chord as usize];
+            let count = chord.len();
+            tones[..count].copy_from_slice(chord);
+            for _ in 0..inversion as u8 {
+                tones[..count].rotate_left(1);
+                tones[count - 1] += 12;
+            }
+            for tone in &mut tones[..count] {
+                *tone += i32::from(key.semitone());
+            }
+            (count, register_percent, voicing_spread_percent)
         }
-        HarmonySource::ChordViaMidi => {
+        HarmonySourceConfig::ChordViaMidi {
+            register_percent,
+            voicing_spread_percent,
+        } => {
             let mut count = 0;
             for voice in 0..HARMONY_VOICES {
                 if midi_period[voice] != Q6::ZERO {
@@ -109,35 +141,23 @@ pub(super) fn voice_chord(
                 }
             }
             sort(&mut tones, &mut gains, count);
-            count
+            (count, register_percent, voicing_spread_percent)
         }
-        _ => 0,
+        _ => (0, 0.0, 0.0),
     };
     if count == 0 {
         return (tones, gains, 0);
     }
-    if matches!(
-        config.source,
-        HarmonySource::ChordByDegree | HarmonySource::ChordByName
-    ) {
-        for _ in 0..config.inversion as u8 {
-            tones[..count].rotate_left(1);
-            tones[count - 1] += 12;
-        }
-        for tone in &mut tones[..count] {
-            *tone += i32::from(config.key.semitone());
-        }
-    }
     let low = (tones[0] + 24) / 12;
     let high = (21 - tones[count - 1]) / 12;
-    let register = f64::from(config.register_percent as i32) / 100.0;
+    let register = f64::from(register_percent as i32) / 100.0;
     let shift =
         (-(f64::from(low) + 0.49) * (1.0 - register) + (f64::from(high) + 0.49) * register) as f32;
     let shift = shift.round() as i32;
     for tone in &mut tones[..count] {
         *tone += shift * 12;
     }
-    let spread = f64::from(config.voicing_spread_percent as i32) / 100.0;
+    let spread = f64::from(voicing_spread_percent as i32) / 100.0;
     let top = ((f64::from(tones[count - 1]) + 0.49) * (1.0 - spread) + spread * 21.49) as f32;
     let max_note = top.round() as i32;
     let mut best = [0; HARMONY_VOICES];

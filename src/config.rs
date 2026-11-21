@@ -188,7 +188,7 @@ impl ProcessorConfig {
     ///
     /// The validation uses the signal order: Punch, Warm, resynthesis, Alien,
     /// reverb, then output gain. It includes disabled stages and the controls
-    /// of voice modes that are not active.
+    /// of the selected voice mode and reverb network.
     ///
     /// # Errors
     ///

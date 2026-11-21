@@ -2,16 +2,18 @@
 //! estimates.
 //!
 //! Acquisition checks that repeated minima agree. Tracking refines the period
-//! in a window of 40 lags. The reporting bounds filter only the feedback to
-//! the host.
+//! in a window of 40 lags. The frequency bounds limit tracking, pitch
+//! correction and feedback reports to the host.
 
 mod search;
 pub(crate) mod tracker;
 
 use crate::error::{check_range, ConfigProblem};
-use crate::Error;
+use crate::numeric::fixed::Q6;
+use crate::{Error, SampleRate};
 
-/// The acquisition sensitivity and the bounds for pitch reports to the host.
+/// The acquisition sensitivity and the frequency bounds for tracking,
+/// correction and host feedback.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -26,18 +28,17 @@ pub struct PitchConfig {
     /// This value controls acquisition. It is not an output gain or an
     /// amplitude gate.
     pub threshold: f32,
-    /// The lower bound of the feedback in hertz (inclusive), 40..=2000.
+    /// The lower frequency bound in hertz (inclusive), 40..=2000.
     ///
     /// The default is 40. It must be strictly less than `max_frequency_hz`.
-    /// These bounds do not change the tracking, the correction or the
-    /// resampling. A feedback query applies the current bounds to the kept
-    /// analysis. It does not process another sample.
+    /// Pitches below this bound bypass correction and are reported as
+    /// unvoiced.
     pub min_frequency_hz: f32,
-    /// The upper bound of the feedback in hertz (inclusive), 40..=2000.
+    /// The upper frequency bound in hertz (inclusive), 40..=2000.
     ///
     /// The default is 1100. It must be strictly greater than
-    /// `min_frequency_hz`. Results outside the bounds are reported as
-    /// unvoiced, with zero frequency and zero period.
+    /// `min_frequency_hz`. Pitches above this bound bypass correction and are
+    /// reported as unvoiced, with zero frequency and zero period.
     pub max_frequency_hz: f32,
 }
 
@@ -52,17 +53,37 @@ impl Default for PitchConfig {
 }
 
 impl PitchConfig {
-    /// Applies only the bounds for host reports to a kept estimate.
+    /// Returns the inclusive Q6 period bounds `(min_period, max_period)` for
+    /// `rate`.
     ///
-    /// If the estimate is not voiced or is out of range, the result is the
-    /// unvoiced value with all fields zero. The function does not change the
-    /// tracker state or the correction state.
-    pub(crate) fn report(self, estimate: PitchEstimate) -> PitchEstimate {
-        if estimate.voiced
-            && estimate.frequency_hz >= self.min_frequency_hz
-            && estimate.frequency_hz <= self.max_frequency_hz
-        {
-            estimate
+    /// A small Q6 margin at each limit keeps boundary fundamentals inside the
+    /// range after parabolic quantization.
+    pub(crate) fn period_bounds(self, rate: SampleRate) -> (Q6, Q6) {
+        let hz = f64::from(rate.as_u32()) * 64.0;
+        let low = (hz / f64::from(self.max_frequency_hz)).floor() as i32;
+        let high = (hz / f64::from(self.min_frequency_hz)).ceil() as i32;
+        let min = (low - 16 - (low >> 9)).max(1);
+        let max = high + 16 + (high >> 9);
+        (Q6::from_bits(min), Q6::from_bits(max))
+    }
+
+    /// Converts a Q6 tracked period into a host estimate inside the frequency
+    /// bounds.
+    ///
+    /// If the period is zero or outside the bounds, the result is the unvoiced
+    /// value with all fields zero. The function does not change the tracker
+    /// state or the correction state.
+    pub(crate) fn estimate(self, rate: SampleRate, period_q6: Q6) -> PitchEstimate {
+        let (min_period, max_period) = self.period_bounds(rate);
+        if period_q6 >= min_period && period_q6 <= max_period {
+            let period_samples = (period_q6.to_bits() as f64 / 64.0) as f32;
+            let frequency_hz =
+                (rate.hz() / period_samples).clamp(self.min_frequency_hz, self.max_frequency_hz);
+            PitchEstimate {
+                period_samples,
+                frequency_hz,
+                voiced: true,
+            }
         } else {
             PitchEstimate::default()
         }

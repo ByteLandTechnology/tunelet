@@ -230,7 +230,18 @@ pub(crate) struct Formant {
     /// The Q14 compensation, from the aspiration cutoff divided by the
     /// sample rate.
     noise_amplitude: i32,
-    /// The wrapping count of model designs that the stage tried. Only the
+    /// If `true`, `last_parcor` and `preview_analysis` hold a valid LPC
+    /// predictor.
+    has_parcor: bool,
+    /// The Q14 reflection coefficients from the latest valid LPC analysis.
+    last_parcor: [i32; ORDER],
+    /// The Q14 analysis predictor coefficients for the envelope preview.
+    preview_analysis: [i32; ORDER],
+    /// The preallocated Q14 synthesis model for the envelope preview.
+    preview_model: [i32; MAX_ORDER],
+    /// The active synthesis order in `preview_model`. Zero marks no model.
+    preview_order: usize,
+    /// The wrapping count of model designs and preview updates. Only the
     /// telemetry reads it.
     generation: u32,
 }
@@ -276,6 +287,11 @@ impl Formant {
             noise_filter: Biquad::new(),
             noise_gain: 0_i32,
             noise_amplitude: 0_i32,
+            has_parcor: false,
+            last_parcor: [0; ORDER],
+            preview_analysis: [0; ORDER],
+            preview_model: [0; MAX_ORDER],
+            preview_order: 0,
             generation: 0,
         };
         result.set_config(config);
@@ -285,10 +301,15 @@ impl Formant {
     /// Quantizes the validated controls, prepares the Q7 map for the area
     /// interpolation and updates the coefficients of the aspiration filter.
     ///
-    /// The histories do not change. A valid stretch gives a model with 25 to
-    /// 99 entries. Thus, the last point of the map and the denominators of
-    /// the interpolation are always defined.
+    /// If the width or the stretch changes, the stage rebuilds the preview
+    /// model from the latest reflection coefficients. The audio histories do
+    /// not change. A valid stretch gives a model with 25 to 99 entries. Thus,
+    /// the last point of the map and the denominators of the interpolation are
+    /// always defined.
     pub(crate) fn set_config(&mut self, config: FormantConfig) {
+        let shape_changed =
+            self.config.width != config.width || self.config.stretch != config.stretch;
+        let enabled_changed = self.config.enabled != config.enabled;
         self.config = config;
         self.width = (config.width as f64 * 16384.0) as i32;
         self.width_squared = (config.width as f64 * config.width as f64 * 16384.0) as i32;
@@ -307,13 +328,20 @@ impl Formant {
         self.noise_amplitude = (frequency as f64 * 0.8 / self.rate.hz() as f64 * 16384.0) as i32;
         self.noise_filter
             .set_design(Design::high_pass(self.rate.hz(), frequency as f32, 0.707));
+        if shape_changed && self.has_parcor {
+            self.rebuild_preview();
+        }
+        if (config.enabled && shape_changed) || (enabled_changed && self.has_parcor) {
+            self.generation = self.generation.wrapping_add(1);
+        }
     }
     /// Clears the audio, the stamps, the synthesis history and the history of
     /// the aspiration filter.
     ///
-    /// The function also selects and clears the initial bank pair, and starts
-    /// the correlation smoothing again. The other banks stay allocated. The
-    /// stage clears each bank when it uses that bank again.
+    /// The function also clears the preview model, selects and clears the
+    /// initial bank pair, and starts the correlation average again. The other
+    /// banks stay allocated. The stage clears each bank when it uses that bank
+    /// again.
     pub(crate) fn reset(&mut self) {
         self.input.fill(0_i32);
 
@@ -326,6 +354,11 @@ impl Formant {
         self.design_counter = 0;
         self.noise_filter.reset();
         self.smooth_reset = true;
+        self.has_parcor = false;
+        self.last_parcor.fill(0_i32);
+        self.preview_analysis.fill(0_i32);
+        self.preview_model.fill(0_i32);
+        self.preview_order = 0;
     }
     /// Starts a new model and a new correlation window when pitch acquisition
     /// locks.
@@ -578,41 +611,18 @@ impl Formant {
             );
 
             if valid {
-                if self.width != one || self.stretch != one {
-                    if let Some(scale) = lpc::parcor_to_areas(&parcor[..ORDER], &mut self.areas) {
-                        for i in 0..self.stretch_count {
-                            let map = self.stretch_map[i];
-                            let index = map.wrapping_shr(7).min((ORDER - 2) as i32) as usize;
-                            let fraction = map.wrapping_sub((index as i32) << 7).wrapping_shl(7);
-                            self.stretched_areas[i] = mul14(
-                                mul14(one.wrapping_sub(fraction), self.areas[index])
-                                    .wrapping_add(mul14(fraction, self.areas[index + 1])),
-                                self.width_squared,
-                            );
-                            if self.stretched_areas[i] == 0_i32 {
-                                self.stretched_areas[i] = 1;
-                            }
-                        }
-                        if lpc::areas_to_parcor(
-                            &self.stretched_areas[..self.stretch_count],
-                            &mut parcor,
-                            scale,
-                        ) {
-                            lpc::parcor_to_pef(
-                                &parcor[..self.stretch_count],
-                                &mut self.models[self.current],
-                                &mut scratch,
-                                14,
-                            );
-                            self.orders[self.current] = self.stretch_count;
-                        }
-                    }
-                } else {
-                    self.models[self.current][..ORDER]
-                        .copy_from_slice(&self.inverse[self.current][..ORDER]);
-                    self.orders[self.current] = ORDER;
-                }
+                self.has_parcor = true;
+                self.last_parcor.copy_from_slice(&parcor[..ORDER]);
+                self.preview_analysis
+                    .copy_from_slice(&self.inverse[self.current][..ORDER]);
+                self.rebuild_preview();
+                self.models[self.current][..self.preview_order]
+                    .copy_from_slice(&self.preview_model[..self.preview_order]);
+                self.orders[self.current] = self.preview_order;
             } else {
+                self.has_parcor = false;
+                self.preview_model.fill(0_i32);
+                self.preview_order = 0;
                 self.smooth_reset = true;
             }
         }
@@ -624,6 +634,55 @@ impl Formant {
             previous: self.previous,
             blend: self.blend,
         };
+    }
+
+    /// Builds `preview_model` and `preview_order` from `last_parcor` and the
+    /// quantized width and stretch controls.
+    ///
+    /// If the width and the stretch are 1, the preview model is a copy of
+    /// `preview_analysis`. If not, the function converts the reflection
+    /// coefficients into tract areas, interpolates them, and builds the
+    /// synthesis predictor. If the conversion fails, `preview_order` stays
+    /// zero.
+    fn rebuild_preview(&mut self) {
+        self.preview_model.fill(0_i32);
+        self.preview_order = 0;
+        let one = 16384;
+        if self.width != one || self.stretch != one {
+            let mut parcor = [0_i32; MAX_ORDER];
+            let mut scratch = [0_i32; 112];
+            if let Some(scale) = lpc::parcor_to_areas(&self.last_parcor, &mut self.areas) {
+                for i in 0..self.stretch_count {
+                    let map = self.stretch_map[i];
+                    let index = map.wrapping_shr(7).min((ORDER - 2) as i32) as usize;
+                    let fraction = map.wrapping_sub((index as i32) << 7).wrapping_shl(7);
+                    self.stretched_areas[i] = mul14(
+                        mul14(one.wrapping_sub(fraction), self.areas[index])
+                            .wrapping_add(mul14(fraction, self.areas[index + 1])),
+                        self.width_squared,
+                    );
+                    if self.stretched_areas[i] == 0_i32 {
+                        self.stretched_areas[i] = 1;
+                    }
+                }
+                if lpc::areas_to_parcor(
+                    &self.stretched_areas[..self.stretch_count],
+                    &mut parcor,
+                    scale,
+                ) {
+                    lpc::parcor_to_pef(
+                        &parcor[..self.stretch_count],
+                        &mut self.preview_model,
+                        &mut scratch,
+                        14,
+                    );
+                    self.preview_order = self.stretch_count;
+                }
+            }
+        } else {
+            self.preview_model[..ORDER].copy_from_slice(&self.preview_analysis);
+            self.preview_order = ORDER;
+        }
     }
 
     /// Applies the blended 50th-order prediction-error filter to the delayed
@@ -697,27 +756,12 @@ impl Formant {
         }
         order
     }
-    /// Returns the wrapping count of model designs that the stage tried.
+    /// Returns the wrapping count of model designs and preview updates.
     pub(crate) fn generation(&self) -> u32 {
         self.generation
     }
-    /// Finds and blends the analysis coefficients of the stamp at a signed
-    /// history frame, in the same way as [`Self::coefficients`].
-    ///
-    /// The function writes ORDER entries to the start of `output`.
-    fn analysis_coefficients(&self, position: i32, output: &mut [i32; MAX_ORDER]) {
-        let stamp = self.stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
-        if stamp.blend < 16384 {
-            for (i, value) in output[..ORDER].iter_mut().enumerate() {
-                *value = mul14(16384 - stamp.blend, self.inverse[stamp.previous][i])
-                    .wrapping_add(mul14(stamp.blend, self.inverse[stamp.current][i]));
-            }
-        } else {
-            output[..ORDER].copy_from_slice(&self.inverse[stamp.current][..ORDER]);
-        }
-    }
-    /// Writes the magnitude response of the two models of the stamp at a
-    /// signed history frame. This function is for telemetry only.
+    /// Writes the magnitude response of the latest analysis predictor and the
+    /// current preview synthesis model. This function is for telemetry only.
     ///
     /// `input` gets the vocal-tract envelope from the analysis. `output` gets
     /// the envelope of the synthesis model, which includes the width gain.
@@ -726,25 +770,21 @@ impl Formant {
     /// linear and have no absolute level, because the analysis normalizes the
     /// signal energy.
     ///
-    /// Returns `false` and fills the slices with zeros if the stamp has no
-    /// synthesis model. The slices must have the same length. The function
-    /// does not allocate memory and does not change the stage.
+    /// Returns `false` and fills the slices with zeros if the stage has no
+    /// synthesis preview model. The slices must have the same length. The
+    /// function does not allocate memory and does not change the stage.
     pub(crate) fn envelope(
         &self,
-        position: i32,
         max_frequency_hz: f32,
         input: &mut [f32],
         output: &mut [f32],
     ) -> bool {
-        let mut synthesis = [0; MAX_ORDER];
-        let order = self.coefficients(position, &mut synthesis);
+        let order = self.preview_order;
         if order == 0 {
             input.fill(0.0);
             output.fill(0.0);
             return false;
         }
-        let mut analysis = [0; MAX_ORDER];
-        self.analysis_coefficients(position, &mut analysis);
         let points = input.len();
         let step = if points > 1 {
             std::f64::consts::PI * 2.0 * max_frequency_hz as f64
@@ -773,8 +813,9 @@ impl Formant {
             let emphasis = ((1.0 - glottal * cosine).powi(2) + (glottal * sine).powi(2))
                 .sqrt()
                 .max(1e-6);
-            *input = (1.0 / (magnitude(&analysis[..ORDER], cosine, sine) * emphasis)) as f32;
-            *output = (width / (magnitude(&synthesis[..order], cosine, sine) * emphasis)) as f32;
+            *input = (1.0 / (magnitude(&self.preview_analysis, cosine, sine) * emphasis)) as f32;
+            *output =
+                (width / (magnitude(&self.preview_model[..order], cosine, sine) * emphasis)) as f32;
         }
         true
     }

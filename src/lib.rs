@@ -15,8 +15,8 @@
 //! are inclusive, unless the documentation tells you differently.
 //! Floating-point controls must be finite.
 //!
-//! Validation also examines disabled stages and the controls of voice modes
-//! that are not active.
+//! Validation also examines disabled stages and the controls of the selected
+//! voice mode and reverb network.
 //!
 //! A configuration value is a copy. If you change it, the processor does not
 //! change until [`Processor::set_config`] or a configuration event applies it.
@@ -51,10 +51,9 @@
 //! [`Processor::feedback`] gives the pitch, the correction ratio, the
 //! accumulated stereo peak and the frame count.
 //! [`Processor::take_feedback`] also clears the peak window. The pitch
-//! reporting bounds change only the reports. They do not change the detection
-//! or the audio signal. [`Processor::latency_frames`] gives a nominal
-//! resynthesis delay. Voice delays, pitch changes and effects have their own
-//! timing.
+//! bounds apply to both correction and the feedback reports.
+//! [`Processor::latency_frames`] gives a nominal resynthesis delay. Voice
+//! delays, pitch changes and effects have their own timing.
 //!
 //! [`Processor::telemetry`] gives data for meters and displays: the ratio and
 //! the gain of each voice, the input and output peaks, the pitch clarity and
@@ -124,16 +123,17 @@ pub mod wasm;
 pub use config::{PrepareConfig, ProcessorConfig, SampleRate};
 pub use effects::alien::AlienConfig;
 pub use effects::punch::PunchConfig;
-pub use effects::reverb::{ReverbConfig, ReverbMode};
+pub use effects::reverb::{ReverbConfig, ReverbNetwork};
 pub use effects::warm::WarmConfig;
 pub use error::{ConfigProblem, Error, EventProblem};
 pub use events::{ControlEvent, TimedEvent};
 pub use formant::FormantConfig;
 pub use harmony::{
-    ChordDegree, ChordName, HarmonyConfig, HarmonyScale, HarmonySource, Inversion, HARMONY_VOICES,
+    ChordDegree, ChordName, HarmonyConfig, HarmonyScale, HarmonySourceConfig, Inversion,
+    HARMONY_VOICES,
 };
 pub use midi::MidiEvent;
 pub use pitch::PitchConfig;
 pub use processor::{Feedback, Processor, Telemetry};
-pub use resynthesis::{CorrectionConfig, MultiVoiceMode, ResynthesisConfig};
+pub use resynthesis::{CorrectionConfig, ResynthesisConfig, VoiceModeConfig};
 pub use scale::{CorrectionScale, NoteMask, PitchClass};

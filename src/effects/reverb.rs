@@ -5,43 +5,164 @@ use crate::filter::{Biquad, Design};
 use crate::numeric::fixed::{Fixed, Q14};
 use crate::{Error, SampleRate};
 
-/// The echo or reverberation network. The default is [`Self::Echo`].
+/// The echo or reverberation network, with the controls that apply to that
+/// network.
 ///
-/// All modes share one delay buffer. A mode change uses the same buffer
-/// contents and damping filter memories. Thus a transition can play audio
-/// from the previous network. The stereo layout of the buffer does not make
-/// all modes give different left and right signals. Schroeder gives the same
+/// The default is [`Self::Echo`], with a diffusion of 0.5 and a decay of 0.6.
+/// All networks share one delay buffer. A network change uses the same buffer
+/// contents and damping filter memories. Thus a transition can play audio from
+/// the previous network. The stereo layout of the buffer does not make all
+/// networks give different left and right signals. Schroeder gives the same
 /// value on the two channels.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
-    serde(rename_all = "camelCase")
+    serde(
+        rename_all = "camelCase",
+        rename_all_fields = "camelCase",
+        tag = "type"
+    )
 )]
-pub enum ReverbMode {
+pub enum ReverbNetwork {
     /// A single feedback echo.
-    #[default]
-    Echo,
+    Echo {
+        /// The distance of the feedback tap without a unit, 0..=1.
+        ///
+        /// The default is 0.5.
+        diffusion: f32,
+        /// The feedback control without a unit, 0..=1.
+        ///
+        /// The default is 0.6. The prepared coefficient is approximately
+        /// `decay / 1.05`. It is less than unity also at the maximum.
+        decay: f32,
+    },
     /// Four parallel comb filters that feed two allpass filters (mono).
-    Schroeder,
+    Schroeder {
+        /// The allpass control without a unit, 0..=1.
+        ///
+        /// The prepared coefficient is approximately `decay / 1.05`.
+        decay: f32,
+    },
     /// A stereo small room.
-    SmallRoom,
+    SmallRoom {
+        /// The feedback control without a unit, 0..=1.
+        ///
+        /// The prepared coefficient is approximately `decay / 1.05`.
+        decay: f32,
+        /// The low-pass cutoff in hertz for the damped paths, 80..=20000.
+        ///
+        /// The preparation also limits it to 0.49 × sample rate. A change of
+        /// the cutoff keeps the sample histories of the filters.
+        brightness_hz: f32,
+    },
     /// A short binaural room.
-    Binaural,
+    Binaural {
+        /// The gain control of the early taps without a unit, 0..=1.
+        diffusion: f32,
+        /// The low-pass cutoff in hertz for the filtered taps, 80..=20000.
+        ///
+        /// The preparation also limits it to 0.49 × sample rate. A change of
+        /// the cutoff keeps the sample histories of the filters.
+        brightness_hz: f32,
+    },
     /// A medium hall.
-    MediumHall,
+    MediumHall {
+        /// The scale of the allpass coefficients without a unit, 0..=1.
+        diffusion: f32,
+        /// The feedback control without a unit, 0..=1.
+        ///
+        /// The prepared coefficient is approximately `decay / 1.05`.
+        decay: f32,
+        /// The low-pass cutoff in hertz for the damped paths, 80..=20000.
+        ///
+        /// The preparation also limits it to 0.49 × sample rate. A change of
+        /// the cutoff keeps the sample histories of the filters.
+        brightness_hz: f32,
+    },
     /// A large hall.
-    LargeHall,
+    LargeHall {
+        /// The scale of the allpass coefficients without a unit, 0..=1.
+        diffusion: f32,
+        /// The feedback control without a unit, 0..=1.
+        ///
+        /// The prepared coefficient is approximately `decay / 1.05`.
+        decay: f32,
+        /// The low-pass cutoff in hertz for the damped paths, 80..=20000.
+        ///
+        /// The preparation also limits it to 0.49 × sample rate. A change of
+        /// the cutoff keeps the sample histories of the filters.
+        brightness_hz: f32,
+    },
 }
-/// The reverb after Alien, with controls for the network, the wet mix and the
-/// decay.
+
+impl Default for ReverbNetwork {
+    fn default() -> Self {
+        Self::Echo {
+            diffusion: 0.5,
+            decay: 0.6,
+        }
+    }
+}
+
+impl ReverbNetwork {
+    /// Validates the controls of the selected network.
+    ///
+    /// Each floating-point control must be finite and in its documented
+    /// inclusive range. Validation does not clamp values and does not change
+    /// processor state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`Error::InvalidConfig`] with its dotted field path
+    /// and the problem.
+    pub fn validate(self) -> Result<(), Error> {
+        match self {
+            Self::Echo { diffusion, decay } => {
+                check_range("reverb.network.diffusion", diffusion, 0.0, 1.0)?;
+                check_range("reverb.network.decay", decay, 0.0, 1.0)
+            }
+            Self::Schroeder { decay } => check_range("reverb.network.decay", decay, 0.0, 1.0),
+            Self::SmallRoom {
+                decay,
+                brightness_hz,
+            } => {
+                check_range("reverb.network.decay", decay, 0.0, 1.0)?;
+                check_range("reverb.network.brightness_hz", brightness_hz, 80.0, 20000.0)
+            }
+            Self::Binaural {
+                diffusion,
+                brightness_hz,
+            } => {
+                check_range("reverb.network.diffusion", diffusion, 0.0, 1.0)?;
+                check_range("reverb.network.brightness_hz", brightness_hz, 80.0, 20000.0)
+            }
+            Self::MediumHall {
+                diffusion,
+                decay,
+                brightness_hz,
+            }
+            | Self::LargeHall {
+                diffusion,
+                decay,
+                brightness_hz,
+            } => {
+                check_range("reverb.network.diffusion", diffusion, 0.0, 1.0)?;
+                check_range("reverb.network.decay", decay, 0.0, 1.0)?;
+                check_range("reverb.network.brightness_hz", brightness_hz, 80.0, 20000.0)
+            }
+        }
+    }
+}
+
+/// The reverb after Alien, with controls for bypass, the wet mix and the
+/// active network.
 ///
 /// The reverb is disabled by default. In bypass, the stage returns the input
 /// and does not advance the delay network or the damping filters. If the
 /// stage is enabled and the mix is zero, the network still operates. A reset
 /// clears the delay buffer but keeps the memories of the damping filters. The
-/// mix, diffusion and decay controls are quantized to Q14. The function of
-/// each control changes with the network.
+/// mix, diffusion and decay controls are quantized to Q14.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -53,51 +174,28 @@ pub struct ReverbConfig {
     /// Enables the selected network. The default is `false`. In bypass, the
     /// histories do not change.
     pub enabled: bool,
-    /// The topology of the delay network. The default is
-    /// [`ReverbMode::Echo`].
-    pub mode: ReverbMode,
     /// The wet fraction, 0..=1.
     ///
     /// The default is 0.5. The dry weight is `1 - mix`. Schroeder and Binaural
-    /// use a mono dry signal. The other modes keep the stereo dry input. If
+    /// use a mono dry signal. The other networks keep the stereo dry input. If
     /// the network is enabled, a zero mix still advances it.
     pub mix: f32,
-    /// The diffusion control without a unit, 0..=1.
-    ///
-    /// The default is 0.5. MediumHall and LargeHall scale their allpass
-    /// coefficients with it. Binaural uses it as the gain of its early taps.
-    /// In Echo, it sets the distance of the feedback tap. Schroeder and
-    /// SmallRoom do not use it.
-    pub diffusion: f32,
-    /// The feedback control without a unit, 0..=1.
-    ///
-    /// The default is 0.6. The prepared coefficient is approximately
-    /// `decay / 1.05`. It is less than unity also at the maximum. This value
-    /// is not a decay time in seconds. Some paths also use fixed feedback
-    /// coefficients. Binaural does not use this control.
-    pub decay: f32,
-    /// The low-pass cutoff in hertz for networks with damped paths, 80..=20000.
-    ///
-    /// The default is 4000 Hz. The preparation also limits it to 0.49 ×
-    /// sample rate. A change of the cutoff keeps the sample histories of the
-    /// filters.
-    pub brightness_hz: f32,
+    /// The delay network and its active controls. The default is
+    /// [`ReverbNetwork::default`].
+    pub network: ReverbNetwork,
 }
 impl Default for ReverbConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            mode: ReverbMode::Echo,
             mix: 0.5,
-            diffusion: 0.5,
-            decay: 0.6,
-            brightness_hz: 4000.0,
+            network: ReverbNetwork::default(),
         }
     }
 }
 impl ReverbConfig {
-    /// Validates all fields, also when the stage is disabled or the selected
-    /// mode does not use a field.
+    /// Validates the wet mix and the active controls of the selected network,
+    /// also when the stage is disabled.
     ///
     /// The floating-point controls must be finite and in their documented
     /// inclusive ranges. Validation does not clamp values. It does not change
@@ -109,9 +207,7 @@ impl ReverbConfig {
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
         check_range("reverb.mix", self.mix, 0.0, 1.0)?;
-        check_range("reverb.diffusion", self.diffusion, 0.0, 1.0)?;
-        check_range("reverb.decay", self.decay, 0.0, 1.0)?;
-        check_range("reverb.brightness_hz", self.brightness_hz, 80.0, 20000.0)
+        self.network.validate()
     }
 }
 
@@ -171,16 +267,22 @@ impl Reverb {
     /// validated controls.
     pub(crate) fn new(rate: SampleRate, config: ReverbConfig) -> Self {
         let layout = reverb_layout(rate.hz());
+        let brightness = 4000.0_f32.min((rate.hz() as f64 * 0.49) as f32);
+        let design = Design::low_pass_one_pole(rate.hz(), brightness);
+        let mut lpf1 = Biquad::new();
+        let mut lpf2 = Biquad::new();
+        lpf1.set_design(design);
+        lpf2.set_design(design);
         let mut result = Self {
             rate,
             config,
             delay: DelayLine::new(layout.capacity),
-            lpf1: Biquad::new(),
-            lpf2: Biquad::new(),
+            lpf1,
+            lpf2,
             taps: layout.taps,
             mix: Q14::default(),
-            diffuse: Q14::default(),
-            decay: Q14::default(),
+            diffuse: Q14::from_f64((0.5_f32 * 100.0) as f64 / 100.0),
+            decay: Q14::from_f64((0.6_f32 * 100.0) as f64 / 105.0),
             binaural_offset: layout.binaural_offset,
             scratch: layout.capacity - 1,
             wet_peak: 0,
@@ -195,14 +297,40 @@ impl Reverb {
     pub(crate) fn set_config(&mut self, config: ReverbConfig) {
         self.config = config;
         self.mix = Q14::from_f64((config.mix * 100.0) as f64 / 100.0);
-        self.diffuse = Q14::from_f64((config.diffusion * 100.0) as f64 / 100.0);
-        self.decay = Q14::from_f64((config.decay * 100.0) as f64 / 105.0);
-        let brightness = config
-            .brightness_hz
-            .min((self.rate.hz() as f64 * 0.49) as f32);
-        let design = Design::low_pass_one_pole(self.rate.hz(), brightness);
-        self.lpf1.set_design(design);
-        self.lpf2.set_design(design);
+        let (diffusion, decay, brightness_hz) = match config.network {
+            ReverbNetwork::Echo { diffusion, decay } => (Some(diffusion), Some(decay), None),
+            ReverbNetwork::Schroeder { decay } => (None, Some(decay), None),
+            ReverbNetwork::SmallRoom {
+                decay,
+                brightness_hz,
+            } => (None, Some(decay), Some(brightness_hz)),
+            ReverbNetwork::Binaural {
+                diffusion,
+                brightness_hz,
+            } => (Some(diffusion), None, Some(brightness_hz)),
+            ReverbNetwork::MediumHall {
+                diffusion,
+                decay,
+                brightness_hz,
+            }
+            | ReverbNetwork::LargeHall {
+                diffusion,
+                decay,
+                brightness_hz,
+            } => (Some(diffusion), Some(decay), Some(brightness_hz)),
+        };
+        if let Some(diffusion) = diffusion {
+            self.diffuse = Q14::from_f64((diffusion * 100.0) as f64 / 100.0);
+        }
+        if let Some(decay) = decay {
+            self.decay = Q14::from_f64((decay * 100.0) as f64 / 105.0);
+        }
+        if let Some(brightness_hz) = brightness_hz {
+            let brightness = brightness_hz.min((self.rate.hz() as f64 * 0.49) as f32);
+            let design = Design::low_pass_one_pole(self.rate.hz(), brightness);
+            self.lpf1.set_design(design);
+            self.lpf2.set_design(design);
+        }
     }
     /// Clears only the delay contents, and keeps the write cursor and the
     /// damping memories.
@@ -232,8 +360,8 @@ impl Reverb {
         if !self.config.enabled {
             return frame;
         }
-        let mut result = match self.config.mode {
-            ReverbMode::Echo => {
+        let mut result = match self.config.network {
+            ReverbNetwork::Echo { .. } => {
                 d.put(mono, t[0]);
                 let echo: Fixed<0> = Fixed::<0>::from_bits(t[39] as i32).mul(self.diffuse);
                 d.comb(t[0], echo.to_bits() as usize, self.decay);
@@ -242,7 +370,7 @@ impl Reverb {
                     mul(right, dry) - mul(self.mix, d.get(t[26]) - d.get(t[31])),
                 ]
             }
-            ReverbMode::Schroeder => {
+            ReverbNetwork::Schroeder { .. } => {
                 for i in [0, 13, 23, 29] {
                     d.put(mono.div::<0, 14>(TWO), t[i]);
                 }
@@ -263,7 +391,7 @@ impl Reverb {
                 let value = mul(mono, dry) + mul(self.mix, d.get(t[45]));
                 [value, value]
             }
-            ReverbMode::SmallRoom => {
+            ReverbNetwork::SmallRoom { .. } => {
                 d.put(left, t[0]);
                 d.put(right, t[40]);
                 for (a, b, g) in [(1, 15, 0.3), (2, 7, 0.7), (8, 14, 0.5), (18, 24, 0.5)] {
@@ -285,7 +413,7 @@ impl Reverb {
                     ),
                 ]
             }
-            ReverbMode::Binaural => {
+            ReverbNetwork::Binaural { .. } => {
                 let seed = t[10];
                 let tap = t[25];
                 let filter = tap + self.binaural_offset;
@@ -306,7 +434,7 @@ impl Reverb {
                 d.lpf(t[40] + filter, &mut self.lpf2);
                 [out, mul(mono, dry) + mul(self.mix, d.get(filter) + b)]
             }
-            ReverbMode::MediumHall => {
+            ReverbNetwork::MediumHall { .. } => {
                 d.put(mono.div::<0, 14>(TWO), t[0]);
                 d.lpf(t[2], &mut self.lpf1);
                 for (a, b, g) in [(3, 15, 0.4), (4, 7, 0.9), (8, 14, 0.6), (18, 24, 0.6)] {
@@ -338,7 +466,7 @@ impl Reverb {
                     ),
                 ]
             }
-            ReverbMode::LargeHall => {
+            ReverbNetwork::LargeHall { .. } => {
                 d.put(mono, t[0]);
                 d.lpf(t[2], &mut self.lpf1);
                 for (a, b, g) in [(3, 5, 0.6), (6, 9, 0.6), (19, 30, 0.95), (20, 27, 0.5)] {
@@ -362,8 +490,10 @@ impl Reverb {
             }
         };
         if matches!(
-            self.config.mode,
-            ReverbMode::SmallRoom | ReverbMode::MediumHall | ReverbMode::LargeHall
+            self.config.network,
+            ReverbNetwork::SmallRoom { .. }
+                | ReverbNetwork::MediumHall { .. }
+                | ReverbNetwork::LargeHall { .. }
         ) {
             result[0] = mul(left, dry) + mul(self.mix, result[0]);
             result[1] = mul(right, dry) + mul(self.mix, result[1]);
@@ -372,8 +502,8 @@ impl Reverb {
         // Telemetry only. The wet contribution is the output minus the dry
         // term. Schroeder and Binaural use the mono dry signal.
         let dry_input = if matches!(
-            self.config.mode,
-            ReverbMode::Schroeder | ReverbMode::Binaural
+            self.config.network,
+            ReverbNetwork::Schroeder { .. } | ReverbNetwork::Binaural { .. }
         ) {
             [mono, mono]
         } else {
@@ -398,15 +528,17 @@ pub(crate) fn tail_frames(rate: SampleRate, config: ReverbConfig) -> usize {
     if !config.enabled || config.mix == 0.0 {
         return 0;
     }
-    let decay = config.decay as f64 / 1.05;
-    let diffuse = config.diffusion as f64;
-    let gain = match config.mode {
-        ReverbMode::Binaural => 0.0,
-        ReverbMode::Echo => decay,
-        ReverbMode::Schroeder => 0.9f64.max(decay),
-        ReverbMode::SmallRoom => 0.7f64.max(decay),
-        ReverbMode::MediumHall => (0.9 * diffuse).max(decay),
-        ReverbMode::LargeHall => (0.95 * diffuse).max(decay),
+    let gain = match config.network {
+        ReverbNetwork::Binaural { .. } => 0.0,
+        ReverbNetwork::Echo { decay, .. } => decay as f64 / 1.05,
+        ReverbNetwork::Schroeder { decay } => 0.9f64.max(decay as f64 / 1.05),
+        ReverbNetwork::SmallRoom { decay, .. } => 0.7f64.max(decay as f64 / 1.05),
+        ReverbNetwork::MediumHall {
+            diffusion, decay, ..
+        } => (0.9 * diffusion as f64).max(decay as f64 / 1.05),
+        ReverbNetwork::LargeHall {
+            diffusion, decay, ..
+        } => (0.95 * diffusion as f64).max(decay as f64 / 1.05),
     };
     let turns = if gain > 0.0 {
         (1e-6f64.ln() / gain.ln()).ceil()

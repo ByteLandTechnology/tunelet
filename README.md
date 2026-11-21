@@ -42,7 +42,7 @@ browsers and Node.js.
   chords or MIDI notes.
 - **Formant control**: An LPC model changes the width and the length of the
   vocal tract.
-- **Effects**: Punch, Warm, Alien and six reverb modes are available.
+- **Effects**: Punch, Warm, Alien and six reverb networks are available.
 - **Sample-exact output**: All stages use fixed-point arithmetic. The
   same input, configuration and seed give the same samples.
 - **Real-time safety**: After construction, the audio calls do not allocate
@@ -168,16 +168,20 @@ voice. It disables the effects and the formant stage.
 | Voices         | Renders a choir (1 to 16 voices) or harmony (lead and 0–4)  | Choir, 1 voice | `resynthesis.mode`       |
 | Formant        | Changes the vocal tract with an LPC model and aspiration    | Disabled       | `resynthesis.formant`    |
 | Alien          | Plays recent audio in reverse loops                         | Disabled       | `alien`                  |
-| Reverb         | Echo, Schroeder, SmallRoom, Binaural, MediumHall, LargeHall | Disabled       | `reverb`                 |
+| Reverb         | Echo, Schroeder, SmallRoom, Binaural, MediumHall, LargeHall | Disabled       | `reverb.network`         |
 | Output gain    | Linear gain, 0..=64                                         | 1              | `output_gain`            |
 
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+dry path starts after Warm and has a delay of 1,543 frames. Each
+`reverb.network` variant contains only the controls (`diffusion`, `decay`
+and `brightness_hz`) that apply to that network.
 
 ### Harmony sources
 
-Set `resynthesis.mode` to `Harmony`. Then select the source of the voices
-with `resynthesis.harmony.source`:
+Set `resynthesis.mode` to `VoiceModeConfig::Harmony`, which contains
+`harmony` and `harmony_gain`. `harmony_gain` scales the harmony voices in
+mono and stereo modes. Then select the source with
+`resynthesis.mode.harmony.source`:
 
 | Source          | The voices follow                                      |
 | --------------- | ------------------------------------------------------ |
@@ -189,10 +193,11 @@ with `resynthesis.harmony.source`:
 | `MidiOmni`      | MIDI notes from all channels, on the first free voice  |
 | `MidiChannels`  | MIDI channel `n` for voice `n` (channels 0–3), default |
 
-`resynthesis.harmony.voices` sets the number of interval voices, in `0..=4`.
-The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
-voices. The other voices release with the usual gain envelope. The chord
-and MIDI sources ignore this field.
+Each variant of `HarmonySourceConfig` contains only the controls for that
+source. On `FixedInterval` and `SmartInterval`, `voices` sets the number of
+interval voices, in `0..=4` (default 4 in TypeScript). These two sources use
+the first `voices` voices, and the other voices release with the usual gain
+envelope. The chord and MIDI variants do not have a `voices` field.
 
 ## Process audio
 
@@ -297,11 +302,13 @@ These calls read the state of the processor. They do not change the audio.
 
 The telemetry includes these items:
 
-- The pitch ratio and the gain of each voice.
+- The active voice count, and the pitch ratio and gain of each active voice.
 - The peaks of the input, of the two output channels and of the reverb wet
   signal.
 - The pitch clarity, which is a confidence score from 0 to 1.
 - The current gains of Punch and Warm, and the position in the Alien loop.
+- The formant generation counter, which increases at each LPC analysis and
+  when `width` or `stretch` changes.
 
 The peak windows of the telemetry are independent of the peak window of the
 feedback. The latency is nominal. Dry mixes, resampled voices and effects
@@ -309,12 +316,12 @@ have different timing.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
-- The vocal-tract envelope from the analysis.
-- The envelope after the width and stretch controls.
+- The vocal-tract envelope from the latest analysis.
+- The preview envelope after the current width and stretch controls.
 
 The values are linear and have no absolute level. The formant stage must be
-enabled. The envelopes are those of the model that the audio used for the
-last frame. The method returns `Result<bool, Error>`:
+enabled. Changes to `width` or `stretch` update the preview envelope and
+`formant_generation` immediately. The method returns `Result<bool, Error>`:
 
 | Result      | Description                                                      |
 | ----------- | ---------------------------------------------------------------- |
@@ -436,18 +443,20 @@ audio device.
 
 ### Configuration objects
 
-Configuration objects contain all required fields. They use camelCase names
-and show enums as string literals. To change the configuration, do these steps:
+Configuration objects contain all required fields of each selected variant.
+They use camelCase names, show enums as string literals, and tag mode unions
+(`resynthesis.mode`, `resynthesis.mode.harmony.source` and `reverb.network`)
+with `type`. To change the configuration, do these steps:
 
 1. Start from `defaultConfig()` or `config()`.
 2. Edit the necessary fields.
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+JavaScript `Error`. On the `fixedInterval` and `smartInterval` harmony
+sources, the optional `voices` field defaults to 4 if it is absent. The
+conversion ignores extra object properties. The generated declarations
+contain the parameter documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
@@ -482,7 +491,7 @@ the cases where `voiced` is `false`:
 
 - The kept pitch estimate is unvoiced. This includes the time before the
   first detection and after a reset or a drain completion.
-- The estimated frequency is outside the inclusive reporting bounds
+- The estimated frequency is outside the inclusive pitch bounds
   `resynthesis.pitch.minFrequencyHz` and `resynthesis.pitch.maxFrequencyHz`.
 
 `formantEnvelope(maxFrequencyHz, input, output)` fills two `Float32Array`

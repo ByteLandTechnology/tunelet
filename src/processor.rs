@@ -410,8 +410,8 @@ impl Processor {
         self.reverb.clear_wet_peak();
     }
 
-    /// Writes the formant envelopes of the model that the audio used for the
-    /// last frame.
+    /// Writes the formant envelopes of the latest analysis predictor and the
+    /// current preview model.
     ///
     /// `input` gets the vocal-tract envelope that the LPC analysis found.
     /// `output` gets the envelope after the width and stretch controls. Point
@@ -465,10 +465,11 @@ impl Processor {
     /// the random stream again.
     ///
     /// Each successful call cancels a drain, also for an identical
-    /// configuration. A change of reverb mode keeps the delay contents. If you
-    /// disable Punch, Warm or reverb, the history of that stage stops. Alien
-    /// continues to record. A change in either half of the `u64` seed starts
-    /// the stream again, but the new sequence uses only the low 32 bits.
+    /// configuration. A change of reverb network keeps the delay contents. If
+    /// you disable Punch, Warm or reverb, the history of that stage stops.
+    /// Alien continues to record. A change in either half of the `u64` seed
+    /// starts the stream again, but the new sequence uses only the low 32
+    /// bits.
     ///
     /// # Errors
     ///
@@ -720,7 +721,7 @@ pub struct Feedback {
     pub resample_ratio: f32,
     /// The reported input pitch period in samples, with fractional samples.
     ///
-    /// It is zero if the input is unvoiced or outside the reporting bounds of
+    /// It is zero if the input is unvoiced or outside the pitch bounds of
     /// [`crate::PitchConfig`].
     pub period_samples: f32,
     /// The reported input pitch frequency in hertz.
@@ -744,11 +745,11 @@ pub struct Feedback {
     ///
     /// The value is `None` if [`voiced`](Self::voiced) is `false`, and only
     /// then. This occurs if the input is unvoiced or if its frequency is
-    /// outside the current reporting bounds. A target table that has no
-    /// selected target does not give `None`.
+    /// outside the current pitch bounds. A target table that has no selected
+    /// target does not give `None`.
     pub target_midi_note: Option<f32>,
     /// This field is `true` if the current pitch estimate is positive and
-    /// inside the current reporting bounds.
+    /// inside the current pitch bounds.
     ///
     /// This is not an amplitude gate or a confidence score. A tracking result
     /// can stay between detector updates.
@@ -828,17 +829,18 @@ pub struct Telemetry {
     /// The number of valid entries in [`voice_ratios`](Self::voice_ratios)
     /// and [`voice_gains`](Self::voice_gains).
     ///
-    /// The value is 5 in Harmony mode. In Choir mode, it is
-    /// [`crate::ResynthesisConfig::choir_voices`], in 1..=16.
+    /// In Harmony mode, the value is 1 plus the number of harmony voices that
+    /// sound, in 1..=5. In Choir mode, it is the configured choir voice count,
+    /// in 1..=16.
     pub voice_count: u8,
-    /// The pitch ratio of each voice on the last frame, where 1 is the input
-    /// pitch.
+    /// The pitch ratio of each active voice on the last frame, where 1 is the
+    /// input pitch.
     ///
-    /// Entry zero is the lead voice. In Harmony mode, entries 1 to 4 are the
-    /// harmony voices. In Choir mode, the entries after the lead are the
-    /// secondary voices. Each ratio includes the correction, the configured
-    /// pitch shift and the ratio of the voice. The entries after
-    /// [`voice_count`](Self::voice_count) are zero.
+    /// Entry zero is the lead voice. In Harmony mode, the entries after the
+    /// lead are the harmony voices that sound. In Choir mode, the entries
+    /// after the lead are the secondary voices. Each ratio includes the
+    /// correction, the configured pitch shift and the ratio of the voice. The
+    /// entries after [`voice_count`](Self::voice_count) are zero.
     pub voice_ratios: [f32; 16],
     /// The linear gain of each voice, in the order of
     /// [`voice_ratios`](Self::voice_ratios).
@@ -872,10 +874,11 @@ pub struct Telemetry {
     /// The reverse reader is two times this number of frames behind the
     /// recording position. The value advances also while Alien is disabled.
     pub alien_phase_frames: u32,
-    /// The wrapping count of formant analyses since construction.
+    /// The wrapping count of formant analyses and preview updates since
+    /// construction.
     ///
-    /// The count increases every 441 frames while the formant stage is
-    /// enabled. Compare two values to find if
-    /// [`Processor::formant_envelope`] can give a new result.
+    /// While the formant stage is enabled, the count increases every 441
+    /// frames and when `width` or `stretch` changes. Compare two values to
+    /// find if [`Processor::formant_envelope`] can give a new result.
     pub formant_generation: u32,
 }
