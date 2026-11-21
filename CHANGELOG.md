@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.2](https://github.com/ByteLandTechnology/tunelet/compare/v0.3.1...v0.3.2) (2026-11-21)
+
+
+### Bug Fixes
+
+* **resynthesis:** bound the pitch lag and clamp the formant period ([7eee352](https://github.com/ByteLandTechnology/tunelet/commit/7eee352a6e37913f9dcdd5d3c25676909fa62be4))
+* **wasm:** remove self-references from Wasm doc comments ([4c28710](https://github.com/ByteLandTechnology/tunelet/commit/4c28710ba094f50693b54057a5b802c5fdf0c479))
+
+
+### Performance Improvements
+
+* **formant:** borrow steady banks and split ring slices ([1668f6f](https://github.com/ByteLandTechnology/tunelet/commit/1668f6f13d891fba7ffed93b13f37e8201cdc337))
+* shrink formant tables and clear dirty spans on reset ([7490b83](https://github.com/ByteLandTechnology/tunelet/commit/7490b83a23705b53b60310170a1bccef86ebd58f))
+
 ## [0.3.1](https://github.com/ByteLandTechnology/tunelet/compare/v0.3.0...v0.3.1) (2026-11-21)
 
 
