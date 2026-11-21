@@ -73,12 +73,9 @@ pub enum MultiVoiceMode {
 /// mask again. Reset releases the correction keys 0..=126. It keeps key 127
 /// and the active note table. Key 127 has no effect on the note table.
 ///
-/// At construction, the chromatic table uses 44.1 kHz periods, also for a
-/// 48 kHz processor. Each of these events loads the periods for the prepared
-/// rate:
-/// - An initial mask that is not chromatic.
-/// - A later change to the mask or to `enabled`.
-/// - A correction MIDI event.
+/// Construction loads the configured `notes` mask with the periods for the
+/// prepared sample rate. Later changes to `notes`, to `enabled` or from
+/// correction MIDI also use the periods for the prepared sample rate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -503,17 +500,7 @@ impl Resynthesis {
             },
             formant: Formant::new(rate, config.formant),
             harmony: HarmonyState::new(rate, config.harmony),
-            scale: {
-                // The initial chromatic table uses 44.1 kHz periods at the two
-                // rates. If the notes load again, the periods for the
-                // configured rate become active.
-                let mut scale = CorrectionTable::new(SampleRate::Hz44100, NoteMask::default());
-                scale.set_sample_rate(rate);
-                if config.correction.notes != NoteMask::default() {
-                    scale.set_notes(config.correction.notes);
-                }
-                scale
-            },
+            scale: CorrectionTable::new(rate, config.correction.notes),
             filtered: prepare_history(Q14::ZERO),
             lead: prepare_history(Q14::ZERO),
             periods: prepare_history(Q6::ZERO),
