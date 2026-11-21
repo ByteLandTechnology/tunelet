@@ -25,7 +25,7 @@
 //! to one of these orders changes the rendered samples:
 //! - The order of the reader updates.
 //! - The order in which stages read random values.
-//! - The order of the wrapping arithmetic.
+//! - The order of the fixed-point arithmetic.
 
 mod history;
 
@@ -35,7 +35,7 @@ use crate::formant::{Formant, FormantConfig, ANALYSIS_FRAMES};
 use crate::harmony::{HarmonyConfig, HarmonyState, DEFAULT_VOICE_PANS, HARMONY_VOICES};
 use crate::midi::MidiEvent;
 use crate::numeric::fixed::{Q12, Q14, Q6, Q8};
-use crate::numeric::{ring, NumericContext, HISTORY};
+use crate::numeric::{clamp_i32, ring, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
@@ -904,8 +904,7 @@ impl Resynthesis {
     ///
     /// If correction is disabled or the active table is empty, the ratio moves
     /// toward 1.0. If the target selection starts again and the shifted
-    /// period is not positive, the ratio becomes 1.0 immediately. A
-    /// multiplication by fixed-point 1.0 still wraps. Do not remove it.
+    /// period is not positive, the ratio becomes 1.0 immediately.
     fn update_correction(&mut self, period: Q6) {
         let mut target_ratio = Q14::ONE;
         if self.config.correction.enabled && self.scale.count != 0 {
@@ -936,8 +935,7 @@ impl Resynthesis {
             } else {
                 period >> (-self.octave) as u32
             });
-            // The comparisons multiply by 1.0 to keep the wrap of the product.
-            while table_period(self.scale_index + 1).mul::<14, 6>(Q14::ONE) < target {
+            while table_period(self.scale_index + 1) < target {
                 self.scale_index += 1;
                 if self.scale_index == count {
                     self.scale_index = 0;
@@ -945,7 +943,7 @@ impl Resynthesis {
                     self.octave -= 1;
                 }
             }
-            while target.mul::<14, 6>(Q14::ONE) < table_period(self.scale_index) {
+            while target < table_period(self.scale_index) {
                 if self.scale_index == 0 {
                     self.scale_index = count - 1;
                     target = target << 1;
@@ -1205,7 +1203,7 @@ impl Resynthesis {
                     }
                     let values =
                         positions.map(|position| history::interpolation(&self.lead, position).0);
-                    // Keep the voice and channel order of each wrapping sum.
+                    // Keep the voice and channel order of each sum.
                     for (lane, value) in values.into_iter().enumerate() {
                         let current_voice = voice + lane;
                         for (channel, sum) in mix.iter_mut().enumerate() {
@@ -1239,10 +1237,6 @@ impl Resynthesis {
                             };
                     }
                 }
-            }
-            // The multiplication by 1.0 keeps the wrap of the product.
-            for sum in &mut mix {
-                *sum = Q14::ONE.mul(*sum);
             }
         } else {
             let (period, ratio) = self.period_for(delayed, write);
@@ -1316,11 +1310,10 @@ impl Resynthesis {
             if self.current_output_period != Q6::ZERO {
                 // The phase advances by depth x 4 x ratio / period, in Q14
                 // cycles.
-                let step = self
-                    .modulation
-                    .wrapping_mul(4)
-                    .wrapping_mul(final_ratio.to_bits())
-                    .wrapping_div(self.current_output_period.to_bits());
+                let step = clamp_i32(
+                    (i64::from(self.modulation) * 4 * i64::from(final_ratio.to_bits()))
+                        / i64::from(self.current_output_period.to_bits()),
+                );
                 self.modulation_phase = self.modulation_phase + Q14::from_bits(step);
                 if self.modulation_phase > Q14::ONE {
                     self.modulation_phase = self.modulation_phase - Q14::ONE;
@@ -1345,11 +1338,14 @@ impl Resynthesis {
         }
         // The dry branch is the delayed raw input. It bypasses the shift
         // filters, the voice readers, the formant stages and the harmonic
-        // modulation. Keep the two products in Q22. Rescale their wrapping sum
+        // modulation. Calculate the Q22 blend in `i64`, then shift and clamp
         // to Q14 one time only.
-        let wet = Q8::ONE - self.dry_mix;
+        let dry_mix = i64::from(self.dry_mix.to_bits());
+        let wet = i64::from((Q8::ONE - self.dry_mix).to_bits());
+        let dry = i64::from(dry.to_bits());
         for sum in &mut mix {
-            *sum = (dry.mul::<8, 22>(self.dry_mix) + sum.mul::<8, 22>(wet)).rescale();
+            let blended = (dry * dry_mix + i64::from(sum.to_bits()) * wet) >> 8;
+            *sum = Q14::from_bits(clamp_i32(blended));
         }
         mix
     }
