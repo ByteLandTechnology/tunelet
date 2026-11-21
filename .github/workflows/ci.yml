@@ -49,19 +49,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: "false"
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
-      - uses: Swatinem/rust-cache@v2
+          tool: wasm-pack,wasm-opt
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: "npm"
       - run: npm ci
-      # The build script compiles the Wasm bindings and the TypeScript entry.
-      - run: npm run build
-      # npm checks the file list of the package archive.
-      - run: npm pack --dry-run
+      # Check Clippy and rustdoc for wasm32-unknown-unknown.
+      - run: npm run check:wasm
+        env:
+          RUSTDOCFLAGS: -D warnings
+      # Build the package, check the archive files and run loadTunelet().
+      - run: npm run verify:pack
 
   ci-gate:
     needs: [rust, wasm]
