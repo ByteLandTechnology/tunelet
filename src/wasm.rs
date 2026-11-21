@@ -22,10 +22,11 @@
 //! - The optional harmony `voices` field defaults to 4.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
-//! `{ type, value }`, and the reset control has no `value`. MIDI messages use
-//! `{ type, channel, note, velocity }`, with the fields that apply to the
-//! selected variant. The TypeScript declarations come from the same Rust types
-//! that validation uses.
+//! `{ type, value }`, and the reset control has no `value`. Scalar parameter
+//! events nest `{ type, value }` inside `{ type: "parameter", value }`. MIDI
+//! messages use `{ type, channel, note, velocity }`, with the fields that
+//! apply to the selected variant. The TypeScript declarations come from the
+//! same Rust types that validation uses.
 //!
 //! The class allocates the PCM storage at construction and uses it again for
 //! each block. These operations can allocate:

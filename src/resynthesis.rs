@@ -130,13 +130,13 @@ impl CorrectionConfig {
     /// Returns [`Error::InvalidConfig`], with the dotted path of the field and
     /// the problem, if `retune_ms` is not valid.
     pub fn validate(self) -> Result<(), Error> {
-        check_range(
-            "resynthesis.correction.retune_ms",
-            self.retune_ms,
-            0.0,
-            400.0,
-        )
+        validate_retune_ms(self.retune_ms)
     }
+}
+
+/// Checks the range of the retune half-life.
+pub(crate) fn validate_retune_ms(retune_ms: f32) -> Result<(), Error> {
+    check_range("resynthesis.correction.retune_ms", retune_ms, 0.0, 400.0)
 }
 
 /// The controls for pitch correction, pitch shift, voice arrangement and
@@ -293,22 +293,65 @@ impl ResynthesisConfig {
         self.correction.validate()?;
         self.formant.validate()?;
         self.harmony.validate()?;
-        check_range("resynthesis.pitch_ratio", self.pitch_ratio, 0.25, 4.0)?;
-        check_range("resynthesis.choir_detune", self.choir_detune, 10.0, 100.0)?;
-        check_range("resynthesis.choir_delay", self.choir_delay, 20.0, 200.0)?;
-        let field = "resynthesis.choir_spread_percent";
-        check_range(field, self.choir_spread_percent, 0.0, 100.0)?;
-        check_range("resynthesis.harmony_gain", self.harmony_gain, 0.0, 1.0)?;
-        let field = "resynthesis.harmonic_modulation";
-        check_range(field, self.harmonic_modulation, 0.0, 24.0)?;
-        check_range("resynthesis.dry_mix", self.dry_mix, 0.0, 1.0)?;
-        check_count(
-            "resynthesis.choir_voices",
-            i64::from(self.choir_voices),
-            1,
-            16,
-        )
+        validate_pitch_ratio(self.pitch_ratio)?;
+        validate_choir_detune(self.choir_detune)?;
+        validate_choir_delay(self.choir_delay)?;
+        validate_choir_spread_percent(self.choir_spread_percent)?;
+        validate_harmony_gain(self.harmony_gain)?;
+        validate_harmonic_modulation(self.harmonic_modulation)?;
+        validate_dry_mix(self.dry_mix)?;
+        validate_choir_voices(self.choir_voices)
     }
+}
+
+/// Checks the range of the global pitch multiplier.
+pub(crate) fn validate_pitch_ratio(pitch_ratio: f32) -> Result<(), Error> {
+    check_range("resynthesis.pitch_ratio", pitch_ratio, 0.25, 4.0)
+}
+
+/// Checks the range of the choir voice count.
+pub(crate) fn validate_choir_voices(choir_voices: u8) -> Result<(), Error> {
+    check_count("resynthesis.choir_voices", i64::from(choir_voices), 1, 16)
+}
+
+/// Checks the range of the choir detune.
+pub(crate) fn validate_choir_detune(choir_detune: f32) -> Result<(), Error> {
+    check_range("resynthesis.choir_detune", choir_detune, 10.0, 100.0)
+}
+
+/// Checks the range of the choir delay scale.
+pub(crate) fn validate_choir_delay(choir_delay: f32) -> Result<(), Error> {
+    check_range("resynthesis.choir_delay", choir_delay, 20.0, 200.0)
+}
+
+/// Checks the range of the choir stereo width.
+pub(crate) fn validate_choir_spread_percent(choir_spread_percent: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.choir_spread_percent",
+        choir_spread_percent,
+        0.0,
+        100.0,
+    )
+}
+
+/// Checks the range of the harmony pan gain.
+pub(crate) fn validate_harmony_gain(harmony_gain: f32) -> Result<(), Error> {
+    check_range("resynthesis.harmony_gain", harmony_gain, 0.0, 1.0)
+}
+
+/// Checks the range of the harmonic modulation depth.
+pub(crate) fn validate_harmonic_modulation(harmonic_modulation: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.harmonic_modulation",
+        harmonic_modulation,
+        0.0,
+        24.0,
+    )
+}
+
+/// Checks the range of the resynthesis dry mix.
+pub(crate) fn validate_dry_mix(dry_mix: f32) -> Result<(), Error> {
+    check_range("resynthesis.dry_mix", dry_mix, 0.0, 1.0)
 }
 
 /// The fixed choir delay offsets in frames, before the scale by
@@ -549,33 +592,48 @@ impl Resynthesis {
             drift_amount: Q14::ZERO,
             previous_output: [Q14::ZERO; 2],
         };
-        result.configure_coefficients();
+        result.configure_all();
         result.configure_shift_filters();
         result.reset();
         result
     }
 
-    /// Quantizes the controls and calculates the decay coefficients and the
-    /// voice pan gains again.
-    ///
-    /// The coefficients are the correction decay, the drift decay and the
-    /// drift amount. The histories and the controller phase do not change.
-    /// The harmony level is part of the stereo pan gains. Thus, the path
-    /// without pan never applies that control.
-    fn configure_coefficients(&mut self) {
+    /// Quantizes the global pitch multiplier unconditionally.
+    fn configure_pitch_ratio(&mut self) {
         self.shift = Q14::from_f64(self.config.pitch_ratio as f64);
+    }
+
+    /// Quantizes the harmonic modulation depth unconditionally.
+    fn configure_harmonic_modulation(&mut self) {
         self.modulation = (self.config.harmonic_modulation as f64 / 8.0 * 16.0) as i32;
+    }
+
+    /// Quantizes the dry mix weight unconditionally.
+    fn configure_dry_mix(&mut self) {
         self.dry_mix = Q8::from_f64((self.config.dry_mix * 100.0) as f64 / 100.0);
+    }
+
+    /// Calculates the correction half-life coefficient unconditionally.
+    fn configure_correction_decay(&mut self) {
         self.correction_decay = if self.config.correction.retune_ms == 0.0 {
             Q14::ZERO
         } else {
             let t = self.config.correction.retune_ms / 1000.0;
             Q14::from_f64(0.5_f64.powf(1.0 / ((self.rate.hz() / 5.0) * t) as f64))
         };
+    }
+
+    /// Calculates the choir drift decay and drift amount unconditionally.
+    fn configure_choir_drift(&mut self) {
         let base = (self.rate.hz() / 100.0) as f64 * 0.2;
         let decay = (-std::f64::consts::LN_2 / base).exp();
         self.drift_decay = Q14::from_f64(decay);
         self.drift_amount = Q14::from_f64((1.0 - decay) * 0.008 * self.config.choir_detune as f64);
+    }
+
+    /// Calculates the stereo pan gains for the active choir voices
+    /// unconditionally.
+    fn configure_choir_pan(&mut self) {
         for voice in 0..self.config.choir_voices as usize {
             if self.config.choir_voices > 1 {
                 let normalized =
@@ -588,6 +646,13 @@ impl Resynthesis {
                 self.pan[voice] = [Q14::ONE; 2];
             }
         }
+    }
+
+    /// Calculates the stereo pan gains for the harmony voices unconditionally.
+    ///
+    /// The harmony level is part of the stereo pan gains. Thus, the path
+    /// without pan never applies that control.
+    fn configure_harmony_pan(&mut self) {
         for (voice, fraction) in [0.3333333333333333, 0.6666666666666666, 0.0, 1.0]
             .into_iter()
             .enumerate()
@@ -599,6 +664,20 @@ impl Resynthesis {
                 Q14::from_f64(gain * angle.sin()),
             ];
         }
+    }
+
+    /// Initializes all quantized controls, decays and pan gains
+    /// unconditionally.
+    ///
+    /// The histories and the controller phase do not change.
+    fn configure_all(&mut self) {
+        self.configure_pitch_ratio();
+        self.configure_harmonic_modulation();
+        self.configure_dry_mix();
+        self.configure_correction_decay();
+        self.configure_choir_drift();
+        self.configure_choir_pan();
+        self.configure_harmony_pan();
     }
 
     /// Prepares two low-pass sections if the global shift is upward. If not,
@@ -641,16 +720,26 @@ impl Resynthesis {
     pub(crate) fn apply_config(&mut self, config: ResynthesisConfig) {
         let old = self.config;
         self.config = config;
-        self.pitch.set_config(config.pitch);
-        self.formant.set_config(config.formant);
-        self.harmony.apply_config(config.harmony);
+        if old.pitch.threshold != config.pitch.threshold {
+            self.pitch.set_config(config.pitch);
+        }
+        if old.formant != config.formant {
+            self.formant.set_config(config.formant);
+        }
+        if old.harmony != config.harmony {
+            self.harmony.apply_config(config.harmony);
+        }
         if old.correction.notes != config.correction.notes
             || old.correction.enabled != config.correction.enabled
         {
             self.scale.set_notes(config.correction.notes);
             self.scale_initialized = false;
         }
+        if old.correction.retune_ms != config.correction.retune_ms {
+            self.configure_correction_decay();
+        }
         if old.pitch_ratio != config.pitch_ratio {
+            self.configure_pitch_ratio();
             self.configure_shift_filters();
         }
         if old.mode != config.mode || old.choir_delay != config.choir_delay {
@@ -661,11 +750,187 @@ impl Resynthesis {
                 self.positions[voice] = self.positions[0];
             }
         }
-        self.configure_coefficients();
+        if old.choir_voices != config.choir_voices
+            || old.choir_spread_percent != config.choir_spread_percent
+        {
+            self.configure_choir_pan();
+        }
+        if old.choir_detune != config.choir_detune {
+            self.configure_choir_drift();
+        }
+        if old.harmony_gain != config.harmony_gain {
+            self.configure_harmony_pan();
+        }
+        if old.harmonic_modulation != config.harmonic_modulation {
+            self.configure_harmonic_modulation();
+        }
+        if old.dry_mix != config.dry_mix {
+            self.configure_dry_mix();
+        }
         if old.stereo_output != config.stereo_output {
             // A stereo change resets the audio state. The correction keyboard
             // keeps its held keys.
             self.reset_audio();
+        }
+    }
+
+    /// Sets the temporary aspiration mute for a drain without a change to the
+    /// configuration.
+    pub(crate) fn set_aspiration_muted(&mut self, muted: bool) {
+        self.formant.set_aspiration_muted(muted);
+    }
+
+    /// Stores the pitch acquisition threshold. If the value changed, quantizes
+    /// it again.
+    pub(crate) fn set_pitch_threshold(&mut self, threshold: f32) {
+        let changed = self.config.pitch.threshold != threshold;
+        self.config.pitch.threshold = threshold;
+        if changed {
+            self.pitch.set_threshold(threshold);
+        }
+    }
+
+    /// Stores the retune half-life. If the value changed, updates the
+    /// correction decay.
+    pub(crate) fn set_retune_ms(&mut self, retune_ms: f32) {
+        let changed = self.config.correction.retune_ms != retune_ms;
+        self.config.correction.retune_ms = retune_ms;
+        if changed {
+            self.configure_correction_decay();
+        }
+    }
+
+    /// Stores the global pitch multiplier. If the value changed, updates the
+    /// shift and the anti-alias filters.
+    pub(crate) fn set_pitch_ratio(&mut self, pitch_ratio: f32) {
+        let changed = self.config.pitch_ratio != pitch_ratio;
+        self.config.pitch_ratio = pitch_ratio;
+        if changed {
+            self.configure_pitch_ratio();
+            self.configure_shift_filters();
+        }
+    }
+
+    /// Stores the vocal-tract width and updates the formant stage.
+    pub(crate) fn set_formant_width(&mut self, width: f32) {
+        self.config.formant.width = width;
+        self.formant.set_width(width);
+    }
+
+    /// Stores the vocal-tract stretch and updates the formant stage.
+    pub(crate) fn set_formant_stretch(&mut self, stretch: f32) {
+        self.config.formant.stretch = stretch;
+        self.formant.set_stretch(stretch);
+    }
+
+    /// Stores the aspiration mix and updates the formant stage.
+    pub(crate) fn set_formant_aspiration_mix(&mut self, aspiration_mix: f32) {
+        self.config.formant.aspiration_mix = aspiration_mix;
+        self.formant.set_aspiration_mix(aspiration_mix);
+    }
+
+    /// Stores the aspiration high-pass cutoff and updates the formant stage.
+    pub(crate) fn set_formant_aspiration_cutoff_hz(&mut self, aspiration_cutoff_hz: f32) {
+        self.config.formant.aspiration_cutoff_hz = aspiration_cutoff_hz;
+        self.formant.set_aspiration_cutoff_hz(aspiration_cutoff_hz);
+    }
+
+    /// Stores the choir voice count. If the value changed, updates new reader
+    /// positions and the choir pan gains.
+    pub(crate) fn set_choir_voices(&mut self, choir_voices: u8) {
+        let old = self.config.choir_voices;
+        self.config.choir_voices = choir_voices;
+        if old != choir_voices {
+            if old < choir_voices {
+                for voice in old as usize..choir_voices as usize {
+                    self.positions[voice] = self.positions[0];
+                }
+            }
+            self.configure_choir_pan();
+        }
+    }
+
+    /// Stores the choir detune. If the value changed, updates the drift
+    /// coefficients.
+    pub(crate) fn set_choir_detune(&mut self, choir_detune: f32) {
+        let changed = self.config.choir_detune != choir_detune;
+        self.config.choir_detune = choir_detune;
+        if changed {
+            self.configure_choir_drift();
+        }
+    }
+
+    /// Stores the choir delay scale. If the value changed, updates the delay
+    /// offsets.
+    pub(crate) fn set_choir_delay(&mut self, choir_delay: f32) {
+        let changed = self.config.choir_delay != choir_delay;
+        self.config.choir_delay = choir_delay;
+        if changed {
+            self.create_delays();
+        }
+    }
+
+    /// Stores the choir stereo width. If the value changed, updates the choir
+    /// pan gains.
+    pub(crate) fn set_choir_spread_percent(&mut self, choir_spread_percent: f32) {
+        let changed = self.config.choir_spread_percent != choir_spread_percent;
+        self.config.choir_spread_percent = choir_spread_percent;
+        if changed {
+            self.configure_choir_pan();
+        }
+    }
+
+    /// Stores the chord register and updates the harmony stage.
+    pub(crate) fn set_harmony_register_percent(&mut self, register_percent: f32) {
+        self.config.harmony.register_percent = register_percent;
+        self.harmony.set_register_percent(register_percent);
+    }
+
+    /// Stores the chord spread and updates the harmony stage.
+    pub(crate) fn set_harmony_voicing_spread_percent(&mut self, voicing_spread_percent: f32) {
+        self.config.harmony.voicing_spread_percent = voicing_spread_percent;
+        self.harmony
+            .set_voicing_spread_percent(voicing_spread_percent);
+    }
+
+    /// Stores the portamento half-life and updates the harmony stage.
+    pub(crate) fn set_harmony_portamento_ms(&mut self, portamento_ms: f32) {
+        self.config.harmony.portamento_ms = portamento_ms;
+        self.harmony.set_portamento_ms(portamento_ms);
+    }
+
+    /// Stores the count of interval voices and updates the harmony stage.
+    pub(crate) fn set_harmony_voices(&mut self, voices: u8) {
+        self.config.harmony.voices = voices;
+        self.harmony.set_voices(voices);
+    }
+
+    /// Stores the harmony pan gain. If the value changed, updates the harmony
+    /// pan gains.
+    pub(crate) fn set_harmony_gain(&mut self, harmony_gain: f32) {
+        let changed = self.config.harmony_gain != harmony_gain;
+        self.config.harmony_gain = harmony_gain;
+        if changed {
+            self.configure_harmony_pan();
+        }
+    }
+
+    /// Stores the harmonic modulation depth. If the value changed, quantizes it
+    /// again.
+    pub(crate) fn set_harmonic_modulation(&mut self, harmonic_modulation: f32) {
+        let changed = self.config.harmonic_modulation != harmonic_modulation;
+        self.config.harmonic_modulation = harmonic_modulation;
+        if changed {
+            self.configure_harmonic_modulation();
+        }
+    }
+
+    /// Stores the dry mix weight. If the value changed, quantizes it again.
+    pub(crate) fn set_dry_mix(&mut self, dry_mix: f32) {
+        let changed = self.config.dry_mix != dry_mix;
+        self.config.dry_mix = dry_mix;
+        if changed {
+            self.configure_dry_mix();
         }
     }
 

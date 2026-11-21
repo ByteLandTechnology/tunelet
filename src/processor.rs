@@ -8,7 +8,7 @@ use crate::events::{ValidatedEvent, ValidatedEvents};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
 use crate::resynthesis::{self, Resynthesis};
-use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
+use crate::{ControlEvent, Error, ParameterControl, PrepareConfig, ProcessorConfig, TimedEvent};
 
 /// A prepared vocal processor with state, mono input and stereo synthesis.
 ///
@@ -573,33 +573,163 @@ impl Processor {
 
     /// Applies a validated control immediately before its frame is rendered.
     ///
-    /// A partial configuration event replaces one stage in the active
-    /// configuration. MIDI and reset events act directly. A reset does not
-    /// discard later events in the block.
+    /// A stage event replaces one stage in the active configuration. A scalar
+    /// parameter event updates one field and its quantized state. MIDI and
+    /// reset events act directly. A reset does not discard later events in the
+    /// block.
     fn apply(&mut self, event: ValidatedEvent) {
-        let mut config = self.config;
         match event.into_inner() {
-            ControlEvent::Configure(value) => config = value,
-            ControlEvent::Resynthesis(value) => config.resynthesis = value,
-            ControlEvent::Punch(value) => config.punch = value,
-            ControlEvent::Warm(value) => config.warm = value,
-            ControlEvent::Alien(value) => config.alien = value,
-            ControlEvent::Reverb(value) => config.reverb = value,
-            ControlEvent::OutputGain(value) => config.output_gain = value,
-            ControlEvent::Midi(event) => {
-                self.resynthesis.apply_midi(event);
-                return;
+            ControlEvent::Configure(value) => self.apply_config(value),
+            ControlEvent::Resynthesis(value) => {
+                let mut config = self.config;
+                config.resynthesis = value;
+                self.apply_config(config);
             }
-            ControlEvent::CorrectionMidi(event) => {
-                self.resynthesis.apply_correction_midi(event);
-                return;
+            ControlEvent::Punch(value) => {
+                let mut config = self.config;
+                config.punch = value;
+                self.apply_config(config);
             }
-            ControlEvent::Reset => {
-                self.reset();
-                return;
+            ControlEvent::Warm(value) => {
+                let mut config = self.config;
+                config.warm = value;
+                self.apply_config(config);
+            }
+            ControlEvent::Alien(value) => {
+                let mut config = self.config;
+                config.alien = value;
+                self.apply_config(config);
+            }
+            ControlEvent::Reverb(value) => {
+                let mut config = self.config;
+                config.reverb = value;
+                self.apply_config(config);
+            }
+            ControlEvent::OutputGain(value) => {
+                self.config.output_gain = value;
+                self.drain_remaining = None;
+            }
+            ControlEvent::Parameter(parameter) => self.apply_parameter(parameter),
+            ControlEvent::Midi(event) => self.resynthesis.apply_midi(event),
+            ControlEvent::CorrectionMidi(event) => self.resynthesis.apply_correction_midi(event),
+            ControlEvent::Reset => self.reset(),
+        }
+    }
+
+    /// Updates one validated scalar parameter, cancels an active drain and
+    /// calls only the setter for that field.
+    fn apply_parameter(&mut self, parameter: ParameterControl) {
+        match parameter {
+            ParameterControl::PunchGainDb(value) => {
+                self.config.punch.gain_db = value;
+                self.punch.set_gain_db(value);
+            }
+            ParameterControl::PunchImpact(value) => {
+                self.config.punch.impact = value;
+                self.punch.set_impact(value);
+            }
+            ParameterControl::PunchCeilingDb(value) => {
+                self.config.punch.ceiling_db = value;
+                self.punch.set_ceiling_db(value);
+            }
+            ParameterControl::PunchAttackMs(value) => {
+                self.config.punch.attack_ms = value;
+                self.punch.set_attack_ms(value);
+            }
+            ParameterControl::WarmDriveDb(value) => {
+                self.config.warm.drive_db = value;
+                self.warm.set_drive_db(value);
+            }
+            ParameterControl::PitchThreshold(value) => {
+                self.config.resynthesis.pitch.threshold = value;
+                self.resynthesis.set_pitch_threshold(value);
+            }
+            ParameterControl::RetuneMs(value) => {
+                self.config.resynthesis.correction.retune_ms = value;
+                self.resynthesis.set_retune_ms(value);
+            }
+            ParameterControl::PitchRatio(value) => {
+                self.config.resynthesis.pitch_ratio = value;
+                self.resynthesis.set_pitch_ratio(value);
+            }
+            ParameterControl::FormantWidth(value) => {
+                self.config.resynthesis.formant.width = value;
+                self.resynthesis.set_formant_width(value);
+            }
+            ParameterControl::FormantStretch(value) => {
+                self.config.resynthesis.formant.stretch = value;
+                self.resynthesis.set_formant_stretch(value);
+            }
+            ParameterControl::FormantAspirationMix(value) => {
+                self.config.resynthesis.formant.aspiration_mix = value;
+                self.resynthesis.set_formant_aspiration_mix(value);
+            }
+            ParameterControl::FormantAspirationCutoffHz(value) => {
+                self.config.resynthesis.formant.aspiration_cutoff_hz = value;
+                self.resynthesis.set_formant_aspiration_cutoff_hz(value);
+            }
+            ParameterControl::ChoirVoices(value) => {
+                self.config.resynthesis.choir_voices = value;
+                self.resynthesis.set_choir_voices(value);
+            }
+            ParameterControl::ChoirDetune(value) => {
+                self.config.resynthesis.choir_detune = value;
+                self.resynthesis.set_choir_detune(value);
+            }
+            ParameterControl::ChoirDelay(value) => {
+                self.config.resynthesis.choir_delay = value;
+                self.resynthesis.set_choir_delay(value);
+            }
+            ParameterControl::ChoirSpreadPercent(value) => {
+                self.config.resynthesis.choir_spread_percent = value;
+                self.resynthesis.set_choir_spread_percent(value);
+            }
+            ParameterControl::HarmonyRegisterPercent(value) => {
+                self.config.resynthesis.harmony.register_percent = value;
+                self.resynthesis.set_harmony_register_percent(value);
+            }
+            ParameterControl::HarmonyVoicingSpreadPercent(value) => {
+                self.config.resynthesis.harmony.voicing_spread_percent = value;
+                self.resynthesis.set_harmony_voicing_spread_percent(value);
+            }
+            ParameterControl::HarmonyPortamentoMs(value) => {
+                self.config.resynthesis.harmony.portamento_ms = value;
+                self.resynthesis.set_harmony_portamento_ms(value);
+            }
+            ParameterControl::HarmonyVoices(value) => {
+                self.config.resynthesis.harmony.voices = value;
+                self.resynthesis.set_harmony_voices(value);
+            }
+            ParameterControl::HarmonyGain(value) => {
+                self.config.resynthesis.harmony_gain = value;
+                self.resynthesis.set_harmony_gain(value);
+            }
+            ParameterControl::HarmonicModulation(value) => {
+                self.config.resynthesis.harmonic_modulation = value;
+                self.resynthesis.set_harmonic_modulation(value);
+            }
+            ParameterControl::DryMix(value) => {
+                self.config.resynthesis.dry_mix = value;
+                self.resynthesis.set_dry_mix(value);
+            }
+            ParameterControl::ReverbMix(value) => {
+                self.config.reverb.mix = value;
+                self.reverb.set_mix(value);
+            }
+            ParameterControl::ReverbDiffusion(value) => {
+                self.config.reverb.diffusion = value;
+                self.reverb.set_diffusion(value);
+            }
+            ParameterControl::ReverbDecay(value) => {
+                self.config.reverb.decay = value;
+                self.reverb.set_decay(value);
+            }
+            ParameterControl::ReverbBrightnessHz(value) => {
+                self.config.reverb.brightness_hz = value;
+                self.reverb.set_brightness_hz(value);
             }
         }
-        self.apply_config(config);
+        self.drain_remaining = None;
     }
 
     /// Renders one frame through the full chain and updates stereo feedback.
@@ -662,9 +792,9 @@ impl Processor {
     /// unused frames.
     ///
     /// The method mutes aspiration temporarily, but does not change the
-    /// settings that the host sees. It restores the configuration before
-    /// completion resets the state. `Some(0)` records completion, so later
-    /// drain calls continue to return zero.
+    /// settings that the host sees. It clears the mute before completion
+    /// resets the state. `Some(0)` records completion, so later drain calls
+    /// continue to return zero.
     fn drain_into(
         &mut self,
         frames: usize,
@@ -672,19 +802,11 @@ impl Processor {
     ) -> Result<usize, Error> {
         self.check_block(frames)?;
         let count = self.drain_remaining.unwrap_or(0).min(frames);
-        let configured = self.config.resynthesis;
-        if configured.formant.aspiration_mix != 0.0 {
-            let mut silent = configured;
-            silent.formant.aspiration_mix = 0.0;
-            // Zero aspiration is valid in all validated configurations.
-            self.resynthesis.apply_config(silent);
-        }
+        self.resynthesis.set_aspiration_muted(true);
         for index in 0..count {
             write(index, self.next(0));
         }
-        if configured.formant.aspiration_mix != 0.0 {
-            self.resynthesis.apply_config(configured);
-        }
+        self.resynthesis.set_aspiration_muted(false);
         if let Some(remaining) = self.drain_remaining {
             let remaining = remaining - count;
             if remaining == 0 {
