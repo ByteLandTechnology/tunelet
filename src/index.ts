@@ -8,13 +8,7 @@
  * `noteMaskFromKeyScale`, `parseMidiBytes`, `initSync` and the configuration,
  * patch, event and feedback types.
  */
-import init, {
-  Tunelet,
-  defaultConfig,
-  initSync,
-  noteMaskFromKeyScale,
-  parseMidiBytes,
-} from "../pkg/tunelet.js";
+import init from "../pkg/tunelet.js";
 import type { InitInput, InitOutput } from "../pkg/tunelet.js";
 
 export {
@@ -23,7 +17,7 @@ export {
   initSync,
   noteMaskFromKeyScale,
   parseMidiBytes,
-};
+} from "../pkg/tunelet.js";
 export * from "../pkg/tunelet.js";
 
 /** The shared initialization promise, which a failure clears. */
@@ -88,7 +82,7 @@ async function initialize(
     const fs: typeof import("node:fs/promises") = await import(
       /* webpackIgnore: true */ /* @vite-ignore */ moduleName
     );
-    return initSync({ module: await fs.readFile(input) });
+    return init({ module_or_path: await fs.readFile(input) });
   }
 
   return init({ module_or_path: input });
