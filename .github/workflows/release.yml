@@ -57,18 +57,22 @@ jobs:
           toolchain: "1.99.1"
           components: clippy, rustfmt
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-bin: "false"
       - run: cargo install wasm-pack --version 0.15.1 --locked
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24.22.2"
-          package-manager-cache: false
+          cache: "npm"
       - run: npm ci
       - run: cargo package --locked
-      # The prepack script compiles the Wasm bindings and the TypeScript entry.
+      # verify:pack builds the package and checks loadTunelet().
       - id: pack-npm
         run: |
+          npm run verify:pack
           mkdir -p "$RUNNER_TEMP/npm-package"
-          npm pack --pack-destination "$RUNNER_TEMP/npm-package"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/npm-package"
           mv "$RUNNER_TEMP/npm-package"/tunelet-*.tgz "$RUNNER_TEMP/npm-package/npm-package.tgz"
           sha256=$(sha256sum "$RUNNER_TEMP/npm-package/npm-package.tgz" | cut -d ' ' -f 1)
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
@@ -76,9 +80,10 @@ jobs:
       # GitHub Packages accepts only names in the scope of the owner.
       - id: pack-github
         run: |
-          mkdir -p "$RUNNER_TEMP/github-package"
           npm pkg set name=@bytelandtechnology/tunelet
-          npm pack --pack-destination "$RUNNER_TEMP/github-package"
+          npm run verify:pack
+          mkdir -p "$RUNNER_TEMP/github-package"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/github-package"
           mv "$RUNNER_TEMP/github-package"/bytelandtechnology-tunelet-*.tgz "$RUNNER_TEMP/github-package/github-package.tgz"
           sha256=$(sha256sum "$RUNNER_TEMP/github-package/github-package.tgz" | cut -d ' ' -f 1)
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
