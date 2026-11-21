@@ -69,17 +69,11 @@ impl Design {
     fn two_pole(rate: f32, frequency: f32, q: f32, high: bool) -> Self {
         let (_, cos, alpha) = Self::two_pole_terms(rate, frequency, q);
         let b = if high {
-            [
-                ((cos as f64 + 1.0) * 0.5) as f32,
-                -(cos + 1.0),
-                ((cos as f64 + 1.0) * 0.5) as f32,
-            ]
+            let b0 = f64::midpoint(cos as f64, 1.0) as f32;
+            [b0, -(cos + 1.0), b0]
         } else {
-            [
-                ((1.0 - cos as f64) * 0.5) as f32,
-                1.0 - cos,
-                ((1.0 - cos as f64) * 0.5) as f32,
-            ]
+            let b0 = f64::midpoint(1.0, -(cos as f64)) as f32;
+            [b0, 1.0 - cos, b0]
         };
         Self {
             b,

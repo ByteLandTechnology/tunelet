@@ -213,9 +213,10 @@ impl CorrectionTable {
         }
         if self.count > 0 {
             for i in 1..self.count {
-                self.midpoints[i] = (self.periods[i - 1] + self.periods[i]) / 2;
+                self.midpoints[i] = i32::midpoint(self.periods[i - 1], self.periods[i]);
             }
-            self.midpoints[self.count] = (self.periods[self.count - 1] + self.periods[0] * 2) / 2;
+            self.midpoints[self.count] =
+                i32::midpoint(self.periods[self.count - 1], self.periods[0] * 2);
             self.midpoints[0] = self.midpoints[self.count] / 2;
         }
     }
