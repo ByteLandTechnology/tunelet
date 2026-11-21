@@ -178,4 +178,10 @@ impl<'a> ValidatedEvents<'a> {
         self.remaining = remaining;
         Some(ValidatedEvent(event.event))
     }
+
+    /// Returns the offset of the next event without consumption, or `None` if
+    /// no events remain.
+    pub(crate) fn peek_offset(&self) -> Option<usize> {
+        self.remaining.first().map(|event| event.offset)
+    }
 }

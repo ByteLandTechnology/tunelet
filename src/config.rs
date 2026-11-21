@@ -9,12 +9,19 @@ use crate::Error;
 use crate::ResynthesisConfig;
 use std::num::NonZeroUsize;
 
-/// The sample rate of the input and the output.
+/// The lowest supported sample rate in hertz.
+pub(crate) const MIN_SAMPLE_RATE_HZ: u32 = 8_000;
+/// The highest supported sample rate in hertz.
+pub(crate) const MAX_SAMPLE_RATE_HZ: u32 = 192_000;
+
+/// The sample rate of the input and the output, 8000..=192000 Hz.
 ///
-/// The default is 44.1 kHz. The prepared delay and filter layouts support only
-/// the listed rates. To convert an integer device rate, use
-/// [`SampleRate::try_from`]. The rate of a processor is fixed at construction.
-/// To change the rate, you must make a new processor.
+/// The default is 44.1 kHz. To convert an integer device rate in
+/// 8000..=192000 Hz, use [`SampleRate::try_from`]. At 44.1 kHz and 48 kHz, the
+/// processor runs directly at that rate. At other rates, a fixed-point
+/// polyphase resampler converts to and from the 44.1 kHz or 48 kHz core. The
+/// rate of a processor is fixed at construction. To change the rate, you must
+/// make a new processor.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SampleRate {
@@ -23,14 +30,21 @@ pub enum SampleRate {
     Hz44100,
     /// 48 kHz.
     Hz48000,
+    /// Another integer rate in 8000..=192000 Hz, from [`Self::try_from`].
+    #[non_exhaustive]
+    Custom {
+        /// The rate in hertz, 8000..=192000, except 44,100 and 48,000.
+        hz: u32,
+    },
 }
 
 impl SampleRate {
-    /// Returns the rate in hertz.
+    /// Returns the rate in hertz, 8000..=192000.
     pub const fn as_u32(self) -> u32 {
         match self {
             Self::Hz44100 => 44_100,
             Self::Hz48000 => 48_000,
+            Self::Custom { hz } => hz,
         }
     }
 
@@ -38,22 +52,39 @@ impl SampleRate {
     pub fn hz(self) -> f32 {
         self.as_u32() as f32
     }
+
+    /// Selects the 44.1 kHz or 48 kHz internal core rate for this host rate.
+    ///
+    /// Multiples and divisors of 44,100 Hz use the 44.1 kHz core. All other
+    /// rates use the 48 kHz core.
+    pub(crate) const fn core_rate(self) -> Self {
+        let hz = self.as_u32();
+        if hz == 44_100 || hz == 48_000 {
+            self
+        } else if hz.is_multiple_of(44_100) || 44_100_u32.is_multiple_of(hz) {
+            Self::Hz44100
+        } else {
+            Self::Hz48000
+        }
+    }
 }
 
 impl TryFrom<u32> for SampleRate {
     type Error = Error;
 
-    /// Converts a device sample rate in hertz.
+    /// Converts a device sample rate in hertz, 8000..=192000.
+    ///
+    /// Returns [`Self::Hz44100`] for 44,100 and [`Self::Hz48000`] for 48,000.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::UnsupportedSampleRate`] with `hz`, unless the value is
-    /// exactly 44,100 or 48,000. The function does not resample and does not
-    /// select the nearest rate.
+    /// Returns [`Error::UnsupportedSampleRate`] with `hz` if `hz` is outside
+    /// 8000..=192000.
     fn try_from(hz: u32) -> Result<Self, Self::Error> {
         match hz {
             44_100 => Ok(Self::Hz44100),
             48_000 => Ok(Self::Hz48000),
+            MIN_SAMPLE_RATE_HZ..=MAX_SAMPLE_RATE_HZ => Ok(Self::Custom { hz }),
             _ => Err(Error::UnsupportedSampleRate { hz }),
         }
     }

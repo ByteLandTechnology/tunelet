@@ -7,8 +7,9 @@ use crate::effects::warm::Warm;
 use crate::events::{ValidatedEvent, ValidatedEvents};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
+use crate::resample::Resampler;
 use crate::resynthesis::{self, Resynthesis};
-use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
+use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, SampleRate, TimedEvent};
 
 /// A prepared vocal processor with state, mono input and stereo synthesis.
 ///
@@ -27,6 +28,11 @@ use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
 pub struct Processor {
     /// The fixed rate and the block limit for each call.
     preparation: PrepareConfig,
+    /// The internal 44.1 kHz or 48 kHz rate for the DSP stages.
+    core_rate: SampleRate,
+    /// The optional polyphase rate converter for host rates other than 44.1
+    /// kHz and 48 kHz.
+    resampler: Option<Resampler>,
     /// The settings that the host sees.
     ///
     /// The temporary aspiration mute of a drain is not stored here.
@@ -91,8 +97,7 @@ impl Processor {
     /// stream starts from the low 32 bits of `random_seed`.
     ///
     /// Punch uses its default cached drive until the first window of 100
-    /// frames with Punch enabled. The initial note table of correction has the
-    /// rate behavior that [`crate::CorrectionConfig`] describes.
+    /// frames with Punch enabled.
     ///
     /// # Errors
     ///
@@ -102,18 +107,22 @@ impl Processor {
     /// not zero and that the sample rate is supported.
     pub fn new(preparation: PrepareConfig, config: ProcessorConfig) -> Result<Self, Error> {
         config.validate()?;
-        let rate = preparation.sample_rate;
+        let host_rate = preparation.sample_rate;
+        let core_rate = host_rate.core_rate();
+        let resampler = Resampler::new(host_rate, core_rate, preparation.max_block_frames.get())?;
         // Drive uses the default gain until the first 100-frame peak window.
-        let mut punch = Punch::new(rate, PunchConfig::default());
+        let mut punch = Punch::new(core_rate, PunchConfig::default());
         punch.set_config(config.punch);
         Ok(Self {
             preparation,
+            core_rate,
+            resampler,
             config,
             punch,
-            warm: Warm::new(rate, config.warm),
-            resynthesis: Box::new(Resynthesis::new(rate, config.resynthesis)),
+            warm: Warm::new(core_rate, config.warm),
+            resynthesis: Box::new(Resynthesis::new(core_rate, config.resynthesis)),
             alien: Alien::new(config.alien),
-            reverb: Reverb::new(rate, config.reverb),
+            reverb: Reverb::new(core_rate, config.reverb),
             numeric: NumericContext::new(config.resynthesis.random_seed as u32),
             peak: 0,
             input_peak: 0,
@@ -201,12 +210,28 @@ impl Processor {
     ) -> Result<(), Error> {
         let mut events = self.validate(audio, events)?;
         self.drain_remaining = None;
-        for (index, sample) in audio.iter_mut().enumerate() {
-            while let Some(event) = events.next_at(index) {
+        if self.resampler.is_none() {
+            for (index, sample) in audio.iter_mut().enumerate() {
+                while let Some(event) = events.next_at(index) {
+                    self.apply(event);
+                }
+                let output = self.next(*sample);
+                *sample = ((output[0] as i32 + output[1] as i32) >> 1) as i16;
+            }
+            return Ok(());
+        }
+        let mut cursor = 0;
+        while cursor < audio.len() {
+            while let Some(event) = events.next_at(cursor) {
                 self.apply(event);
             }
-            let output = self.next(*sample);
-            *sample = ((output[0] as i32 + output[1] as i32) >> 1) as i16;
+            let end = events.peek_offset().unwrap_or(audio.len());
+            let core_count = self.run_resampled_core(&audio[cursor..end]);
+            let slice = &mut audio[cursor..end];
+            self.finish_resampled_output(core_count, slice.len(), |index, frame| {
+                slice[index] = ((i32::from(frame[0]) + i32::from(frame[1])) >> 1) as i16;
+            });
+            cursor = end;
         }
         Ok(())
     }
@@ -291,20 +316,23 @@ impl Processor {
         Ok(count)
     }
 
-    /// Returns the finite tail budget for the current configuration.
+    /// Returns the finite tail budget in host frames for the current
+    /// configuration.
     ///
     /// This value is a configured limit. It is not the number of drain frames
     /// that are left, and it is not a measured decay time. It can include
     /// silence. It can also stop filter output that continues for a long
     /// time.
     pub fn tail_frames(&self) -> usize {
-        self.resynthesis
+        let core_tail = self
+            .resynthesis
             .tail_frames()
             .saturating_add(alien::tail_frames(self.config.alien))
-            .saturating_add(reverb::tail_frames(
-                self.preparation.sample_rate,
-                self.config.reverb,
-            ))
+            .saturating_add(reverb::tail_frames(self.core_rate, self.config.reverb));
+        match &self.resampler {
+            Some(resampler) => resampler.tail_frames(core_tail),
+            None => core_tail,
+        }
     }
 
     /// Returns the fixed sample rate and block limit.
@@ -322,13 +350,18 @@ impl Processor {
         self.config
     }
 
-    /// Returns the nominal resynthesis latency: 1,593 frames at both rates.
+    /// Returns the nominal latency in host frames.
     ///
-    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
-    /// and effects have their own timing. Thus, this value does not align all
-    /// paths.
+    /// At 44.1 kHz and 48 kHz, the value is 1,593 frames and the dry path has
+    /// a delay of 1,543 frames. At other rates, the value scales the core
+    /// delay to host frames and adds the polyphase filter delay. Resampled
+    /// voices, choir delays and effects have their own timing. Thus, this
+    /// value does not align all paths.
     pub fn latency_frames(&self) -> usize {
-        resynthesis::LATENCY_FRAMES
+        match &self.resampler {
+            Some(resampler) => resampler.latency_frames(resynthesis::LATENCY_FRAMES),
+            None => resynthesis::LATENCY_FRAMES,
+        }
     }
 
     /// Returns the pitch, stereo peak and frame count, and does not clear them.
@@ -336,9 +369,15 @@ impl Processor {
     /// To start a new peak window, use [`take_feedback`](Self::take_feedback).
     pub fn feedback(&self) -> Feedback {
         let estimate = self.resynthesis.estimate();
+        let period_samples = if self.resampler.is_some() {
+            (f64::from(estimate.period_samples) * f64::from(self.preparation.sample_rate.as_u32())
+                / f64::from(self.core_rate.as_u32())) as f32
+        } else {
+            estimate.period_samples
+        };
         Feedback {
             resample_ratio: self.last_resample_ratio,
-            period_samples: estimate.period_samples,
+            period_samples,
             frequency_hz: estimate.frequency_hz,
             target_midi_note: self.resynthesis.target_note(),
             voiced: estimate.voiced,
@@ -536,6 +575,9 @@ impl Processor {
     /// When the method clears the held keys, it does not load the configured
     /// scale again. For a fully new state, make a new processor.
     pub fn reset(&mut self) {
+        if let Some(resampler) = &mut self.resampler {
+            resampler.reset();
+        }
         self.punch.reset();
         self.warm.reset();
         self.resynthesis.reset();
@@ -602,14 +644,8 @@ impl Processor {
         self.apply_config(config);
     }
 
-    /// Renders one frame through the full chain and updates stereo feedback.
-    ///
-    /// Resynthesis produces Q14 audio. Output gain is Q8. The multiplication
-    /// wraps before the shift. PCM conversion clips to the symmetric 16-bit
-    /// range. This order and the peak measurement before the downmix are part
-    /// of the output.
-    fn next(&mut self, mut input: i16) -> [i16; 2] {
-        self.input_peak = self.input_peak.max((input as i32).abs());
+    /// Renders one core frame through the stages without host meter updates.
+    fn next_core(&mut self, mut input: i16) -> [i16; 2] {
         if self.config.punch.enabled {
             input = self.punch.process_sample(input, &mut self.numeric);
         }
@@ -621,11 +657,17 @@ impl Processor {
         let alien = self.alien.process_sample(voice);
         let reverb = self.reverb.process_sample(alien);
         let gain = (self.config.output_gain as f64 * 256.0) as i32;
-        let result = reverb.map(|sample| {
+        reverb.map(|sample| {
             (sample.to_bits().wrapping_mul(gain) >> 8)
                 .wrapping_shl(1)
                 .clamp(-32767, 32767) as i16
-        });
+        })
+    }
+
+    /// Updates the stereo peaks and the host frame counter for one output
+    /// frame.
+    #[inline]
+    fn record_output(&mut self, result: [i16; 2]) {
         self.peak = self
             .peak
             .max((result[0] as i32).abs())
@@ -634,7 +676,74 @@ impl Processor {
             *peak = (*peak).max((sample as i32).abs());
         }
         self.frames = self.frames.saturating_add(1);
+    }
+
+    /// Renders one frame through the full chain and updates stereo feedback.
+    ///
+    /// Resynthesis produces Q14 audio. Output gain is Q8. The multiplication
+    /// wraps before the shift. PCM conversion clips to the symmetric 16-bit
+    /// range. This order and the peak measurement before the downmix are part
+    /// of the output.
+    fn next(&mut self, input: i16) -> [i16; 2] {
+        self.input_peak = self.input_peak.max((input as i32).abs());
+        let result = self.next_core(input);
+        self.record_output(result);
         result
+    }
+
+    /// Resamples a host input segment and runs the internal core stages on the
+    /// generated core frames.
+    fn run_resampled_core(&mut self, input: &[i16]) -> usize {
+        for &sample in input {
+            self.input_peak = self.input_peak.max(i32::from(sample).abs());
+        }
+        let core_count = self
+            .resampler
+            .as_mut()
+            .expect("resampler active")
+            .resample_input(input);
+        for index in 0..core_count {
+            let sample = self
+                .resampler
+                .as_ref()
+                .expect("resampler active")
+                .core_input[index];
+            let frame = self.next_core(sample);
+            self.resampler
+                .as_mut()
+                .expect("resampler active")
+                .core_output[index] = frame;
+        }
+        core_count
+    }
+
+    /// Resamples the current `core_output` prefix to `host_frames` stereo
+    /// frames and updates output meters.
+    fn finish_resampled_output(
+        &mut self,
+        core_count: usize,
+        host_frames: usize,
+        mut write: impl FnMut(usize, [i16; 2]),
+    ) {
+        let mut peak = self.peak;
+        let mut output_peaks = self.output_peaks;
+        let mut frames = self.frames;
+        self.resampler
+            .as_mut()
+            .expect("resampler active")
+            .resample_output(core_count, host_frames, |index, frame| {
+                peak = peak
+                    .max(i32::from(frame[0]).abs())
+                    .max(i32::from(frame[1]).abs());
+                for (channel_peak, sample) in output_peaks.iter_mut().zip(frame) {
+                    *channel_peak = (*channel_peak).max(i32::from(sample).abs());
+                }
+                frames = frames.saturating_add(1);
+                write(index, frame);
+            });
+        self.peak = peak;
+        self.output_peaks = output_peaks;
+        self.frames = frames;
     }
 
     /// Checks the block, applies all controls at each offset and writes each
@@ -649,11 +758,26 @@ impl Processor {
     ) -> Result<(), Error> {
         let mut events = self.validate(input, events)?;
         self.drain_remaining = None;
-        for (index, sample) in input.iter().enumerate() {
-            while let Some(event) = events.next_at(index) {
+        if self.resampler.is_none() {
+            for (index, sample) in input.iter().enumerate() {
+                while let Some(event) = events.next_at(index) {
+                    self.apply(event);
+                }
+                write(index, self.next(*sample));
+            }
+            return Ok(());
+        }
+        let mut cursor = 0;
+        while cursor < input.len() {
+            while let Some(event) = events.next_at(cursor) {
                 self.apply(event);
             }
-            write(index, self.next(*sample));
+            let end = events.peek_offset().unwrap_or(input.len());
+            let core_count = self.run_resampled_core(&input[cursor..end]);
+            self.finish_resampled_output(core_count, end - cursor, |index, frame| {
+                write(cursor + index, frame);
+            });
+            cursor = end;
         }
         Ok(())
     }
@@ -679,8 +803,29 @@ impl Processor {
             // Zero aspiration is valid in all validated configurations.
             self.resynthesis.apply_config(silent);
         }
-        for index in 0..count {
-            write(index, self.next(0));
+        if self.resampler.is_none() {
+            for index in 0..count {
+                write(index, self.next(0));
+            }
+        } else if count > 0 {
+            let core_count = self
+                .resampler
+                .as_mut()
+                .expect("resampler active")
+                .resample_silence(count);
+            for index in 0..core_count {
+                let sample = self
+                    .resampler
+                    .as_ref()
+                    .expect("resampler active")
+                    .core_input[index];
+                let frame = self.next_core(sample);
+                self.resampler
+                    .as_mut()
+                    .expect("resampler active")
+                    .core_output[index] = frame;
+            }
+            self.finish_resampled_output(core_count, count, write);
         }
         if configured.formant.aspiration_mix != 0.0 {
             self.resynthesis.apply_config(configured);

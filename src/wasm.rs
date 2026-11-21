@@ -119,10 +119,10 @@ pub struct WasmProcessor {
 impl WasmProcessor {
     /// Prepares a processor and its reusable PCM buffers.
     ///
-    /// `sample_rate` must be 44100 or 48000. `max_block_frames` must be an
-    /// integer in 1..=4294967295. It is a limit for each call, and smaller
-    /// blocks and empty blocks are also valid. If you omit `config`, the
-    /// processor uses the default configuration. The constructor validates
+    /// `sample_rate` must be an integer in 8000..=192000. `max_block_frames`
+    /// must be an integer in 1..=4294967295. It is a limit for each call, and
+    /// smaller blocks and empty blocks are also valid. If you omit `config`,
+    /// the processor uses the default configuration. The constructor validates
     /// the settings before it allocates the processor or the PCM buffers. In
     /// TypeScript, use `new Tunelet(sampleRate, maxBlockFrames, config)`.
     ///
@@ -130,7 +130,7 @@ impl WasmProcessor {
     ///
     /// The constructor throws if one of these conditions occurs:
     ///
-    /// - The rate is not 44100 or 48000.
+    /// - The rate is not an integer or is outside 8000..=192000.
     /// - The block limit is not an integer or is out of range.
     /// - The configuration object is malformed or a field is missing.
     /// - The configuration is not valid.
@@ -146,11 +146,14 @@ impl WasmProcessor {
     ) -> Result<WasmProcessor, JsError> {
         // Accept JavaScript numbers without the u32 coercion of wasm-bindgen.
         // That coercion silently truncates fractions and wraps large values.
-        let rate = match sample_rate {
-            44100.0 => SampleRate::Hz44100,
-            48000.0 => SampleRate::Hz48000,
-            _ => return Err(JsError::new("sampleRate must be 44100 or 48000")),
-        };
+        let min_rate = f64::from(crate::config::MIN_SAMPLE_RATE_HZ);
+        let max_rate = f64::from(crate::config::MAX_SAMPLE_RATE_HZ);
+        if !(min_rate..=max_rate).contains(&sample_rate) || sample_rate.fract() != 0.0 {
+            return Err(JsError::new(
+                "sampleRate must be an integer in 8000..=192000",
+            ));
+        }
+        let rate = SampleRate::try_from(sample_rate as u32)?;
         if !(1.0..=f64::from(u32::MAX)).contains(&max_block_frames)
             || max_block_frames.fract() != 0.0
         {

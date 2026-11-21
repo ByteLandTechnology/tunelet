@@ -50,8 +50,8 @@ browsers and Node.js.
 - **No dependencies**: The default Rust build has no dependencies and uses
   only safe Rust.
 
-The input is mono signed 16-bit PCM at 44.1 kHz or 48 kHz. The output is
-stereo or mono 16-bit PCM.
+The input is mono signed 16-bit PCM at an integer rate in 8000..=192000 Hz. The
+output is stereo or mono 16-bit PCM.
 
 ## Installation
 
@@ -292,7 +292,7 @@ These calls read the state of the processor. They do not change the audio.
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
-| `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
+| `latency_frames()`   | The nominal delay in host frames (1,593 frames at 44.1 kHz and 48 kHz) |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
 
 The telemetry includes these items:
@@ -304,8 +304,10 @@ The telemetry includes these items:
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
 The peak windows of the telemetry are independent of the peak window of the
-feedback. The latency is nominal. Dry mixes, resampled voices and effects
-have different timing.
+feedback. The latency is nominal. At 44.1 kHz and 48 kHz, the processor
+bypasses rate conversion. Other rates scale the core delay to host frames and
+add the polyphase filter delay. Dry mixes, resampled voices and effects have
+different timing.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
