@@ -984,9 +984,9 @@ impl HarmonyState {
     fn resume_pending(&mut self, voice: usize) {
         let mut best_order = 0;
         let mut best = None;
-        for pending in 0..128 {
-            if self.pending_order[pending] > best_order {
-                best_order = self.pending_order[pending];
+        for (pending, &order) in self.pending_order.iter().enumerate() {
+            if order > best_order {
+                best_order = order;
                 best = Some(pending);
             }
         }
