@@ -64,23 +64,23 @@ pub struct ReverbConfig {
     pub mix: f32,
     /// The diffusion control without a unit, 0..=1.
     ///
-    /// The default is 0.5. MediumHall and LargeHall scale their allpass
-    /// coefficients with it. Binaural uses it as the gain of its early taps.
-    /// In Echo, it sets the distance of the feedback tap. Schroeder and
-    /// SmallRoom do not use it.
+    /// The default is 0.5. Schroeder, SmallRoom, MediumHall and LargeHall
+    /// scale their allpass coefficients with it. Binaural uses it as the gain
+    /// of its early taps. In Echo, it sets the distance of the feedback tap.
     pub diffusion: f32,
     /// The feedback control without a unit, 0..=1.
     ///
     /// The default is 0.6. The prepared coefficient is approximately
     /// `decay / 1.05`. It is less than unity also at the maximum. This value
-    /// is not a decay time in seconds. Some paths also use fixed feedback
-    /// coefficients. Binaural does not use this control.
+    /// is not a decay time in seconds. All modes use this control for
+    /// feedback.
     pub decay: f32,
-    /// The low-pass cutoff in hertz for networks with damped paths, 80..=20000.
+    /// The low-pass cutoff in hertz for the two filters in the delay network,
+    /// 80..=20000.
     ///
-    /// The default is 4000 Hz. The preparation also limits it to 0.49 ×
-    /// sample rate. A change of the cutoff keeps the sample histories of the
-    /// filters.
+    /// The default is 4000 Hz. All modes use these filters. The preparation
+    /// also limits the cutoff to 0.49 × sample rate. A change of the cutoff
+    /// keeps the sample histories of the filters.
     pub brightness_hz: f32,
 }
 impl Default for ReverbConfig {
@@ -236,7 +236,8 @@ impl Reverb {
             ReverbMode::Echo => {
                 d.put(mono, t[0]);
                 let echo: Fixed<0> = Fixed::<0>::from_bits(t[39] as i32).mul(self.diffuse);
-                d.comb(t[0], echo.to_bits() as usize, self.decay);
+                d.comb_lpf(t[0], echo.to_bits() as usize, self.decay, &mut self.lpf2);
+                d.lpf(t[2], &mut self.lpf1);
                 [
                     mul(left, dry) + mul(self.mix, d.get(t[25]) - d.get(t[32])),
                     mul(right, dry) - mul(self.mix, d.get(t[26]) - d.get(t[31])),
@@ -246,8 +247,9 @@ impl Reverb {
                 for i in [0, 13, 23, 29] {
                     d.put(mono.div::<0, 14>(TWO), t[i]);
                 }
-                for (a, b, g) in [(0, 12, 0.9), (13, 22, 0.89), (23, 28, 0.87), (29, 34, 0.86)] {
-                    d.comb(t[a], t[b], q14(g));
+                d.comb_lpf(t[0], t[12], mul(self.decay, q14(0.9)), &mut self.lpf2);
+                for (a, b, g) in [(13, 22, 0.89), (23, 28, 0.87), (29, 34, 0.86)] {
+                    d.comb(t[a], t[b], mul(self.decay, q14(g)));
                 }
                 d.fir(
                     t[40],
@@ -258,8 +260,9 @@ impl Reverb {
                         (t[34], q14(0.25)),
                     ],
                 );
-                d.allpass(t[40], t[43], self.decay);
-                d.allpass(t[44], t[45], self.decay);
+                d.lpf(t[40], &mut self.lpf1);
+                d.allpass(t[40], t[43], mul(self.diffuse, q14(0.7)));
+                d.allpass(t[44], t[45], mul(self.diffuse, q14(0.7)));
                 let value = mul(mono, dry) + mul(self.mix, d.get(t[45]));
                 [value, value]
             }
@@ -267,11 +270,11 @@ impl Reverb {
                 d.put(left, t[0]);
                 d.put(right, t[40]);
                 for (a, b, g) in [(1, 15, 0.3), (2, 7, 0.7), (8, 14, 0.5), (18, 24, 0.5)] {
-                    d.allpass(t[a], t[b], q14(g));
+                    d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
                 }
                 d.comb_lpf(t[40], t[35], self.decay, &mut self.lpf1);
                 for (a, b, g) in [(41, 50, 0.3), (42, 46, 0.6), (53, 57, 0.5)] {
-                    d.allpass(t[a], t[b], q14(g));
+                    d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
                 }
                 d.comb_lpf(t[0], t[66], self.decay, &mut self.lpf2);
                 [
@@ -296,6 +299,7 @@ impl Reverb {
                     d.get(t[0] + seed) + d.get(t[11] + seed) + d.get(t[21] + seed),
                 );
                 d.put(a, tap);
+                let a = d.comb(tap, t[35], self.decay);
                 d.lpf(filter, &mut self.lpf1);
                 let out = mul(mono, dry) + mul(self.mix, d.get(t[40] + filter) + a);
                 let b = mul(
@@ -303,6 +307,7 @@ impl Reverb {
                     d.get(t[47] + seed) + d.get(t[48] + seed) + d.get(t[54] + seed),
                 );
                 d.put(b, t[40] + tap);
+                let b = d.comb(t[40] + tap, t[66], self.decay);
                 d.lpf(t[40] + filter, &mut self.lpf2);
                 [out, mul(mono, dry) + mul(self.mix, d.get(filter) + b)]
             }
@@ -401,10 +406,10 @@ pub(crate) fn tail_frames(rate: SampleRate, config: ReverbConfig) -> usize {
     let decay = config.decay as f64 / 1.05;
     let diffuse = config.diffusion as f64;
     let gain = match config.mode {
-        ReverbMode::Binaural => 0.0,
+        ReverbMode::Binaural => decay,
         ReverbMode::Echo => decay,
-        ReverbMode::Schroeder => 0.9f64.max(decay),
-        ReverbMode::SmallRoom => 0.7f64.max(decay),
+        ReverbMode::Schroeder => (0.7 * diffuse).max(0.9 * decay),
+        ReverbMode::SmallRoom => (0.7 * diffuse).max(decay),
         ReverbMode::MediumHall => (0.9 * diffuse).max(decay),
         ReverbMode::LargeHall => (0.95 * diffuse).max(decay),
     };
