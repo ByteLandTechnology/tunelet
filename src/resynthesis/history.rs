@@ -53,8 +53,8 @@ fn interpolation_taps<T: Copy>(buffer: &[T; HISTORY], center: i32) -> [T; 3] {
 ///
 /// Then it truncates the result toward zero. The fraction that is left is
 /// relative to that center. The taps wrap through the history, but the
-/// returned center does not. All intermediate products and sums keep the
-/// 32-bit wrap order of the engine.
+/// returned center does not. Coordinate offsets wrap at 32 bits. Sample
+/// products use `i64` arithmetic and clamp to `i32`.
 pub(super) fn interpolation(buffer: &[Q14; HISTORY], position: Q14) -> (Q14, i32) {
     let bits = position.to_bits();
     let center = if position > Q14::ZERO {

@@ -1,9 +1,9 @@
 //! The fixed-point operations, the lookup tables and the state that each
 //! processor keeps for these operations.
 //!
-//! Integer products wrap before the shift. Each conversion between integer
-//! and floating-point values is explicit, because intermediate rounding
-//! changes the audio.
+//! Fixed-point products use `i64` arithmetic and clamp to `i32`. Each
+//! conversion between integer and floating-point values is explicit, because
+//! intermediate quantization changes the audio.
 
 pub(crate) mod fixed;
 pub(crate) mod rng;
@@ -12,31 +12,35 @@ use fixed::Q14;
 use rng::RandomStream;
 use tables::{SINC, TAN};
 
-/// Multiplies two signed words with 32-bit wrap, then does an arithmetic
-/// shift to the right.
-///
-/// The caller must supply a shift that is less than 32. Do not widen the
-/// product. If the intermediate product overflows, a wider product gives a
-/// different result.
+/// Clamps a signed 64-bit integer to `i32::MIN..=i32::MAX`.
 #[inline]
-pub(crate) fn mul_shift(a: i32, b: i32, shift: u32) -> i32 {
-    a.wrapping_mul(b) >> shift
+pub(crate) fn clamp_i32(value: i64) -> i32 {
+    value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
-/// Removes 14 fractional bits with a signed half-unit adjustment.
+/// Multiplies two signed words in `i64`, shifts right and clamps to `i32`.
 ///
-/// If the word is nonnegative, the function adds half a unit. If the word is
-/// negative, the function subtracts half a unit. Then an arithmetic shift
-/// removes the bits. The shift moves negative values down. This is not
-/// round-half-to-even, and it is not truncation toward zero. The half-unit
-/// adjustment also wraps.
+/// The caller must supply a shift that is less than 32.
 #[inline]
-pub(crate) fn round_q14(value: i32) -> i32 {
-    if value >= 0 {
-        value.wrapping_add(8192) >> 14
+pub(crate) fn mul_shift(a: i32, b: i32, shift: u32) -> i32 {
+    clamp_i32((i64::from(a) * i64::from(b)) >> shift)
+}
+
+/// Removes 14 fractional bits with a signed half-unit adjustment and clamps
+/// to `i32`.
+///
+/// If the value is nonnegative, the function adds half a unit. If the value
+/// is negative, the function subtracts half a unit. Then an arithmetic shift
+/// removes the bits, and the function clamps the result to
+/// `i32::MIN..=i32::MAX`. The shift moves negative values down.
+#[inline]
+pub(crate) fn round_q14(value: i64) -> i32 {
+    let rounded = if value >= 0 {
+        value.saturating_add(8192) >> 14
     } else {
-        value.wrapping_sub(8192) >> 14
-    }
+        value.saturating_sub(8192) >> 14
+    };
+    clamp_i32(rounded)
 }
 
 /// Converts an amplitude in decibels to a linear multiplier with
@@ -69,11 +73,15 @@ pub(crate) fn coefficient_to_exp_value(min: f32, max: f32, start: f32, position:
 /// Returns the value of a three-point parabola at a Q14 fractional offset
 /// from the center sample.
 ///
-/// The input words, the sums and the intermediate products wrap at 32 bits.
+/// The midpoint and the slope use `i64` arithmetic. Sums and differences
+/// saturate in `i32`. Intermediate products use `i64` arithmetic and clamp
+/// to `i32`.
 #[inline]
 pub(crate) fn quadratic(y0: Q14, y1: Q14, y2: Q14, fraction: Q14) -> Q14 {
-    let curvature = ((y0 + y2) >> 1) - y1;
-    let slope = (y2 - y0) >> 1;
+    let y0_i64 = i64::from(y0.to_bits());
+    let y2_i64 = i64::from(y2.to_bits());
+    let curvature = Q14::from_bits(clamp_i32((y0_i64 + y2_i64) >> 1)) - y1;
+    let slope = Q14::from_bits(clamp_i32((y2_i64 - y0_i64) >> 1));
     y1 + (curvature.mul::<14, 14>(fraction) + slope).mul(fraction)
 }
 
@@ -190,12 +198,13 @@ pub(crate) const HISTORY: usize = 11_568;
 /// scale at runtime.
 pub(crate) const ONE: i32 = 16_384;
 
-/// Multiplies two Q14 words with 32-bit wrap and arithmetic truncation.
+/// Multiplies two Q14 words in `i64` with arithmetic truncation and clamps
+/// to `i32`.
 ///
 /// This function does not add a half-unit adjustment. `round_q14` adds one.
 #[inline]
 pub(crate) fn mul14(left: i32, right: i32) -> i32 {
-    left.wrapping_mul(right) >> 14
+    mul_shift(left, right, 14)
 }
 
 /// Wraps a signed frame index into 0..HISTORY with the Euclidean remainder.
