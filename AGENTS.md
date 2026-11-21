@@ -97,12 +97,14 @@ cargo doc --locked --no-deps
 ```
 
 If you change the Wasm or TypeScript code, also run these commands.
-`npm run build` compiles `src/wasm.rs` and `src/index.ts`:
+`npm run build` compiles `src/wasm.rs` and `src/index.ts`.
+`npm run verify:pack` checks the npm archive:
 
 ```sh
 rustup target add wasm32-unknown-unknown
 npm ci
 npm run build
+npm run verify:pack
 ```
 
 - Make sure that there are no new warnings. This includes broken

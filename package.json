@@ -29,8 +29,9 @@
   "sideEffects": false,
   "scripts": {
     "build": "npm run build:wasm && npm run build:ts",
-    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-opt --features wasm --locked",
+    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-opt --no-pack --features wasm --locked && node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('pkg/.gitignore', { force: true });\"",
     "build:ts": "tsc",
+    "verify:pack": "node scripts/verify-pack.mjs",
     "prepack": "npm run build"
   },
   "devDependencies": {

@@ -59,6 +59,8 @@ jobs:
       # Trusted publishing needs npm 11.5.1 or later.
       - run: npm install --global npm@latest
       - run: npm ci
+      # Check the archive files and the Node.js imports before publication.
+      - run: npm run verify:pack
       # The prepack script builds the Wasm bindings and the TypeScript entry.
       - run: npm publish
 
@@ -88,6 +90,8 @@ jobs:
       - run: npm ci
       # GitHub Packages accepts only names in the scope of the owner.
       - run: npm pkg set name=@bytelandtechnology/tunelet
+      # Check the archive files and the Node.js imports before publication.
+      - run: npm run verify:pack
       # The prepack script builds the Wasm bindings and the TypeScript entry.
       - run: npm publish
         env:
