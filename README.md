@@ -171,6 +171,11 @@ voice. It disables the effects and the formant stage.
 | Reverb         | Echo, Schroeder, SmallRoom, Binaural, MediumHall, LargeHall | Disabled       | `reverb`                 |
 | Output gain    | Linear gain, 0..=64                                         | 1              | `output_gain`            |
 
+`resynthesis.correction.humanize` sets the sustained-note relaxation, in
+`0..=1`. The default is 0. `resynthesis.correction.flex_tune` sets the
+expressive deadband width around each target note, in `0..=1`. The default
+is 0.
+
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
 dry path starts after Warm and has a delay of 1,543 frames.
 
@@ -444,10 +449,11 @@ and show enums as string literals. To change the configuration, do these steps:
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+JavaScript `Error`. The optional `resynthesis.correction.humanize` and
+`resynthesis.correction.flexTune` fields default to 0 if they are absent.
+The optional `resynthesis.harmony.voices` field defaults to 4 if it is
+absent. The conversion ignores extra object properties. The generated
+declarations contain the parameter documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use

@@ -61,12 +61,12 @@ pub enum MultiVoiceMode {
 /// The controls for pitch-class correction, with target selection in the
 /// period domain.
 ///
-/// Correction is enabled by default, with all chromatic notes and a retune
-/// time of zero. Target selection and the smoothing of the correction ratio
-/// occur at each update of the pitch tracking. When a period is tracked,
-/// this update usually occurs every five frames. If the active note table is
-/// empty or correction is disabled, the ratio moves toward 1.0 at the same
-/// rate.
+/// Correction is enabled by default, with all chromatic notes, a retune time
+/// of zero, zero humanize and zero flex-tune. Target selection and the
+/// smoothing of the correction ratio occur at each update of the pitch
+/// tracking. When a period is tracked, this update usually occurs every five
+/// frames. If the active note table is empty or correction is disabled, the
+/// ratio moves toward 1.0 with `retune_ms`.
 ///
 /// Correction MIDI replaces the active note table. It does not change this
 /// configuration. A change to `notes` or to `enabled` loads the configured
@@ -106,6 +106,32 @@ pub struct CorrectionConfig {
     /// tracking update. A value that is not zero is a half-life. It is not a
     /// fixed time to get exactly to the target.
     pub retune_ms: f32,
+    /// The sustained-note relaxation without a unit, 0..=1. The default is 0.
+    ///
+    /// While the tracked pitch stays in one target bin, the smoothing
+    /// half-life increases toward `retune_ms + (400 - retune_ms) * humanize`
+    /// milliseconds. A target change, a table reload or a tracker restart
+    /// resets this ramp to `retune_ms`. Zero disables this relaxation. In
+    /// JavaScript, the field is optional and an absent value gives 0.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default),
+        tsify(optional)
+    )]
+    pub humanize: f32,
+    /// The expressive deadband width without a unit, 0..=1. The default is 0.
+    ///
+    /// Pitches inside the `1 - flex_tune` fraction of the half-bin around a
+    /// target period get the full correction ratio. Outside that inner zone,
+    /// the pull toward the target decreases to zero at the midpoint boundary.
+    /// Zero applies the full target ratio across the whole bin. In JavaScript,
+    /// the field is optional and an absent value gives 0.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default),
+        tsify(optional)
+    )]
+    pub flex_tune: f32,
 }
 
 impl Default for CorrectionConfig {
@@ -114,6 +140,8 @@ impl Default for CorrectionConfig {
             enabled: true,
             notes: NoteMask::default(),
             retune_ms: 0.0,
+            humanize: 0.0,
+            flex_tune: 0.0,
         }
     }
 }
@@ -121,21 +149,24 @@ impl Default for CorrectionConfig {
 impl CorrectionConfig {
     /// Validates all fields, also if correction is disabled.
     ///
-    /// All values of `enabled` and `notes` are valid. `retune_ms` must be
-    /// finite and in its documented inclusive range. Validation does not
-    /// clamp values. It does not change the state of the processor.
+    /// All values of `enabled` and `notes` are valid. `retune_ms`, `humanize`
+    /// and `flex_tune` must be finite and in their documented inclusive ranges.
+    /// Validation does not clamp values. It does not change the state of the
+    /// processor.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfig`], with the dotted path of the field and
-    /// the problem, if `retune_ms` is not valid.
+    /// the problem, if a field is not valid.
     pub fn validate(self) -> Result<(), Error> {
         check_range(
             "resynthesis.correction.retune_ms",
             self.retune_ms,
             0.0,
             400.0,
-        )
+        )?;
+        check_range("resynthesis.correction.humanize", self.humanize, 0.0, 1.0)?;
+        check_range("resynthesis.correction.flex_tune", self.flex_tune, 0.0, 1.0)
     }
 }
 
@@ -443,6 +474,15 @@ pub(crate) struct Resynthesis {
     /// The Q14 half-life coefficient for correction updates. These updates
     /// usually occur every five frames.
     correction_decay: Q14,
+    /// The Q14 sustained half-life coefficient for `humanize`, to a 400 ms
+    /// limit.
+    sustained_decay: Q14,
+    /// The Q14 dwell progress in the current target bin, 0..=1.
+    dwell: Q14,
+    /// The Q14 dwell increment for each five-frame tracking update.
+    dwell_step: Q14,
+    /// The Q14 flex-tune width, 0..=1.
+    flex_tune: Q14,
     /// If `true`, the current correction target and octave are selected.
     scale_initialized: bool,
     /// The index of the active target. It is valid only if the correction
@@ -451,6 +491,10 @@ pub(crate) struct Resynthesis {
     /// The signed power-of-two exponent that normalizes the input period
     /// into the range of the correction table.
     octave: i32,
+    /// The target index from the previous tracking update, for dwell resets.
+    previous_scale_index: usize,
+    /// The octave exponent from the previous tracking update, for dwell resets.
+    previous_octave: i32,
     /// The Q14 global pitch multiplier.
     shift: Q14,
     /// The plain integer modulation depth. It is the public control times
@@ -534,9 +578,15 @@ impl Resynthesis {
             post: [Biquad::new(), Biquad::new()],
             correction: Q14::ONE,
             correction_decay: Q14::ZERO,
+            sustained_decay: Q14::ZERO,
+            dwell: Q14::ZERO,
+            dwell_step: Q14::ZERO,
+            flex_tune: Q14::ZERO,
             scale_initialized: false,
             scale_index: 0,
             octave: 0,
+            previous_scale_index: 0,
+            previous_octave: 0,
             shift: Q14::ONE,
             modulation: 0,
             modulation_phase: Q14::ZERO,
@@ -571,6 +621,23 @@ impl Resynthesis {
         } else {
             let t = self.config.correction.retune_ms / 1000.0;
             Q14::from_f64(0.5_f64.powf(1.0 / ((self.rate.hz() / 5.0) * t) as f64))
+        };
+        if self.config.correction.humanize == 0.0 {
+            self.sustained_decay = self.correction_decay;
+            self.dwell_step = Q14::ZERO;
+        } else {
+            let sustained_ms = self.config.correction.retune_ms
+                + (400.0 - self.config.correction.retune_ms) * self.config.correction.humanize;
+            let t = sustained_ms / 1000.0;
+            self.sustained_decay =
+                Q14::from_f64(0.5_f64.powf(1.0 / ((self.rate.hz() / 5.0) * t) as f64));
+            self.dwell_step =
+                Q14::from_f64(1.0 / ((self.rate.hz() / 5.0) * 0.16) as f64).max(Q14::from_bits(1));
+        }
+        self.flex_tune = if self.config.correction.flex_tune == 0.0 {
+            Q14::ZERO
+        } else {
+            Q14::from_f64(self.config.correction.flex_tune as f64).max(Q14::from_bits(1))
         };
         let base = (self.rate.hz() / 100.0) as f64 * 0.2;
         let decay = (-std::f64::consts::LN_2 / base).exp();
@@ -649,6 +716,9 @@ impl Resynthesis {
         {
             self.scale.set_notes(config.correction.notes);
             self.scale_initialized = false;
+            self.dwell = Q14::ZERO;
+        } else if config.correction.humanize == 0.0 {
+            self.dwell = Q14::ZERO;
         }
         if old.pitch_ratio != config.pitch_ratio {
             self.configure_shift_filters();
@@ -716,7 +786,10 @@ impl Resynthesis {
         self.formant_position = 0;
         self.current_output_period = Q6::ZERO;
         self.correction = Q14::ONE;
+        self.dwell = Q14::ZERO;
         self.scale_initialized = false;
+        self.previous_scale_index = 0;
+        self.previous_octave = 0;
     }
 
     /// Applies a MIDI event that the API or the block code checked before.
@@ -731,6 +804,7 @@ impl Resynthesis {
     pub(crate) fn apply_correction_midi(&mut self, event: MidiEvent) {
         self.scale.apply_validated_midi(event);
         self.scale_initialized = false;
+        self.dwell = Q14::ZERO;
     }
 
     /// Returns the finite number of frames for a drain of resynthesis.
@@ -858,7 +932,9 @@ impl Resynthesis {
     ///
     /// The Q6 input period must be a usable tracking result. The target
     /// search moves through the midpoints, also across octave limits. The
-    /// global shift is part of the normalization.
+    /// global shift is part of the normalization. On a sustained bin,
+    /// `humanize` relaxes the decay toward `sustained_decay`. Outside the
+    /// `1 - flex_tune` inner zone, the pull toward `target_ratio` decreases.
     ///
     /// If correction is disabled or the active table is empty, the ratio moves
     /// toward 1.0. If the target selection starts again and the shifted
@@ -866,7 +942,9 @@ impl Resynthesis {
     /// multiplication by fixed-point 1.0 still wraps. Do not remove it.
     fn update_correction(&mut self, period: Q6) {
         let mut target_ratio = Q14::ONE;
+        let mut decay = self.correction_decay;
         if self.config.correction.enabled && self.scale.count != 0 {
+            let was_initialized = self.scale_initialized;
             let count = self.scale.count;
             // The correction table holds periods normalized to one octave.
             // They use the same units as the shifted target period below.
@@ -878,6 +956,9 @@ impl Resynthesis {
                 self.octave = 0;
                 target = self.shift.mul(period);
                 if target <= Q6::ZERO {
+                    self.previous_scale_index = 0;
+                    self.previous_octave = 0;
+                    self.dwell = Q14::ZERO;
                     self.correction = Q14::ONE;
                     return;
                 }
@@ -912,12 +993,46 @@ impl Resynthesis {
                     self.scale_index -= 1;
                 }
             }
+            if !was_initialized
+                || self.scale_index != self.previous_scale_index
+                || self.octave != self.previous_octave
+            {
+                self.previous_scale_index = self.scale_index;
+                self.previous_octave = self.octave;
+                self.dwell = Q14::ZERO;
+            } else if self.dwell_step != Q14::ZERO {
+                self.dwell = (self.dwell + self.dwell_step).min(Q14::ONE);
+                let weight = self.dwell.mul::<14, 14>(self.dwell);
+                decay = self.correction_decay
+                    + weight.mul(self.sustained_decay - self.correction_decay);
+            }
             let denominator = Q6::from_bits(self.scale.periods[self.scale_index]);
             if denominator != Q6::ZERO {
                 target_ratio = target.div(denominator);
+                if self.flex_tune != Q14::ZERO {
+                    let (distance, span) = if target >= denominator {
+                        let upper = Q6::from_bits(self.scale.midpoints[self.scale_index + 1]);
+                        (target - denominator, upper - denominator)
+                    } else {
+                        let lower = Q6::from_bits(self.scale.midpoints[self.scale_index]);
+                        (denominator - target, denominator - lower)
+                    };
+                    if span > Q6::ZERO {
+                        let distance = distance.min(span);
+                        let inner = span.mul::<14, 6>(Q14::ONE - self.flex_tune);
+                        if distance > inner {
+                            let outer = span - inner;
+                            let remaining = Q14::ONE - (distance - inner).div::<6, 14>(outer);
+                            let pull = remaining.mul::<14, 14>(remaining);
+                            target_ratio = Q14::ONE + pull.mul(target_ratio - Q14::ONE);
+                        }
+                    }
+                }
             }
+        } else {
+            self.dwell = Q14::ZERO;
         }
-        self.correction = self.correction_decay.mul(self.correction - target_ratio) + target_ratio;
+        self.correction = decay.mul(self.correction - target_ratio) + target_ratio;
     }
 
     /// Selects the period and the correction.
@@ -1066,6 +1181,7 @@ impl Resynthesis {
         if step.restarted {
             self.correction = Q14::ONE;
             self.scale_initialized = false;
+            self.dwell = Q14::ZERO;
         }
         if step.acquired {
             self.formant.detection_mode_off();
