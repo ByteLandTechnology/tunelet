@@ -8,6 +8,7 @@
 pub(crate) mod fixed;
 pub(crate) mod rng;
 mod tables;
+use crate::SampleRate;
 use rng::RandomStream;
 use tables::{SINC, TAN};
 
@@ -176,9 +177,30 @@ impl NumericContext {
         }
     }
 }
-/// The capacity in frames of the history for pitch and resynthesis. The
-/// value is the same at the two supported rates.
-pub(crate) const HISTORY: usize = 11_568;
+/// Returns the decimation stride of pitch acquisition for `rate`.
+///
+/// The stride keeps the decimated rate between 4 kHz and 6 kHz. At 44.1 kHz
+/// and 48 kHz, the stride is 8.
+pub(crate) const fn pitch_stride(rate: SampleRate) -> usize {
+    match rate {
+        SampleRate::Hz8000 => 2,
+        SampleRate::Hz16000 | SampleRate::Hz22050 | SampleRate::Hz24000 => 4,
+        SampleRate::Hz32000 | SampleRate::Hz44100 | SampleRate::Hz48000 => 8,
+        SampleRate::Hz88200 | SampleRate::Hz96000 => 16,
+        SampleRate::Hz192000 => 32,
+    }
+}
+
+/// Returns the capacity in frames of the history for pitch, formant and
+/// resynthesis at `rate`.
+///
+/// The capacity is 11,568 frames at 44.1 kHz and scales with `rate` as a
+/// multiple of the pitch acquisition stride.
+pub(crate) const fn history_frames(rate: SampleRate) -> usize {
+    let stride = pitch_stride(rate);
+    let raw = (11_568 * rate.as_u32() as usize + 22_050) / 44_100;
+    (raw + stride - 1) & !(stride - 1)
+}
 /// The value 1.0 as a plain Q14 word, for algorithms that set the binary
 /// scale at runtime.
 pub(crate) const ONE: i32 = 16_384;
@@ -191,10 +213,10 @@ pub(crate) fn mul14(left: i32, right: i32) -> i32 {
     left.wrapping_mul(right) >> 14
 }
 
-/// Wraps a signed frame index into 0..HISTORY with the Euclidean remainder.
+/// Wraps a signed frame index into `0..len` with the Euclidean remainder.
 ///
 /// Negative reader positions also wrap correctly.
 #[inline]
-pub(crate) fn ring(index: i32) -> usize {
-    index.rem_euclid(HISTORY as i32) as usize
+pub(crate) fn ring(index: i32, len: usize) -> usize {
+    index.rem_euclid(len as i32) as usize
 }

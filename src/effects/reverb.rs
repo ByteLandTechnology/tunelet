@@ -524,13 +524,12 @@ struct ReverbLayout {
     /// 0.8 ms at the prepared rate. Both channels use it.
     binaural_offset: usize,
 }
-/// Prepares the taps for 44.1 or 48 kHz from the 44.1 kHz reference
-/// distances.
+/// Prepares the taps and the buffer capacity for `rate` from the 44.1 kHz
+/// reference distances.
 ///
-/// The distances are truncated after the scaling. Adjacent taps stay one
-/// frame apart. The base of the second network stays at frame 9,000, and the
-/// total capacity stays at 17,000. These limits are correct only for the two
-/// supported sample rates.
+/// The function truncates each distance after it scales the distance.
+/// Adjacent taps stay one frame apart. Both the base of the second network
+/// and the total capacity scale with the sample rate.
 fn reverb_layout(rate: f32) -> ReverbLayout {
     let scale = |samples: f64| (rate as f64 / 44100.0 * samples) as usize;
     let mut taps = [0; 67];
@@ -571,7 +570,7 @@ fn reverb_layout(rate: f32) -> ReverbLayout {
     for (index, prior) in [(6, 5), (8, 7), (13, 12), (20, 19), (23, 22), (29, 28)] {
         taps[index] = taps[prior] + 1;
     }
-    let base = 9000;
+    let base = scale(9000.0);
     taps[40] = base;
     taps[41] = base + 1;
     taps[42] = base + 2;
@@ -605,7 +604,7 @@ fn reverb_layout(rate: f32) -> ReverbLayout {
     taps[59] = taps[58] + 1;
     ReverbLayout {
         taps,
-        capacity: 17000,
+        capacity: scale(17000.0),
         binaural_offset: (rate as f64 * 0.8 * 0.001) as usize,
     }
 }

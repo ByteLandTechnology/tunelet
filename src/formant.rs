@@ -1,28 +1,28 @@
 //! LPC analysis that uses the pitch, changes to the vocal-tract shape, and
 //! spectral synthesis.
 //!
-//! Pre-emphasis removes a simple glottal envelope from the input. Every 441
-//! frames, the analysis makes a 50th-order predictor from a segment that is
-//! aligned to the pitch. If no pitch is available, the segment is
-//! approximately 10 ms. The correlations are normalized, weighted and
-//! smoothed. Then they become reflection coefficients. If width or stretch
+//! Pre-emphasis removes a simple glottal envelope from the input. Every
+//! `analysis_frames` (~10 ms), the analysis makes a rate-scaled predictor from
+//! a segment that is aligned to the pitch. If no pitch is available, the
+//! segment is approximately 10 ms. The correlations are normalized, weighted
+//! and smoothed. Then they become reflection coefficients. If width or stretch
 //! is not 1, the code changes the reflection coefficients into tract areas.
 //! Then it changes these areas into a synthesis model.
 //!
 //! Thirty model banks keep the history of the coefficients. Each audio frame
 //! stores a pair of banks and a blend. Thus, a fractional voice reader can
 //! find the model that applies to the audio that it reads again. The inverse
-//! filter has a delay of 441 frames. Resynthesis uses this delay to align
-//! each source sample with the stamp of the frame that filtered it. Audio
-//! and coefficients use Q14 words. All areas use one common scale that the
-//! code sets at runtime. The order of the arithmetic and of the rescale
+//! filter has a delay of `analysis_frames`. Resynthesis uses this delay to
+//! align each source sample with the stamp of the frame that filtered it.
+//! Audio and coefficients use Q14 words. All areas use one common scale that
+//! the code sets at runtime. The order of the arithmetic and of the rescale
 //! operations changes the output samples.
 
 use crate::error::check_range;
 use crate::filter::{Biquad, Design};
 use crate::lpc;
 use crate::numeric::fixed::{Q14, Q6};
-use crate::numeric::{db_to_gain, fast_sinc, mul14, round_q14, NumericContext};
+use crate::numeric::{db_to_gain, fast_sinc, history_frames, mul14, round_q14, NumericContext};
 use crate::{Error, SampleRate};
 
 /// The controls for vocal-tract changes and synthesized aspiration during
@@ -104,18 +104,30 @@ impl FormantConfig {
     }
 }
 
-/// The number of frames of input history for analysis and synthesis. The
-/// value is equal to the resynthesis history length.
-pub(crate) const HISTORY_FRAMES: usize = 11568;
-/// The number of frames in each analysis step. The analysis output has a
-/// delay of this number of frames.
-pub(crate) const ANALYSIS_FRAMES: usize = 441;
-/// The order of the input LPC predictor and of the synthesis model without
-/// changes.
-const ORDER: usize = 50;
-/// The capacity for stretched models and synthesis feedback. A valid
-/// stretch uses a maximum of 99.
-const MAX_ORDER: usize = 110;
+/// Returns the number of frames in each 10 ms formant analysis step at `rate`.
+///
+/// The analysis output has a delay equal to this count (441 frames at
+/// 44.1 kHz).
+pub(crate) const fn analysis_frames(rate: SampleRate) -> usize {
+    (rate.as_u32() as usize + 50) / 100
+}
+
+/// Returns the LPC predictor order for `rate`, scaled from 50 at 44.1 kHz.
+///
+/// This order preserves the vocal-tract pole interval across sample rates.
+const fn predictor_order(rate: SampleRate) -> usize {
+    (50 * rate.as_u32() as usize + 22_050) / 44_100
+}
+
+/// Returns the synthesis filter capacity for a stretched model of `order`.
+///
+/// The capacity is 110 at 44.1 kHz and 480 at 192 kHz.
+const fn max_synthesis_order(order: usize) -> usize {
+    (order * 22).div_ceil(10)
+}
+
+/// The stack buffer ceiling for synthesis orders up to 192 kHz (`480`).
+const MAX_SYNTHESIS_ORDER: usize = 480;
 /// The number of coefficient banks in the ring. The stamps of the audio
 /// history refer to these banks.
 const BANKS: usize = 30;
@@ -154,23 +166,32 @@ pub(crate) struct Formant {
     /// The sample rate for analysis windows, glottal decay and the aspiration
     /// filter.
     rate: SampleRate,
+    /// The number of frames of input history, aligned with resynthesis.
+    history_frames: usize,
+    /// The number of frames in each analysis step.
+    analysis_frames: usize,
+    /// The order of the input LPC predictor for the prepared sample rate.
+    order: usize,
+    /// The capacity for stretched models at the prepared sample rate.
+    max_order: usize,
+    /// The Q14 increment of `blend` per input frame.
+    blend_step: i32,
     /// The ring of pre-emphasized Q14 audio words. It is aligned with the
     /// resynthesis history.
-    input: Vec<i32>,
-    /// The preallocated segment memory for period folding and
-    /// autocorrelation.
-    temporary: Vec<i32>,
-    /// The Q14 coefficient banks for the inverse filter. Only the first ORDER
-    /// coefficients are used.
-    inverse: Vec<[i32; MAX_ORDER]>,
-    /// The Q14 coefficient banks for the forward filter. `orders` holds the
-    /// active lengths.
-    models: Vec<[i32; MAX_ORDER]>,
+    input: Box<[i32]>,
+    /// The preallocated segment memory for period sums and autocorrelation.
+    temporary: Box<[i32]>,
+    /// The flat Q14 coefficient banks (`BANKS * max_order`) for the inverse
+    /// filter. Only the first `order` entries of each bank are used.
+    inverse: Box<[i32]>,
+    /// The flat Q14 coefficient banks (`BANKS * max_order`) for the forward
+    /// filter. `orders` holds the active lengths.
+    models: Box<[i32]>,
     /// The valid synthesis order for each bank. Zero means that there is no
     /// feedback model.
     orders: [usize; BANKS],
     /// One record of a bank pair and a blend for each frame of input history.
-    stamps: Vec<Stamp>,
+    stamps: Box<[Stamp]>,
     /// The index of the current coefficient bank.
     current: usize,
     /// The bank before `current`. The stage keeps it while the coefficients
@@ -184,15 +205,20 @@ pub(crate) struct Formant {
     design_counter: i32,
     /// The separate Q14 feedback histories of the synthesis, for the left and
     /// right channels. Mono synthesis uses channel zero.
-    history: [[i32; MAX_ORDER]; 2],
+    history: [Box<[i32]>; 2],
     /// The next slot in the synthesis history. The two channels use the same
     /// slot.
     history_index: usize,
-    /// The two previous normalized autocorrelation vectors for the moving
-    /// average.
-    correlation_history: [[i32; 111]; 2],
+    /// The two previous normalized autocorrelation vectors for the average.
+    correlation_history: [Box<[i32]>; 2],
     /// The wrapped sum of the stored correlation vectors, each divided by two.
-    correlation_sum: [i32; 111],
+    correlation_sum: Box<[i32]>,
+    /// Preallocated autocorrelation vector for the current design step.
+    correlations: Box<[i32]>,
+    /// Preallocated reflection coefficient buffer for Durbin and area steps.
+    parcor: Box<[i32]>,
+    /// Preallocated recursion scratch buffer for Durbin and filter conversion.
+    scratch: Box<[i32]>,
     /// The slot in the correlation history that the next vector replaces.
     smooth_index: usize,
     /// The number of valid correlation vectors, from zero to two.
@@ -211,17 +237,16 @@ pub(crate) struct Formant {
     /// the areas is necessary.
     stretch: i32,
     /// The number of active coefficients in the stretched model, not more
-    /// than MAX_ORDER.
+    /// than `max_order`.
     stretch_count: usize,
-    /// The Q7 positions that map the stretched sections into the area model
-    /// with 50 sections.
-    stretch_map: [i32; MAX_ORDER],
+    /// The Q7 positions that map the stretched sections into the area model.
+    stretch_map: Box<[i32]>,
     /// The original tract areas, with the runtime scale that the LPC
     /// conversion returns.
-    areas: [i32; MAX_ORDER],
+    areas: Box<[i32]>,
     /// The interpolated areas, scaled by the width. They use the same binary
     /// scale as the original areas.
-    stretched_areas: [i32; MAX_ORDER],
+    stretched_areas: Box<[i32]>,
     /// The high-pass filter for the random aspiration that the signal
     /// modulates.
     noise_filter: Biquad,
@@ -243,25 +268,44 @@ impl Formant {
     /// the longest analysis segment and the predictor padding. Later calls
     /// use this memory again.
     pub(crate) fn new(rate: SampleRate, config: FormantConfig) -> Self {
+        let hist_frames = history_frames(rate);
+        let ana_frames = analysis_frames(rate);
+        let order = predictor_order(rate);
+        let max_order = max_synthesis_order(order);
+        let blend_step = ((1638 * 44_100) / rate.as_u32() as usize).max(1) as i32;
         let d1 = -std::f64::consts::LN_2 / 0.9_f64.ln();
         let d2 = rate.hz() as f64 * d1 / 44100.0;
         let mut result = Self {
             config,
             rate,
-            input: vec![0; HISTORY_FRAMES],
-            temporary: vec![0_i32; (2 * (rate.as_u32() as usize / 40) + MAX_ORDER + 256).max(2865)],
-            inverse: vec![[0; MAX_ORDER]; BANKS],
-            models: vec![[0; MAX_ORDER]; BANKS],
+            history_frames: hist_frames,
+            analysis_frames: ana_frames,
+            order,
+            max_order,
+            blend_step,
+            input: vec![0; hist_frames].into_boxed_slice(),
+            temporary: vec![0_i32; (hist_frames + max_order + 256).max(2865)].into_boxed_slice(),
+            inverse: vec![0; BANKS * max_order].into_boxed_slice(),
+            models: vec![0; BANKS * max_order].into_boxed_slice(),
             orders: [0; BANKS],
-            stamps: vec![Stamp::default(); HISTORY_FRAMES],
+            stamps: vec![Stamp::default(); hist_frames].into_boxed_slice(),
             current: BANKS - 1,
             previous: 0,
             blend: 0,
             design_counter: 0,
-            history: [[0; MAX_ORDER]; 2],
+            history: [
+                vec![0; max_order].into_boxed_slice(),
+                vec![0; max_order].into_boxed_slice(),
+            ],
             history_index: 0,
-            correlation_history: [[0; 111]; 2],
-            correlation_sum: [0; 111],
+            correlation_history: [
+                vec![0; order + 1].into_boxed_slice(),
+                vec![0; order + 1].into_boxed_slice(),
+            ],
+            correlation_sum: vec![0; order + 1].into_boxed_slice(),
+            correlations: vec![0; order + 1].into_boxed_slice(),
+            parcor: vec![0; max_order].into_boxed_slice(),
+            scratch: vec![0; max_order + 2].into_boxed_slice(),
             smooth_index: 0,
             smooth_filled: 0,
             smooth_reset: true,
@@ -269,10 +313,10 @@ impl Formant {
             width: 16384,
             width_squared: 16384,
             stretch: 16384,
-            stretch_count: ORDER,
-            stretch_map: [0; MAX_ORDER],
-            areas: [0; MAX_ORDER],
-            stretched_areas: [0; MAX_ORDER],
+            stretch_count: order,
+            stretch_map: vec![0; max_order].into_boxed_slice(),
+            areas: vec![0; max_order].into_boxed_slice(),
+            stretched_areas: vec![0; max_order].into_boxed_slice(),
             noise_filter: Biquad::new(),
             noise_gain: 0_i32,
             noise_amplitude: 0_i32,
@@ -285,21 +329,22 @@ impl Formant {
     /// Quantizes the validated controls, prepares the Q7 map for the area
     /// interpolation and updates the coefficients of the aspiration filter.
     ///
-    /// The histories do not change. A valid stretch gives a model with 25 to
-    /// 99 entries. Thus, the last point of the map and the denominators of
-    /// the interpolation are always defined.
+    /// The histories do not change. A valid stretch in `0.5..=2.0` gives at
+    /// least five entries. Thus, the last point of the map and the
+    /// denominators of the interpolation are always defined.
     pub(crate) fn set_config(&mut self, config: FormantConfig) {
+        let order = self.order;
         self.config = config;
         self.width = (config.width as f64 * 16384.0) as i32;
         self.width_squared = (config.width as f64 * config.width as f64 * 16384.0) as i32;
         self.stretch = (config.stretch as f64 * 16384.0) as i32;
         self.stretch_count =
-            (((ORDER - 1) as f64 * config.stretch as f64 + 1.001) as usize).min(MAX_ORDER);
+            (((order - 1) as f64 * config.stretch as f64 + 1.001) as usize).min(self.max_order);
         for i in 0..self.stretch_count - 1 {
             let fraction = i as f64 / (self.stretch_count - 1) as f64;
-            self.stretch_map[i] = ((ORDER - 1) as f64 * fraction * 128.0) as i32;
+            self.stretch_map[i] = ((order - 1) as f64 * fraction * 128.0) as i32;
         }
-        self.stretch_map[self.stretch_count - 1] = ((ORDER - 1) * 128) as i32;
+        self.stretch_map[self.stretch_count - 1] = ((order - 1) * 128) as i32;
         self.noise_gain = (config.aspiration_mix as f64 * 16384.0) as i32;
         let frequency = (config.aspiration_cutoff_hz as i32)
             .min((self.rate.hz() as f64 * 0.48) as i32)
@@ -312,13 +357,14 @@ impl Formant {
     /// the aspiration filter.
     ///
     /// The function also selects and clears the initial bank pair, and starts
-    /// the correlation smoothing again. The other banks stay allocated. The
+    /// the correlation average again. The other banks stay allocated. The
     /// stage clears each bank when it uses that bank again.
     pub(crate) fn reset(&mut self) {
         self.input.fill(0_i32);
 
         self.stamps.fill(Stamp::default());
-        self.history = [[0; MAX_ORDER]; 2];
+        self.history[0].fill(0);
+        self.history[1].fill(0);
         self.history_index = 0;
         self.current = BANKS - 1;
         self.next_filter();
@@ -377,31 +423,35 @@ impl Formant {
     /// The function clears the inverse coefficients, the forward coefficients
     /// and the active order of the new bank.
     fn next_filter(&mut self) {
+        let max_order = self.max_order;
         self.previous = self.current;
         self.current += 1;
         if self.current == BANKS {
             self.current = 0;
         }
         self.blend = 0;
-        self.inverse[self.current].fill(0_i32);
+        let start = self.current * max_order;
+        let end = start + max_order;
+        self.inverse[start..end].fill(0_i32);
 
-        self.models[self.current].fill(0_i32);
+        self.models[start..end].fill(0_i32);
         self.orders[self.current] = 0;
     }
     /// Calculates the average of a maximum of two autocorrelation vectors. It
     /// does not allocate memory.
     ///
-    /// The slice must fit in the histories of 111 entries. The function
-    /// divides each input by two before it adds the input to the sum. The
-    /// compensation for the first window keeps that order of division.
-    fn smooth(&mut self, values: &mut [i32]) {
+    /// `self.correlations` has `order + 1` entries. The function divides each
+    /// entry by two before it adds the entry to the sum. The compensation for
+    /// the first window keeps that order of division.
+    fn smooth(&mut self) {
+        let len = self.correlations.len();
         if self.smooth_reset {
             self.smooth_index = 0;
             self.smooth_filled = 0;
             self.smooth_reset = false;
-            self.correlation_sum[..values.len()].fill(0_i32);
+            self.correlation_sum[..len].fill(0_i32);
         }
-        for (i, value) in values.iter_mut().enumerate() {
+        for (i, value) in self.correlations.iter_mut().enumerate() {
             if self.smooth_filled == 2 {
                 self.correlation_sum[i] = self.correlation_sum[i]
                     .wrapping_sub(self.correlation_history[self.smooth_index][i]);
@@ -411,7 +461,7 @@ impl Formant {
             self.correlation_sum[i] = self.correlation_sum[i].wrapping_add(*value);
         }
         self.smooth_filled = (self.smooth_filled + 1).min(2);
-        for (i, value) in values.iter_mut().enumerate() {
+        for (i, value) in self.correlations.iter_mut().enumerate() {
             *value = if self.smooth_filled < 2 {
                 self.correlation_sum[i]
                     .wrapping_div(self.smooth_filled as i32)
@@ -422,10 +472,10 @@ impl Formant {
         }
         self.smooth_index = (self.smooth_index + 1) % 2;
     }
-    /// Tries a model that uses the pitch each ANALYSIS_FRAMES, and stamps
+    /// Tries a model that uses the pitch each `analysis_frames`, and stamps
     /// each frame.
     ///
-    /// If a pitch is available, the segment folds adjacent cycles. If not,
+    /// If a pitch is available, the segment averages adjacent cycles. If not,
     /// the segment is a window of approximately 10 ms. Before the Durbin
     /// analysis, the function does these steps on the correlations:
     /// 1. It rescales them during the sum.
@@ -438,23 +488,25 @@ impl Formant {
     /// - If not, the area conversion makes the model. If the conversion
     ///   fails, the new synthesis order stays at zero.
     ///
-    /// If the Durbin analysis fails, smoothing starts again. The selected
-    /// bank keeps the inverse coefficients that the analysis wrote.
+    /// If the Durbin analysis fails, the correlation average starts again. The
+    /// selected bank keeps the inverse coefficients that the analysis wrote.
     fn design(&mut self, periods: &[Q6], position: usize, output_period_q6: i32) {
+        let hist_frames = self.history_frames;
+        let order = self.order;
+        let max_order = self.max_order;
         let period = output_period_q6.wrapping_shr(6).max(0) as usize;
         let design_now = self.design_counter == 0;
         self.design_counter += 1;
         let one = 16384;
         if design_now {
-            self.design_counter -= ANALYSIS_FRAMES as i32;
+            self.design_counter -= self.analysis_frames as i32;
             let count;
             if period == 0 {
                 count = (self.rate.as_u32() as usize + 50) / 100;
                 for i in 0..count {
-                    self.temporary[i] =
-                        self.input[(position + HISTORY_FRAMES - i) % HISTORY_FRAMES];
+                    self.temporary[i] = self.input[(position + hist_frames - i) % hist_frames];
                 }
-                self.temporary[count..count + ORDER].fill(0_i32);
+                self.temporary[count..count + order].fill(0_i32);
             } else {
                 count = if periods[position] == Q6::ZERO {
                     period * 2
@@ -464,12 +516,11 @@ impl Formant {
                 let extra = (period / 10).max(1);
                 if periods[position] == Q6::ZERO {
                     for i in 0..count + extra {
-                        self.temporary[i] =
-                            self.input[(position + HISTORY_FRAMES - i) % HISTORY_FRAMES];
+                        self.temporary[i] = self.input[(position + hist_frames - i) % hist_frames];
                     }
                 } else {
                     for i in 0..count + extra {
-                        let index = (position + HISTORY_FRAMES - i) % HISTORY_FRAMES;
+                        let index = (position + hist_frames - i) % hist_frames;
                         let mut accumulator = (index as i32) << 6;
                         let mut sum = 0_i32;
                         let mut reads = 0;
@@ -477,7 +528,7 @@ impl Formant {
                             let index = accumulator
                                 .wrapping_add(32)
                                 .wrapping_shr(6)
-                                .rem_euclid(HISTORY_FRAMES as i32)
+                                .rem_euclid(hist_frames as i32)
                                 as usize;
                             sum = sum.wrapping_add(self.input[index]);
                             reads += 1;
@@ -496,12 +547,12 @@ impl Formant {
                         .wrapping_add(mul14(blend, self.temporary[i + count]));
                     blend -= step;
                 }
-                for i in count..count + ORDER {
+                for i in count..count + order {
                     self.temporary[i] = self.temporary[i - count];
                 }
             }
             let mut previous = self.temporary[count - 1];
-            for sample in &mut self.temporary[..count + ORDER] {
+            for sample in &mut self.temporary[..count + order] {
                 let current = *sample;
                 *sample = current.wrapping_sub(round_q14(previous.wrapping_mul(self.glottal)));
                 previous = current;
@@ -511,17 +562,18 @@ impl Formant {
             // Do not add the products first, and do not reduce the lanes in a
             // different order. These changes move the points where the shifts
             // occur, and thus change the model.
-            let mut correlations = [0_i32; 111];
+            self.correlations.fill(0_i32);
             let mut shift = 0;
-            for lag in 0..=ORDER {
+            for lag in 0..=order {
                 let mut correlation = 0_i32;
                 let (left_chunks, left_tail) = self.temporary[..count].as_chunks::<4>();
                 let (right_chunks, right_tail) = self.temporary[lag..lag + count].as_chunks::<4>();
+                let prior_correlations = &mut self.correlations[..lag];
                 let mut accumulate = |product: i32| {
                     correlation = correlation.wrapping_add(product.wrapping_shr(shift));
                     if correlation.wrapping_abs() > 0x4000000 {
                         shift += 1;
-                        for prior in &mut correlations[..lag] {
+                        for prior in &mut *prior_correlations {
                             *prior = prior.wrapping_shr(1);
                         }
                         correlation = correlation.wrapping_shr(1);
@@ -541,48 +593,51 @@ impl Formant {
                 for (&left, &right) in left_tail.iter().zip(right_tail) {
                     accumulate(left.wrapping_mul(right));
                 }
-                correlations[lag] = correlation;
+                self.correlations[lag] = correlation;
             }
             let mut normalization = 0;
-            while correlations[0] > one {
-                correlations[0] = correlations[0].wrapping_shr(1);
+            while self.correlations[0] > one {
+                self.correlations[0] = self.correlations[0].wrapping_shr(1);
                 normalization += 1;
             }
-            for value in &mut correlations[1..=ORDER] {
+            for value in &mut self.correlations[1..=order] {
                 *value = value.wrapping_shr(normalization);
             }
             let scale = (8192 / if period != 0 { period } else { count })
-                .min((2.0 / ORDER as f64 * 16384.0) as usize) as i32;
+                .min((2.0 / order as f64 * 16384.0) as usize) as i32;
             let mut accumulator = 0;
-            for value in &mut correlations[1..=ORDER] {
+            for value in &mut self.correlations[1..=order] {
                 accumulator += scale;
                 let sinc = fast_sinc(accumulator);
                 *value = mul14(*value, mul14(sinc, sinc));
             }
-            self.smooth(&mut correlations[..=ORDER]);
+            self.smooth();
             // Select a cleared bank before the solve. If the solve fails, some
             // inverse coefficients can stay in the bank. But the synthesis
             // order stays zero until all necessary model changes complete.
             self.next_filter();
             self.generation = self.generation.wrapping_add(1);
             let design_gain = ((db_to_gain(-60.0) + 1.0) * 16384.0) as i32;
-            correlations[0] = mul14(correlations[0], design_gain).wrapping_add(200);
-            let mut parcor = [0; MAX_ORDER];
-            let mut scratch = [0; 112];
+            self.correlations[0] = mul14(self.correlations[0], design_gain).wrapping_add(200);
+            self.parcor.fill(0);
+            self.scratch.fill(0);
+            let bank_start = self.current * max_order;
 
             let valid = lpc::durbin(
-                &correlations,
-                &mut self.inverse[self.current][..ORDER],
-                &mut parcor,
-                &mut scratch,
+                &self.correlations,
+                &mut self.inverse[bank_start..bank_start + order],
+                &mut self.parcor,
+                &mut self.scratch,
             );
 
             if valid {
                 if self.width != one || self.stretch != one {
-                    if let Some(scale) = lpc::parcor_to_areas(&parcor[..ORDER], &mut self.areas) {
+                    if let Some(scale) =
+                        lpc::parcor_to_areas(&self.parcor[..order], &mut self.areas)
+                    {
                         for i in 0..self.stretch_count {
                             let map = self.stretch_map[i];
-                            let index = map.wrapping_shr(7).min((ORDER - 2) as i32) as usize;
+                            let index = map.wrapping_shr(7).min((order - 2) as i32) as usize;
                             let fraction = map.wrapping_sub((index as i32) << 7).wrapping_shl(7);
                             self.stretched_areas[i] = mul14(
                                 mul14(one.wrapping_sub(fraction), self.areas[index])
@@ -595,29 +650,29 @@ impl Formant {
                         }
                         if lpc::areas_to_parcor(
                             &self.stretched_areas[..self.stretch_count],
-                            &mut parcor,
+                            &mut self.parcor,
                             scale,
                         ) {
                             lpc::parcor_to_pef(
-                                &parcor[..self.stretch_count],
-                                &mut self.models[self.current],
-                                &mut scratch,
+                                &self.parcor[..self.stretch_count],
+                                &mut self.models[bank_start..bank_start + max_order],
+                                &mut self.scratch,
                                 14,
                             );
                             self.orders[self.current] = self.stretch_count;
                         }
                     }
                 } else {
-                    self.models[self.current][..ORDER]
-                        .copy_from_slice(&self.inverse[self.current][..ORDER]);
-                    self.orders[self.current] = ORDER;
+                    self.models[bank_start..bank_start + order]
+                        .copy_from_slice(&self.inverse[bank_start..bank_start + order]);
+                    self.orders[self.current] = order;
                 }
             } else {
                 self.smooth_reset = true;
             }
         }
         if self.blend < 16384 {
-            self.blend = (self.blend + 1638).min(16384);
+            self.blend = (self.blend + self.blend_step).min(16384);
         }
         self.stamps[position] = Stamp {
             current: self.current,
@@ -626,30 +681,34 @@ impl Formant {
         };
     }
 
-    /// Applies the blended 50th-order prediction-error filter to the delayed
-    /// input.
+    /// Applies the blended prediction-error filter to the delayed input.
     ///
-    /// The full sum of products wraps before one signed rounding. The function
-    /// blends the coefficients for the current transition. Then it multiplies
-    /// them with the previous samples.
+    /// The full sum of products wraps before one signed half-unit shift. The
+    /// function blends the coefficients for the current transition. Then it
+    /// multiplies them with the previous samples.
     fn inverse(&self, position: usize) -> i32 {
-        let read = if position < ANALYSIS_FRAMES {
-            position + HISTORY_FRAMES - ANALYSIS_FRAMES
+        let hist_frames = self.history_frames;
+        let ana_frames = self.analysis_frames;
+        let max_order = self.max_order;
+        let read = if position < ana_frames {
+            position + hist_frames - ana_frames
         } else {
-            position - ANALYSIS_FRAMES
+            position - ana_frames
         };
 
+        let previous_base = self.previous * max_order;
+        let current_base = self.current * max_order;
         let mut cursor = read;
         let mut sum = 0_i32;
-        for i in 0..ORDER {
+        for i in 0..self.order {
             let coefficient = if self.blend < 16384 {
-                mul14(16384 - self.blend, self.inverse[self.previous][i])
-                    .wrapping_add(mul14(self.blend, self.inverse[self.current][i]))
+                mul14(16384 - self.blend, self.inverse[previous_base + i])
+                    .wrapping_add(mul14(self.blend, self.inverse[current_base + i]))
             } else {
-                self.inverse[self.current][i]
+                self.inverse[current_base + i]
             };
             cursor = if cursor == 0 {
-                HISTORY_FRAMES - 1
+                hist_frames - 1
             } else {
                 cursor - 1
             };
@@ -683,17 +742,20 @@ impl Formant {
     /// Returns the length of the active prefix that the function writes to
     /// `output`. The entries after the prefix are not specified, and you must
     /// not use them. Negative positions wrap in the ring.
-    fn coefficients(&self, position: i32, output: &mut [i32; MAX_ORDER]) -> usize {
-        let stamp = self.stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
+    fn coefficients(&self, position: i32, output: &mut [i32; MAX_SYNTHESIS_ORDER]) -> usize {
+        let stamp = self.stamps[position.rem_euclid(self.history_frames as i32) as usize];
+        let max_order = self.max_order;
+        let previous_base = stamp.previous * max_order;
+        let current_base = stamp.current * max_order;
         let mut order = self.orders[stamp.current];
         if stamp.blend < 16384 && self.orders[stamp.previous] != 0 {
             order = order.max(self.orders[stamp.previous]);
             for (i, value) in output[..order].iter_mut().enumerate() {
-                *value = mul14(16384 - stamp.blend, self.models[stamp.previous][i])
-                    .wrapping_add(mul14(stamp.blend, self.models[stamp.current][i]));
+                *value = mul14(16384 - stamp.blend, self.models[previous_base + i])
+                    .wrapping_add(mul14(stamp.blend, self.models[current_base + i]));
             }
         } else {
-            output[..order].copy_from_slice(&self.models[stamp.current][..order]);
+            output[..order].copy_from_slice(&self.models[current_base..current_base + order]);
         }
         order
     }
@@ -704,16 +766,20 @@ impl Formant {
     /// Finds and blends the analysis coefficients of the stamp at a signed
     /// history frame, in the same way as [`Self::coefficients`].
     ///
-    /// The function writes ORDER entries to the start of `output`.
-    fn analysis_coefficients(&self, position: i32, output: &mut [i32; MAX_ORDER]) {
-        let stamp = self.stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
+    /// The function writes `self.order` entries to the start of `output`.
+    fn analysis_coefficients(&self, position: i32, output: &mut [i32; MAX_SYNTHESIS_ORDER]) {
+        let stamp = self.stamps[position.rem_euclid(self.history_frames as i32) as usize];
+        let max_order = self.max_order;
+        let previous_base = stamp.previous * max_order;
+        let current_base = stamp.current * max_order;
+        let order = self.order;
         if stamp.blend < 16384 {
-            for (i, value) in output[..ORDER].iter_mut().enumerate() {
-                *value = mul14(16384 - stamp.blend, self.inverse[stamp.previous][i])
-                    .wrapping_add(mul14(stamp.blend, self.inverse[stamp.current][i]));
+            for (i, value) in output[..order].iter_mut().enumerate() {
+                *value = mul14(16384 - stamp.blend, self.inverse[previous_base + i])
+                    .wrapping_add(mul14(stamp.blend, self.inverse[current_base + i]));
             }
         } else {
-            output[..ORDER].copy_from_slice(&self.inverse[stamp.current][..ORDER]);
+            output[..order].copy_from_slice(&self.inverse[current_base..current_base + order]);
         }
     }
     /// Writes the magnitude response of the two models of the stamp at a
@@ -736,15 +802,16 @@ impl Formant {
         input: &mut [f32],
         output: &mut [f32],
     ) -> bool {
-        let mut synthesis = [0; MAX_ORDER];
+        let mut synthesis = [0; MAX_SYNTHESIS_ORDER];
         let order = self.coefficients(position, &mut synthesis);
         if order == 0 {
             input.fill(0.0);
             output.fill(0.0);
             return false;
         }
-        let mut analysis = [0; MAX_ORDER];
+        let mut analysis = [0; MAX_SYNTHESIS_ORDER];
         self.analysis_coefficients(position, &mut analysis);
+        let analysis_order = self.order;
         let points = input.len();
         let step = if points > 1 {
             std::f64::consts::PI * 2.0 * max_frequency_hz as f64
@@ -773,7 +840,8 @@ impl Formant {
             let emphasis = ((1.0 - glottal * cosine).powi(2) + (glottal * sine).powi(2))
                 .sqrt()
                 .max(1e-6);
-            *input = (1.0 / (magnitude(&analysis[..ORDER], cosine, sine) * emphasis)) as f32;
+            *input =
+                (1.0 / (magnitude(&analysis[..analysis_order], cosine, sine) * emphasis)) as f32;
             *output = (width / (magnitude(&synthesis[..order], cosine, sine) * emphasis)) as f32;
         }
         true
@@ -790,13 +858,14 @@ impl Formant {
         context: &mut NumericContext,
     ) -> i32 {
         let sample = self.add_noise(sample, context);
-        let mut coefficients = [0; MAX_ORDER];
+        let mut coefficients = [0; MAX_SYNTHESIS_ORDER];
         let order = self.coefficients(position, &mut coefficients);
+        let max_order = self.max_order;
         let mut sum = 0_i32;
         let mut cursor = self.history_index;
         for &coefficient in &coefficients[..order] {
             cursor = if cursor == 0 {
-                MAX_ORDER - 1
+                max_order - 1
             } else {
                 cursor - 1
             };
@@ -805,7 +874,7 @@ impl Formant {
         let sample = sample.wrapping_add(round_q14(sum));
         self.history[0][self.history_index] = sample;
         self.history_index += 1;
-        if self.history_index == MAX_ORDER {
+        if self.history_index == max_order {
             self.history_index = 0;
         }
         round_q14(sample.wrapping_mul(self.width))
@@ -829,13 +898,14 @@ impl Formant {
         for sample in &mut samples {
             *sample = sample.wrapping_add(noise);
         }
-        let mut coefficients = [0; MAX_ORDER];
+        let mut coefficients = [0; MAX_SYNTHESIS_ORDER];
         let order = self.coefficients(position, &mut coefficients);
+        let max_order = self.max_order;
         for (channel, sample) in samples.iter_mut().enumerate() {
             let mut sum = 0_i32;
             for (i, &coefficient) in coefficients[..order].iter().enumerate() {
                 sum = sum.wrapping_add(
-                    self.history[channel][(self.history_index + MAX_ORDER - i - 1) % MAX_ORDER]
+                    self.history[channel][(self.history_index + max_order - i - 1) % max_order]
                         .wrapping_mul(coefficient),
                 );
             }
@@ -843,7 +913,7 @@ impl Formant {
             self.history[channel][self.history_index] = *sample;
             *sample = round_q14(sample.wrapping_mul(self.width));
         }
-        self.history_index = (self.history_index + 1) % MAX_ORDER;
+        self.history_index = (self.history_index + 1) % max_order;
         samples
     }
 }

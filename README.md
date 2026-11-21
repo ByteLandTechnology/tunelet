@@ -50,8 +50,8 @@ browsers and Node.js.
 - **No dependencies**: The default Rust build has no dependencies and uses
   only safe Rust.
 
-The input is mono signed 16-bit PCM at 44.1 kHz or 48 kHz. The output is
-stereo or mono 16-bit PCM.
+The input is mono signed 16-bit PCM at 8, 16, 22.05, 24, 32, 44.1, 48,
+88.2, 96 or 192 kHz. The output is stereo or mono 16-bit PCM.
 
 ## Installation
 
@@ -172,7 +172,8 @@ voice. It disables the effects and the formant stage.
 | Output gain    | Linear gain, 0..=64                                         | 1              | `output_gain`            |
 
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+dry path starts after Warm and adds the overlap delay (approximately 35 ms;
+1,543 frames at 44.1 kHz).
 
 ### Harmony sources
 
@@ -292,7 +293,7 @@ These calls read the state of the processor. They do not change the audio.
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
-| `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
+| `latency_frames()`   | Nominal resynthesis latency in frames for the prepared sample rate |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
 
 The telemetry includes these items:

@@ -6,8 +6,17 @@ use crate::numeric::fixed::{Q14, Q8};
 use crate::numeric::{coefficient_to_exp_value, db_to_gain, envelope_decay, NumericContext};
 use crate::{Error, SampleRate};
 
-/// The update interval of the peak follower, in frames.
-const WINDOW_FRAMES: usize = 100;
+/// Returns the peak-follower update interval in frames (~2.27 ms; 100 frames
+/// at 44.1 kHz).
+const fn window_frames(rate: SampleRate) -> usize {
+    let frames = (100 * rate.as_u32() as usize + 22_050) / 44_100;
+    if frames < 1 {
+        1
+    } else {
+        frames
+    }
+}
+
 /// The base arctangent drive, approximately π/2 in Q8.
 const BASE_DRIVE: Q8 = Q8::from_bits(401);
 /// The 2/π factor in Q14 that normalizes the arctangent output.
@@ -16,9 +25,10 @@ const TWO_OVER_PI: Q14 = Q14::from_bits(10430);
 /// The input gain and the transient enhancement with arctangent saturation.
 ///
 /// Punch comes before Warm and before pitch detection. It finds the peak of
-/// each window of 100 processed frames. Two envelope followers set the drive
-/// from these peaks. When Punch is disabled, it does not process audio, and
-/// its envelope and window state do not change.
+/// each window of processed frames (approximately 2.27 ms; 100 frames at
+/// 44.1 kHz). Two envelope followers set the drive from these peaks. When
+/// Punch is disabled, it does not process audio, and its envelope and window
+/// state do not change.
 ///
 /// A gain change updates the cached drive at the next boundary of the peak
 /// window. A reset calculates that drive again immediately from the
@@ -36,7 +46,7 @@ pub struct PunchConfig {
     /// The input gain in decibels, -96..=12.
     ///
     /// The default is 0 dB. The saturation drive from this gain changes at the
-    /// next 100-frame peak boundary.
+    /// next boundary of the peak window.
     pub gain_db: f32,
     /// The transient emphasis without a unit, 0..=1.
     ///
@@ -52,7 +62,7 @@ pub struct PunchConfig {
     /// The attack half-life of the peak follower in milliseconds, 0.01..=5000.
     ///
     /// The default is 10 ms. The coefficients include the effect of the
-    /// 100-frame update interval.
+    /// peak-window update interval.
     pub attack_ms: f32,
 }
 impl Default for PunchConfig {
@@ -91,12 +101,14 @@ impl PunchConfig {
 pub(crate) struct Punch {
     /// The prepared rate, which converts the envelope times to sample windows.
     rate: SampleRate,
+    /// The peak-window length in frames for `rate`.
+    window_frames: usize,
     /// The adaptive Q14 peak envelope. The impact control sets its release.
     slow: Q14,
     /// The second Q14 peak envelope, with a fixed release half-life of 5
     /// seconds.
     fast: Q14,
-    /// The number of samples in the current 100-frame peak window.
+    /// The number of samples in the current peak window.
     counter: usize,
     /// The largest absolute Q14 input in the current window.
     peak: Q14,
@@ -119,6 +131,7 @@ impl Punch {
     pub(crate) fn new(rate: SampleRate, config: PunchConfig) -> Self {
         let mut result = Self {
             rate,
+            window_frames: window_frames(rate),
             slow: Q14::default(),
             fast: Q14::default(),
             counter: 0,
@@ -151,7 +164,7 @@ impl Punch {
             Q14::from_f64(envelope_decay(
                 milliseconds,
                 self.rate.hz() as f64,
-                WINDOW_FRAMES,
+                self.window_frames,
             ))
         };
         self.slow_decay = decay(impact as f64);
@@ -179,7 +192,7 @@ impl Punch {
         target + decay.mul(current - target)
     }
 
-    /// Tracks the current peak, updates the drive every 100 calls and
+    /// Tracks the current peak, updates the drive at each window boundary and
     /// saturates one PCM sample.
     /// The envelope ratio is approximately limited to 16 before it is
     /// multiplied by the input gain. While the adaptive envelope is zero, the
@@ -189,7 +202,7 @@ impl Punch {
         let sample = Q14::from_bits(i32::from(input) >> 1);
         self.peak = self.peak.max(sample.abs());
         self.counter += 1;
-        if self.counter == WINDOW_FRAMES {
+        if self.counter == self.window_frames {
             self.counter = 0;
             self.slow = Self::follow(self.slow, self.peak, self.attack_decay, self.slow_decay);
             self.fast = Self::follow(self.fast, self.peak, self.attack_decay, self.fast_decay);

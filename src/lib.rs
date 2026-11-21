@@ -1,10 +1,11 @@
 //! A crate for vocal pitch correction, choir, harmony, formant control and effects.
 //!
 //! [`Processor`] changes mono signed 16-bit PCM into the same number of stereo
-//! or mono frames. The sample rate is 44.1 kHz or 48 kHz. The signal chain is
-//! Punch → Warm → pitch tracking and resynthesis → Alien → reverb → output
-//! gain. The default configuration enables chromatic pitch correction and one
-//! choir voice. The optional effects and the formant stage are disabled.
+//! or mono frames. Ten sample rates from 8 kHz to 192 kHz are available. The
+//! signal chain is Punch → Warm → pitch tracking and resynthesis → Alien →
+//! reverb → output gain. The default configuration enables chromatic pitch
+//! correction and one choir voice. The optional effects and the formant stage
+//! are disabled.
 //!
 //! # Preparing and configuring
 //!

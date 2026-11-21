@@ -1,22 +1,22 @@
 //! A two-stage pitch estimator with circular sample histories.
 //!
-//! Acquisition applies a low-pass filter to the signal and examines one
-//! sample in eight. The minima of the normalized cycle difference must repeat
-//! with a constant spacing. Then acquisition starts a full-rate tracking
-//! window. Tracking updates the energy and cross terms at each frame. It
-//! refines the minimum every five frames. A parabola gives the Q6 sub-sample
-//! resolution of the period.
+//! Acquisition applies a low-pass filter to the signal and decimates it by a
+//! stride that scales with the sample rate. The minima of the normalized cycle
+//! difference must repeat with a constant spacing. Then acquisition starts a
+//! full-rate tracking window. Tracking updates the energy and cross terms at
+//! each frame. It refines the minimum every five frames. A parabola gives the
+//! Q6 sub-sample resolution of the period.
 //!
-//! The 40-lag window moves to keep the minimum near its center. If the
+//! The tracking lag window moves to keep the minimum near its center. If the
 //! minimum is at a boundary or the curvature is not usable, acquisition
 //! starts again. The last usable period stays available as a fallback for
 //! resynthesis. The public frequency bounds apply only to feedback reports.
 //! They do not change the size of these windows.
 
-use super::search::{tracking_minimum, TRACKING_LAGS};
+use super::search::tracking_minimum;
 use crate::filter::{Biquad, Design};
 use crate::numeric::fixed::{Q14, Q6};
-use crate::numeric::{mul14, ring, HISTORY, ONE};
+use crate::numeric::{history_frames, mul14, pitch_stride, ring, ONE};
 use crate::{PitchConfig, SampleRate};
 
 /// The result of one full-rate input sample.
@@ -43,22 +43,63 @@ pub(crate) struct PitchStep {
     pub restarted: bool,
 }
 
-/// The number of lags that acquisition compares.
-const ACQUISITION_LAGS: usize = 137;
+/// Returns the number of decimated lags that acquisition compares for `rate`.
+const fn acquisition_lags(rate: SampleRate) -> usize {
+    match rate {
+        SampleRate::Hz8000 | SampleRate::Hz16000 | SampleRate::Hz32000 => 105,
+        SampleRate::Hz44100 => 137,
+        SampleRate::Hz22050 | SampleRate::Hz88200 => 148,
+        SampleRate::Hz24000 | SampleRate::Hz48000 | SampleRate::Hz96000 | SampleRate::Hz192000 => {
+            160
+        }
+    }
+}
+
+/// Returns the number of full-rate candidate lags in the local tracking window.
+///
+/// The count is 40 at 44.1 kHz and stays a multiple of four with at least 8
+/// lags.
+const fn tracking_lags(rate: SampleRate) -> usize {
+    let scaled = (40 * rate.as_u32() as usize + 22_050) / 44_100;
+    let aligned = (scaled + 2) & !3;
+    if aligned < 8 {
+        8
+    } else {
+        aligned
+    }
+}
+
+/// Returns the inclusive upper bound of rejected short full-rate lags.
+///
+/// The value is 19 at 44.1 kHz, so accepted periods correspond to frequencies
+/// at or below approximately 2.2 kHz.
+const fn minimum_lag(rate: SampleRate) -> i32 {
+    ((19 * rate.as_u32() as usize) / 44_100) as i32
+}
 
 /// The two-stage pitch tracker.
 ///
 /// The audio history and the filtered samples are Q14 words. The acquisition
 /// energies and cross terms are plain wrapping words.
 pub(crate) struct PitchTracker {
-    /// Two low-pass sections before the 8:1 decimation for acquisition.
+    /// Two low-pass sections before decimation for acquisition.
     ///
     /// Full-rate tracking uses the raw audio.
     pre: [Biquad; 2],
-    /// Full-rate Q14 sample words in a fixed ring on the heap.
-    raw: Box<[i32; HISTORY]>,
+    /// Full-rate Q14 sample words in a preallocated ring on the heap.
+    raw: Box<[i32]>,
+    /// The bitmask `stride - 1` for the power-of-two acquisition cadence.
+    stride_mask: usize,
+    /// The right shift that converts a Q11 decimated period to full-rate lags.
+    q11_shift: u32,
+    /// The half-unit Q11 offset added before `q11_shift`.
+    q11_round: i32,
+    /// Half of `tracking_lags`, subtracted to center the tracking window.
+    tracking_half: i32,
+    /// Full-rate lags at or below this threshold restart acquisition.
+    min_lag: i32,
     /// The current full-rate history frame. It also sets the acquisition
-    /// cadence of one frame in eight.
+    /// cadence.
     write: usize,
     /// `true` if acquisition is active instead of full-rate local tracking.
     detecting: bool,
@@ -67,22 +108,23 @@ pub(crate) struct PitchTracker {
     first: bool,
     /// Low-pass filtered and decimated Q14 audio, with space for two maximum
     /// acquisition lags.
-    detection: [i32; 2 * ACQUISITION_LAGS],
-    /// The next slot in the decimated ring, less than twice
-    /// `ACQUISITION_LAGS`.
+    detection: Box<[i32]>,
+    /// The next slot in the decimated ring, less than `detection.len()`.
     detection_index: usize,
     /// The wrapping count of decimated samples since acquisition started.
     detection_count: i32,
     /// The window energies for each lag. They normalize the acquisition cycle
     /// difference.
-    energy: [i32; ACQUISITION_LAGS],
+    energy: Box<[i32]>,
     /// The cross products for each lag, with the same binary scale as their
     /// energies.
-    cross: [i32; ACQUISITION_LAGS],
-    /// Full-rate energies for the 40 adjacent candidate lags.
-    tracking_energy: [i32; TRACKING_LAGS],
+    cross: Box<[i32]>,
+    /// Preallocated normalized difference table for acquisition searches.
+    normalized: Box<[i32]>,
+    /// Full-rate energies for the adjacent candidate lags.
+    tracking_energy: Box<[i32]>,
     /// Full-rate cross products for the tracking energies.
-    tracking_cross: [i32; TRACKING_LAGS],
+    tracking_cross: Box<[i32]>,
     /// The full-rate integer lag of tracking slot zero.
     base: i32,
     /// The number of frames since the last local minimum search. A search
@@ -104,29 +146,38 @@ pub(crate) struct PitchTracker {
 impl PitchTracker {
     /// Prepares the acquisition filters and allocates the silent full-rate
     /// history.
-    /// The two supported rates use low-pass cutoffs at rate/32 and at 1.5
-    /// times that cutoff. The validated sensitivity is quantized to Q14.
+    ///
+    /// The low-pass cutoffs sit at `rate / (4 * stride)` and at 1.5 times that
+    /// cutoff. The validated sensitivity is quantized to Q14.
     pub(crate) fn new(rate: SampleRate, config: PitchConfig) -> Self {
+        let stride = pitch_stride(rate);
+        let history = history_frames(rate);
+        let acq_lags = acquisition_lags(rate);
+        let trk_lags = tracking_lags(rate);
+        let q11_shift = 11 - stride.trailing_zeros();
         let mut pre = [Biquad::new(), Biquad::new()];
-        let cutoff = rate.hz() / 16.0 / 2.0;
+        let cutoff = rate.hz() / (2.0 * stride as f32) / 2.0;
         pre[0].set_design(Design::low_pass(rate.hz(), cutoff, 0.707));
         pre[1].set_design(Design::low_pass(rate.hz(), cutoff * 1.5, 0.707));
         Self {
             pre,
-            raw: vec![0; HISTORY]
-                .into_boxed_slice()
-                .try_into()
-                .expect("prepared pitch history length"),
+            raw: vec![0; history].into_boxed_slice(),
+            stride_mask: stride - 1,
+            q11_shift,
+            q11_round: 1_i32 << (q11_shift - 1),
+            tracking_half: (trk_lags / 2) as i32,
+            min_lag: minimum_lag(rate),
             write: 0,
             detecting: true,
             first: true,
-            detection: [0; 2 * ACQUISITION_LAGS],
+            detection: vec![0; 2 * acq_lags].into_boxed_slice(),
             detection_index: 0,
             detection_count: 0,
-            energy: [0; ACQUISITION_LAGS],
-            cross: [0; ACQUISITION_LAGS],
-            tracking_energy: [0; TRACKING_LAGS],
-            tracking_cross: [0; TRACKING_LAGS],
+            energy: vec![0; acq_lags].into_boxed_slice(),
+            cross: vec![0; acq_lags].into_boxed_slice(),
+            normalized: vec![0; acq_lags].into_boxed_slice(),
+            tracking_energy: vec![0; trk_lags].into_boxed_slice(),
+            tracking_cross: vec![0; trk_lags].into_boxed_slice(),
             base: 0,
             tracking_counter: 0,
             period: Q6::default(),
@@ -274,10 +325,12 @@ impl PitchTracker {
     /// only if its interpolated value is less than the threshold.
     ///
     /// The first 10 decimated samples after a restart give no candidate.
-    /// The function subtracts 20 from the selected full-rate period. This puts
-    /// the period at the center of the 40-lag tracking window before the
-    /// window starts.
+    /// The function subtracts half of the tracking window from the selected
+    /// full-rate period. This puts the period at the center of the tracking
+    /// window before the window starts.
     fn detection_lag(&mut self, sample: i32) -> i32 {
+        let acq_lags = self.energy.len();
+        let detection_len = self.detection.len();
         if self.first {
             self.first = false;
             self.detection.fill(0);
@@ -290,16 +343,16 @@ impl PitchTracker {
         let mut index1 = self.detection_index;
         let mut index2 = index1;
         self.detection_index += 1;
-        if self.detection_index == 2 * ACQUISITION_LAGS {
+        if self.detection_index == detection_len {
             self.detection_index = 0;
         }
         self.detection[index1] = sample;
         let square = mul14(sample, sample);
         let mut lag = 0;
-        while lag < ACQUISITION_LAGS {
+        while lag < acq_lags {
             // Neither input window wraps in this run. For all lanes, the two
             // input cursors cross a maximum of two different boundaries.
-            let count = (ACQUISITION_LAGS - lag).min(index1 + 1).min(index2 / 2 + 1);
+            let count = (acq_lags - lag).min(index1 + 1).min(index2 / 2 + 1);
             let end = lag + count;
             let current_low = index1 + 1 - count;
             let delayed_low = index2 - (count - 1) * 2;
@@ -312,12 +365,12 @@ impl PitchTracker {
                 &mut self.cross[lag..end],
             );
             index1 = if count == index1 + 1 {
-                273
+                detection_len - 1
             } else {
                 index1 - count
             };
             index2 = if count == index2 / 2 + 1 {
-                index2 + 2 * ACQUISITION_LAGS - count * 2
+                index2 + detection_len - count * 2
             } else {
                 index2 - count * 2
             };
@@ -327,12 +380,8 @@ impl PitchTracker {
         if self.detection_count <= 10 {
             return 0;
         }
-        let maximum = ((self.detection_count - 6) / 2).min(ACQUISITION_LAGS as i32 - 1) as usize;
-        let mut normalized = [0_i32; ACQUISITION_LAGS];
-        #[expect(
-            clippy::needless_range_loop,
-            reason = "one lag index drives three tables in the hot loop"
-        )]
+        let maximum = ((self.detection_count - 6) / 2).min(acq_lags as i32 - 1) as usize;
+        self.normalized[..maximum].fill(0);
         for lag in 1..maximum {
             let mut energy = self.energy[lag];
             let mut cross = self.cross[lag];
@@ -340,12 +389,13 @@ impl PitchTracker {
                 energy >>= 1;
                 cross >>= 1;
             }
-            normalized[lag] = if energy > 0 {
+            self.normalized[lag] = if energy > 0 {
                 (energy / 2).wrapping_sub(cross).wrapping_shl(14) / energy
             } else {
                 ONE
             };
         }
+        let normalized = &self.normalized[..];
         let mut lag = 2;
         while lag < maximum.saturating_sub(2) {
             if normalized[lag] > 9830 {
@@ -413,35 +463,38 @@ impl PitchTracker {
         if best == 0 {
             0
         } else {
-            ((128_i32.wrapping_add(best)) >> 8).wrapping_sub(20)
+            ((self.q11_round.wrapping_add(best)) >> self.q11_shift).wrapping_sub(self.tracking_half)
         }
     }
 
-    /// Builds the energies and cross terms for 40 full-rate lags from a
-    /// positive base.
+    /// Builds the energies and cross terms for the full-rate tracking lags
+    /// from a positive base.
+    ///
     /// Candidate acquisition makes sure that the necessary history fits in
     /// the ring. The counter starts at four, so the next tracking sample
     /// searches immediately.
     fn initialize_tracking(&mut self, period: i32) {
+        let history = self.raw.len();
+        let trk_lags = self.tracking_energy.len();
         self.base = period;
         let mut energy: i32 = 0;
         let mut index = self.write;
         for _ in 0..period * 2 {
             let sample = self.raw[index];
-            index = if index == 0 { HISTORY - 1 } else { index - 1 };
+            index = if index == 0 { history - 1 } else { index - 1 };
             energy = energy.wrapping_add(mul14(sample, sample));
         }
         self.tracking_energy[0] = energy;
-        index = ring(self.write as i32 - period * 2);
-        for lag in 1..TRACKING_LAGS {
+        index = ring(self.write as i32 - period * 2, history);
+        for lag in 1..trk_lags {
             let first = self.raw[index];
-            index = if index == 0 { HISTORY - 1 } else { index - 1 };
+            index = if index == 0 { history - 1 } else { index - 1 };
             let second = self.raw[index];
-            index = if index == 0 { HISTORY - 1 } else { index - 1 };
+            index = if index == 0 { history - 1 } else { index - 1 };
             energy = energy.wrapping_add(mul14(first, first).wrapping_add(mul14(second, second)));
             self.tracking_energy[lag] = energy;
         }
-        for lag in 0..TRACKING_LAGS {
+        for lag in 0..trk_lags {
             self.tracking_cross[lag] = self.cross_at(period + lag as i32);
         }
         self.tracking_counter = 4;
@@ -450,36 +503,43 @@ impl PitchTracker {
 
     /// Calculates the wrapping Q14 cross sum of two adjacent periods of raw
     /// audio.
+    ///
     /// The positive integer period and its two-period window must fit in the
     /// history.
     fn cross_at(&self, period: i32) -> i32 {
+        let history = self.raw.len();
         let mut first = self.write;
-        let mut second = ring(self.write as i32 - period);
+        let mut second = ring(self.write as i32 - period, history);
         let mut cross = 0_i32;
         for _ in 0..period {
             cross = cross.wrapping_add(mul14(self.raw[first], self.raw[second]));
-            first = if first == 0 { HISTORY - 1 } else { first - 1 };
-            second = if second == 0 { HISTORY - 1 } else { second - 1 };
+            first = if first == 0 { history - 1 } else { first - 1 };
+            second = if second == 0 { history - 1 } else { second - 1 };
         }
         cross
     }
 
     /// Increments the full-rate energy and cross windows when all reads are
     /// contiguous.
-    /// The fixed array lengths encode 40 lag samples and 79 samples with a
-    /// stride of two. The separate wrapping path in `process_sample` uses the
-    /// same arithmetic.
+    ///
+    /// `middle` has one sample per tracking lag, and `delayed` has
+    /// `2 * lags - 1` samples for the stride of two. The separate wrap path in
+    /// `process_sample` uses the same arithmetic.
     #[inline]
     fn track_contiguous(
         current: i32,
-        middle: &[i32; TRACKING_LAGS],
-        delayed: &[i32; 2 * TRACKING_LAGS - 1],
-        energy: &mut [i32; TRACKING_LAGS],
-        cross: &mut [i32; TRACKING_LAGS],
+        middle: &[i32],
+        delayed: &[i32],
+        energy: &mut [i32],
+        cross: &mut [i32],
     ) {
-        for lag in 0..TRACKING_LAGS {
-            let middle = middle[TRACKING_LAGS - 1 - lag];
-            let delayed = delayed[2 * (TRACKING_LAGS - 1) - lag * 2];
+        let lags = energy.len();
+        debug_assert_eq!(cross.len(), lags);
+        debug_assert_eq!(middle.len(), lags);
+        debug_assert_eq!(delayed.len(), 2 * lags - 1);
+        for lag in 0..lags {
+            let middle = middle[lags - 1 - lag];
+            let delayed = delayed[2 * (lags - 1) - lag * 2];
             energy[lag] = energy[lag]
                 .wrapping_add(mul14(current, current).wrapping_sub(mul14(delayed, delayed)));
             cross[lag] = cross[lag]
@@ -490,17 +550,19 @@ impl PitchTracker {
     /// Stores one Q14 sample word, advances acquisition or tracking, and
     /// reports transitions.
     ///
-    /// The filters always advance. Acquisition uses only every eighth frame.
-    /// Every five frames, tracking finds its minimum again and interpolates a
-    /// Q6 period. If the minimum is outside slots 18..=21, the lag window
-    /// first moves one lag toward it.
+    /// The filters always advance. Acquisition uses the decimated cadence for
+    /// the sample rate. Every five frames, tracking finds its minimum again
+    /// and interpolates a Q6 period. If the minimum moves away from the center
+    /// slots, the lag window first moves one lag toward it.
     ///
-    /// If the minimum is at a window boundary, its lag is 19 or less, or the
-    /// curvature is zero, acquisition starts again. The last usable period is
-    /// not discarded.
+    /// If the minimum is at a window boundary, its lag is at or below the
+    /// minimum lag threshold, or the curvature is zero, acquisition starts
+    /// again. The last usable period is not discarded.
     pub(crate) fn process_sample(&mut self, sample: i32) -> PitchStep {
+        let history = self.raw.len();
+        let trk_lags = self.tracking_energy.len();
         self.write += 1;
-        if self.write == HISTORY {
+        if self.write == history {
             self.write = 0;
         }
         self.raw[self.write] = sample;
@@ -511,7 +573,7 @@ impl PitchTracker {
         let filtered = filtered.to_bits();
         let mut step = PitchStep::default();
         if self.detecting {
-            if self.write & 7 == 0 {
+            if self.write & self.stride_mask == 0 {
                 let lag = self.detection_lag(filtered);
                 if lag > 0 {
                     self.initialize_tracking(lag);
@@ -520,29 +582,25 @@ impl PitchTracker {
             }
         } else {
             let current = self.raw[self.write];
-            let mut first = ring(self.write as i32 - self.base);
-            let mut second = ring(self.write as i32 - self.base * 2);
-            if first >= TRACKING_LAGS - 1 && second >= 2 * (TRACKING_LAGS - 1) {
+            let mut first = ring(self.write as i32 - self.base, history);
+            let mut second = ring(self.write as i32 - self.base * 2, history);
+            if first >= trk_lags - 1 && second >= 2 * (trk_lags - 1) {
                 // Contiguous windows let each lag update without a wrap of
                 // its indices.
                 Self::track_contiguous(
                     current,
-                    self.raw[first - (TRACKING_LAGS - 1)..=first]
-                        .try_into()
-                        .expect("a full tracking window"),
-                    self.raw[second - 2 * (TRACKING_LAGS - 1)..=second]
-                        .try_into()
-                        .expect("79 tracking samples"),
+                    &self.raw[first - (trk_lags - 1)..=first],
+                    &self.raw[second - 2 * (trk_lags - 1)..=second],
                     &mut self.tracking_energy,
                     &mut self.tracking_cross,
                 );
             } else {
-                for lag in 0..TRACKING_LAGS {
+                for lag in 0..trk_lags {
                     let middle = self.raw[first];
-                    first = if first == 0 { HISTORY - 1 } else { first - 1 };
+                    first = if first == 0 { history - 1 } else { first - 1 };
                     let delayed = self.raw[second];
                     second = if second < 2 {
-                        second + HISTORY - 2
+                        second + history - 2
                     } else {
                         second - 2
                     };
@@ -556,35 +614,35 @@ impl PitchTracker {
             self.tracking_counter += 1;
             if self.tracking_counter == 5 {
                 self.tracking_counter = 0;
-                let mut best = tracking_minimum(|lag| {
+                let mut best = tracking_minimum(trk_lags, |lag| {
                     (self.tracking_energy[lag] >> 1).wrapping_sub(self.tracking_cross[lag])
                 });
-                if best == TRACKING_LAGS - 1 || best == 0 || self.base + best as i32 <= 19 {
+                let half = trk_lags / 2;
+                if best == trk_lags - 1 || best == 0 || self.base + best as i32 <= self.min_lag {
                     self.restart();
                     step.restarted = true;
                 } else {
-                    if best <= 17 && self.base > 1 {
+                    if best <= half - 3 && self.base > 1 {
                         self.base -= 1;
                         best += 1;
-                        self.tracking_energy.copy_within(0..TRACKING_LAGS - 1, 1);
-                        self.tracking_cross.copy_within(0..TRACKING_LAGS - 1, 1);
-                        let first = self.raw[ring(self.write as i32 - self.base * 2)];
-                        let second = self.raw[ring(self.write as i32 - self.base * 2 - 1)];
+                        self.tracking_energy.copy_within(0..trk_lags - 1, 1);
+                        self.tracking_cross.copy_within(0..trk_lags - 1, 1);
+                        let first = self.raw[ring(self.write as i32 - self.base * 2, history)];
+                        let second = self.raw[ring(self.write as i32 - self.base * 2 - 1, history)];
                         self.tracking_energy[0] = self.tracking_energy[1]
                             .wrapping_sub(mul14(first, first).wrapping_add(mul14(second, second)));
                         self.tracking_cross[0] = self.cross_at(self.base);
-                    } else if best > 21 {
+                    } else if best > half + 1 && (self.base as usize) + trk_lags < history / 2 {
                         self.base += 1;
                         best -= 1;
-                        self.tracking_energy.copy_within(1..TRACKING_LAGS, 0);
-                        self.tracking_cross.copy_within(1..TRACKING_LAGS, 0);
-                        let total = self.base + TRACKING_LAGS as i32 - 1;
-                        let first = self.raw[ring(self.write as i32 - total * 2 + 2)];
-                        let second = self.raw[ring(self.write as i32 - total * 2 + 1)];
-                        self.tracking_energy[TRACKING_LAGS - 1] = self.tracking_energy
-                            [TRACKING_LAGS - 2]
+                        self.tracking_energy.copy_within(1..trk_lags, 0);
+                        self.tracking_cross.copy_within(1..trk_lags, 0);
+                        let total = self.base + trk_lags as i32 - 1;
+                        let first = self.raw[ring(self.write as i32 - total * 2 + 2, history)];
+                        let second = self.raw[ring(self.write as i32 - total * 2 + 1, history)];
+                        self.tracking_energy[trk_lags - 1] = self.tracking_energy[trk_lags - 2]
                             .wrapping_add(mul14(second, second).wrapping_add(mul14(first, first)));
-                        self.tracking_cross[TRACKING_LAGS - 1] = self.cross_at(total);
+                        self.tracking_cross[trk_lags - 1] = self.cross_at(total);
                     }
                     let y0 = (self.tracking_energy[best - 1] >> 1)
                         .wrapping_sub(self.tracking_cross[best - 1]);

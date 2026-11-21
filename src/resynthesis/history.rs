@@ -1,31 +1,22 @@
 //! Audio histories on the heap and three-point parabolic interpolation.
 
 use crate::numeric::fixed::Q14;
-use crate::numeric::{ring, HISTORY};
+use crate::numeric::ring;
 
-/// Allocates exactly HISTORY copies of `value` on the heap and keeps that
-/// length in the boxed-array type.
-///
-/// The conversion from slice to array cannot fail, because the allocation
-/// gives the slice the necessary length.
-pub(super) fn prepare_history<T: Copy>(value: T) -> Box<[T; HISTORY]> {
-    // Allocate directly on the heap. The fixed history length is then part
-    // of the type for index operations, and no large temporary array goes on
-    // the stack.
-    vec![value; HISTORY]
-        .into_boxed_slice()
-        .try_into()
-        .unwrap_or_else(|_| unreachable!("prepared voice history length"))
+/// Allocates `len` copies of `value` on the heap as a boxed slice.
+pub(super) fn prepare_history<T: Copy>(value: T, len: usize) -> Box<[T]> {
+    vec![value; len].into_boxed_slice()
 }
 
-/// Returns the previous, center and next positions in the ring buffer.
+/// Returns the previous, center and next positions in a ring buffer of length
+/// `len`.
 ///
 /// The center can be negative or more than one full history length.
 #[inline]
-fn interpolation_indices(center: i32) -> [usize; 3] {
-    let middle = ring(center);
-    let left = if middle == 0 { HISTORY - 1 } else { middle - 1 };
-    let right = if middle + 1 == HISTORY { 0 } else { middle + 1 };
+fn interpolation_indices(center: i32, len: usize) -> [usize; 3] {
+    let middle = ring(center, len);
+    let left = if middle == 0 { len - 1 } else { middle - 1 };
+    let right = if middle + 1 == len { 0 } else { middle + 1 };
     [left, middle, right]
 }
 
@@ -33,13 +24,14 @@ fn interpolation_indices(center: i32) -> [usize; 3] {
 ///
 /// If possible, the function reads a contiguous slice. If not, it wraps the
 /// center and the two adjacent positions. The two paths keep the tap order.
-fn interpolation_taps<T: Copy>(buffer: &[T; HISTORY], center: i32) -> [T; 3] {
-    if center > 0 && center < (HISTORY - 1) as i32 {
+fn interpolation_taps<T: Copy>(buffer: &[T], center: i32) -> [T; 3] {
+    let len = buffer.len();
+    if center > 0 && center < (len - 1) as i32 {
         let center = center as usize;
         let taps = &buffer[center - 1..center + 2];
         [taps[0], taps[1], taps[2]]
     } else {
-        let [left, middle, right] = interpolation_indices(center);
+        let [left, middle, right] = interpolation_indices(center, len);
         [buffer[left], buffer[middle], buffer[right]]
     }
 }
@@ -55,7 +47,7 @@ fn interpolation_taps<T: Copy>(buffer: &[T; HISTORY], center: i32) -> [T; 3] {
 /// relative to that center. The taps wrap through the history, but the
 /// returned center does not. All intermediate products and sums keep the
 /// 32-bit wrap order of the engine.
-pub(super) fn interpolation(buffer: &[Q14; HISTORY], position: Q14) -> (Q14, i32) {
+pub(super) fn interpolation(buffer: &[Q14], position: Q14) -> (Q14, i32) {
     let bits = position.to_bits();
     let center = if position > Q14::ZERO {
         bits.wrapping_add(8192) >> 14

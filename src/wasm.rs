@@ -119,18 +119,19 @@ pub struct WasmProcessor {
 impl WasmProcessor {
     /// Prepares a processor and its reusable PCM buffers.
     ///
-    /// `sample_rate` must be 44100 or 48000. `max_block_frames` must be an
-    /// integer in 1..=4294967295. It is a limit for each call, and smaller
-    /// blocks and empty blocks are also valid. If you omit `config`, the
-    /// processor uses the default configuration. The constructor validates
-    /// the settings before it allocates the processor or the PCM buffers. In
-    /// TypeScript, use `new Tunelet(sampleRate, maxBlockFrames, config)`.
+    /// `sample_rate` must be 8000, 16000, 22050, 24000, 32000, 44100, 48000,
+    /// 88200, 96000 or 192000. `max_block_frames` must be an integer in
+    /// 1..=4294967295. It is a limit for each call, and smaller blocks and
+    /// empty blocks are also valid. If you omit `config`, the processor uses
+    /// the default configuration. The constructor validates the settings
+    /// before it allocates the processor or the PCM buffers. In TypeScript,
+    /// use `new Tunelet(sampleRate, maxBlockFrames, config)`.
     ///
     /// # Errors
     ///
     /// The constructor throws if one of these conditions occurs:
     ///
-    /// - The rate is not 44100 or 48000.
+    /// - The rate is not one of the ten supported sample rates.
     /// - The block limit is not an integer or is out of range.
     /// - The configuration object is malformed or a field is missing.
     /// - The configuration is not valid.
@@ -147,9 +148,21 @@ impl WasmProcessor {
         // Accept JavaScript numbers without the u32 coercion of wasm-bindgen.
         // That coercion silently truncates fractions and wraps large values.
         let rate = match sample_rate {
+            8000.0 => SampleRate::Hz8000,
+            16000.0 => SampleRate::Hz16000,
+            22050.0 => SampleRate::Hz22050,
+            24000.0 => SampleRate::Hz24000,
+            32000.0 => SampleRate::Hz32000,
             44100.0 => SampleRate::Hz44100,
             48000.0 => SampleRate::Hz48000,
-            _ => return Err(JsError::new("sampleRate must be 44100 or 48000")),
+            88200.0 => SampleRate::Hz88200,
+            96000.0 => SampleRate::Hz96000,
+            192000.0 => SampleRate::Hz192000,
+            _ => {
+                return Err(JsError::new(
+                    "sampleRate must be 8000, 16000, 22050, 24000, 32000, 44100, 48000, 88200, 96000 or 192000",
+                ))
+            }
         };
         if !(1.0..=f64::from(u32::MAX)).contains(&max_block_frames)
             || max_block_frames.fract() != 0.0

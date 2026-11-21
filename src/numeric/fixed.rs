@@ -163,3 +163,70 @@ impl<const F: u32> Shl<u32> for Fixed<F> {
         Self(self.0.wrapping_shl(bits))
     }
 }
+
+impl Q6 {
+    /// Divides a Q6 period by a nonzero Q14 ratio and returns a Q6 period.
+    ///
+    /// If the period fits in `Fixed::div` without a 32-bit shift wrap, this
+    /// method uses `Fixed::div`. For long periods at 192 kHz, it shifts both
+    /// 32-bit operands first so the quotient stays positive.
+    #[inline]
+    pub(crate) fn div_by_q14(self, rhs: Q14) -> Q6 {
+        if self.0.wrapping_abs() < (1 << 17) {
+            return self.div(rhs);
+        }
+        let shift = self
+            .0
+            .unsigned_abs()
+            .leading_zeros()
+            .saturating_sub(1)
+            .min(14);
+        let divisor = rhs.0 >> (14 - shift);
+        if divisor == 0 {
+            self
+        } else {
+            Self(self.0.wrapping_shl(shift).wrapping_div(divisor))
+        }
+    }
+
+    /// Divides a Q6 period by a nonzero Q6 period and returns a Q14 ratio.
+    ///
+    /// If the numerator fits in `Fixed::div` without a 32-bit shift wrap, this
+    /// method uses `Fixed::div`. For long periods at 192 kHz, it shifts both
+    /// 32-bit operands first so the ratio stays positive.
+    #[inline]
+    pub(crate) fn div_to_q14(self, rhs: Q6) -> Q14 {
+        if self.0.wrapping_abs() < (1 << 17) {
+            return self.div(rhs);
+        }
+        let shift = self
+            .0
+            .unsigned_abs()
+            .leading_zeros()
+            .saturating_sub(1)
+            .min(14);
+        let divisor = rhs.0 >> (14 - shift);
+        if divisor == 0 {
+            Q14::ONE
+        } else {
+            Q14::from_bits(self.0.wrapping_shl(shift).wrapping_div(divisor))
+        }
+    }
+
+    /// Scales a Q6 period by a Q14 coefficient without 32-bit overflow at high
+    /// sample rates.
+    #[inline]
+    pub(crate) fn mul_q14(self, weight: Q14) -> Q6 {
+        if self.0.wrapping_abs() < (1 << 17) {
+            return weight.mul(self);
+        }
+        let shift = self
+            .0
+            .unsigned_abs()
+            .leading_zeros()
+            .saturating_sub(1)
+            .min(14);
+        let drop = 14 - shift;
+        Self((self.0 >> drop).wrapping_mul(weight.0).wrapping_shr(shift))
+    }
+}

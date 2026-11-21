@@ -11,26 +11,51 @@ use std::num::NonZeroUsize;
 
 /// The sample rate of the input and the output.
 ///
-/// The default is 44.1 kHz. The prepared delay and filter layouts support only
-/// the listed rates. To convert an integer device rate, use
-/// [`SampleRate::try_from`]. The rate of a processor is fixed at construction.
-/// To change the rate, you must make a new processor.
+/// The default is 44.1 kHz. The prepared delay and filter layouts support ten
+/// standard voice, WebRTC and studio rates from 8 kHz to 192 kHz. To convert
+/// an integer device rate, use [`SampleRate::try_from`]. The rate of a
+/// processor is fixed at construction. To change the rate, you must make a new
+/// processor.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SampleRate {
+    /// 8 kHz.
+    Hz8000,
+    /// 16 kHz.
+    Hz16000,
+    /// 22.05 kHz.
+    Hz22050,
+    /// 24 kHz.
+    Hz24000,
+    /// 32 kHz.
+    Hz32000,
     /// 44.1 kHz.
     #[default]
     Hz44100,
     /// 48 kHz.
     Hz48000,
+    /// 88.2 kHz.
+    Hz88200,
+    /// 96 kHz.
+    Hz96000,
+    /// 192 kHz.
+    Hz192000,
 }
 
 impl SampleRate {
     /// Returns the rate in hertz.
     pub const fn as_u32(self) -> u32 {
         match self {
+            Self::Hz8000 => 8_000,
+            Self::Hz16000 => 16_000,
+            Self::Hz22050 => 22_050,
+            Self::Hz24000 => 24_000,
+            Self::Hz32000 => 32_000,
             Self::Hz44100 => 44_100,
             Self::Hz48000 => 48_000,
+            Self::Hz88200 => 88_200,
+            Self::Hz96000 => 96_000,
+            Self::Hz192000 => 192_000,
         }
     }
 
@@ -48,12 +73,21 @@ impl TryFrom<u32> for SampleRate {
     /// # Errors
     ///
     /// Returns [`Error::UnsupportedSampleRate`] with `hz`, unless the value is
-    /// exactly 44,100 or 48,000. The function does not resample and does not
-    /// select the nearest rate.
+    /// 8,000, 16,000, 22,050, 24,000, 32,000, 44,100, 48,000, 88,200, 96,000
+    /// or 192,000. The function does not resample and does not select the
+    /// nearest rate.
     fn try_from(hz: u32) -> Result<Self, Self::Error> {
         match hz {
+            8_000 => Ok(Self::Hz8000),
+            16_000 => Ok(Self::Hz16000),
+            22_050 => Ok(Self::Hz22050),
+            24_000 => Ok(Self::Hz24000),
+            32_000 => Ok(Self::Hz32000),
             44_100 => Ok(Self::Hz44100),
             48_000 => Ok(Self::Hz48000),
+            88_200 => Ok(Self::Hz88200),
+            96_000 => Ok(Self::Hz96000),
+            192_000 => Ok(Self::Hz192000),
             _ => Err(Error::UnsupportedSampleRate { hz }),
         }
     }

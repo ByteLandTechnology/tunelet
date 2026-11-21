@@ -843,11 +843,11 @@ impl HarmonyState {
             self.portamento_period[voice] = if self.portamento_period[voice] == Q6::ZERO {
                 self.period_output[voice]
             } else {
-                self.porta_decay.mul(self.portamento_period[voice])
-                    + (Q14::ONE - self.porta_decay).mul(self.period_output[voice])
+                self.portamento_period[voice].mul_q14(self.porta_decay)
+                    + self.period_output[voice].mul_q14(Q14::ONE - self.porta_decay)
             };
             if self.portamento_period[voice] > Q6::ZERO {
-                self.current_ratio[voice] = period.div(self.portamento_period[voice]);
+                self.current_ratio[voice] = period.div_to_q14(self.portamento_period[voice]);
             }
         }
         (self.current_ratio[voice], self.smoothed_gain[voice])
@@ -871,7 +871,7 @@ impl HarmonyState {
                 let (target, note) = self.find_scale_period(period, voice);
                 self.scale_note[voice] = note;
                 self.target_period[voice] = if self.config.source == HarmonySource::FixedInterval {
-                    period.div(self.fixed_interval[voice])
+                    period.div_by_q14(self.fixed_interval[voice])
                 } else {
                     target
                 };

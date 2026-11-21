@@ -7,7 +7,7 @@ use crate::effects::warm::Warm;
 use crate::events::{ValidatedEvent, ValidatedEvents};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
-use crate::resynthesis::{self, Resynthesis};
+use crate::resynthesis::Resynthesis;
 use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
 
 /// A prepared vocal processor with state, mono input and stereo synthesis.
@@ -90,9 +90,9 @@ impl Processor {
     /// I/O. Audio histories, pitch reports and meters start clear. The random
     /// stream starts from the low 32 bits of `random_seed`.
     ///
-    /// Punch uses its default cached drive until the first window of 100
-    /// frames with Punch enabled. The initial note table of correction has the
-    /// rate behavior that [`crate::CorrectionConfig`] describes.
+    /// Punch uses its default cached drive until the first peak window
+    /// completes with Punch enabled. Construction loads the correction note
+    /// table for the prepared sample rate.
     ///
     /// # Errors
     ///
@@ -103,7 +103,7 @@ impl Processor {
     pub fn new(preparation: PrepareConfig, config: ProcessorConfig) -> Result<Self, Error> {
         config.validate()?;
         let rate = preparation.sample_rate;
-        // Drive uses the default gain until the first 100-frame peak window.
+        // Drive uses the default gain until the first peak window completes.
         let mut punch = Punch::new(rate, PunchConfig::default());
         punch.set_config(config.punch);
         Ok(Self {
@@ -112,7 +112,7 @@ impl Processor {
             punch,
             warm: Warm::new(rate, config.warm),
             resynthesis: Box::new(Resynthesis::new(rate, config.resynthesis)),
-            alien: Alien::new(config.alien),
+            alien: Alien::new(rate, config.alien),
             reverb: Reverb::new(rate, config.reverb),
             numeric: NumericContext::new(config.resynthesis.random_seed as u32),
             peak: 0,
@@ -298,13 +298,11 @@ impl Processor {
     /// silence. It can also stop filter output that continues for a long
     /// time.
     pub fn tail_frames(&self) -> usize {
+        let rate = self.preparation.sample_rate;
         self.resynthesis
             .tail_frames()
-            .saturating_add(alien::tail_frames(self.config.alien))
-            .saturating_add(reverb::tail_frames(
-                self.preparation.sample_rate,
-                self.config.reverb,
-            ))
+            .saturating_add(alien::tail_frames(rate, self.config.alien))
+            .saturating_add(reverb::tail_frames(rate, self.config.reverb))
     }
 
     /// Returns the fixed sample rate and block limit.
@@ -322,13 +320,14 @@ impl Processor {
         self.config
     }
 
-    /// Returns the nominal resynthesis latency: 1,593 frames at both rates.
+    /// Returns the nominal resynthesis latency in frames for the prepared
+    /// sample rate (1,593 frames at 44.1 kHz; 1,733 frames at 48 kHz).
     ///
-    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
-    /// and effects have their own timing. Thus, this value does not align all
-    /// paths.
+    /// The dry path adds only the overlap delay (1,543 frames at 44.1 kHz).
+    /// Resampled voices, choir delays and effects have their own timing. Thus,
+    /// this value does not align all paths.
     pub fn latency_frames(&self) -> usize {
-        resynthesis::LATENCY_FRAMES
+        self.resynthesis.latency_frames()
     }
 
     /// Returns the pitch, stereo peak and frame count, and does not clear them.
@@ -854,17 +853,21 @@ pub struct Telemetry {
     ///
     /// The value is the ratio of the two input envelopes times the
     /// configured input gain. It is more than 1 at an attack. Punch updates
-    /// it every 100 frames. The value is 1 while Punch is disabled.
+    /// it after each peak window (100 frames at 44.1 kHz). The value is 1
+    /// while Punch is disabled.
     pub punch_gain: f32,
     /// The linear gain that Warm applies before its saturation curve and
     /// removes after it.
     ///
     /// The value is the inverse of the input peak envelope. For input below
-    /// -30 dB, it is the gain of +30 dB. Warm updates it every 100 frames.
-    /// The value is 1 while Warm is disabled.
+    /// -30 dB, it is the gain of +30 dB. Warm updates it after each peak
+    /// window (100 frames at 44.1 kHz). The value is 1 while Warm is
+    /// disabled.
     pub warm_gain: f32,
-    /// The length of the Alien loop in frames, as
-    /// [`crate::AlienConfig::loop_frames`] gives.
+    /// The active length of the Alien loop in frames.
+    ///
+    /// The value is [`crate::AlienConfig::loop_frames`], clamped to half of
+    /// the prepared Alien history capacity.
     pub alien_loop_frames: u32,
     /// The current frame in the Alien loop. It is less than
     /// [`alien_loop_frames`](Self::alien_loop_frames).
@@ -872,10 +875,11 @@ pub struct Telemetry {
     /// The reverse reader is two times this number of frames behind the
     /// recording position. The value advances also while Alien is disabled.
     pub alien_phase_frames: u32,
-    /// The wrapping count of formant analyses since construction.
+    /// The count of formant analyses since construction, with wrap at
+    /// `u32::MAX`.
     ///
-    /// The count increases every 441 frames while the formant stage is
-    /// enabled. Compare two values to find if
-    /// [`Processor::formant_envelope`] can give a new result.
+    /// The count increases once in each 10 ms analysis interval (441 frames
+    /// at 44.1 kHz) while the formant stage is enabled. Compare two values
+    /// to find if [`Processor::formant_envelope`] can give a new result.
     pub formant_generation: u32,
 }

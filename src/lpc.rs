@@ -37,34 +37,66 @@ pub(crate) fn durbin(
     if correlation[0] <= 0_i32 {
         return false;
     }
-    let mut alpha = correlation[0];
     let one = 16384;
+    if order <= 50 {
+        let mut alpha = correlation[0];
+        for i in 0..order {
+            let mut sum = 0_i32;
+            for j in 0..i {
+                sum = sum.wrapping_add(coefficients[j].wrapping_mul(correlation[i - j]));
+            }
+            sum = sum.wrapping_shr(14);
+            if alpha == 0_i32 {
+                return false;
+            }
+            let k = correlation[i + 1]
+                .wrapping_sub(sum)
+                .wrapping_shl(14)
+                .wrapping_div(alpha);
+            parcor[i] = k;
+            if k.wrapping_abs() >= one {
+                return false;
+            }
+            scratch[i] = k;
+            for j in 0..i {
+                scratch[j] = coefficients[j]
+                    .wrapping_shl(14)
+                    .wrapping_sub(k.wrapping_mul(coefficients[i - j - 1]))
+                    .wrapping_shr(14);
+            }
+            coefficients[..=i].copy_from_slice(&scratch[..=i]);
+            alpha = mul14(alpha, one.wrapping_sub(mul14(k, k)));
+        }
+        return true;
+    }
+    // High-order models above 44.1 kHz keep Q24 internal words in 32-bit
+    // arithmetic so step truncation does not bias reflection magnitudes.
+    let mut alpha = correlation[0].wrapping_shl(10);
     for i in 0..order {
         let mut sum = 0_i32;
         for j in 0..i {
-            sum = sum.wrapping_add(coefficients[j].wrapping_mul(correlation[i - j]));
+            sum = sum.wrapping_add((coefficients[j] >> 10).wrapping_mul(correlation[i - j]) >> 4);
         }
-        sum = sum.wrapping_shr(14);
-        if alpha == 0_i32 {
+        let divisor = alpha >> 8;
+        if divisor <= 0_i32 {
             return false;
         }
-        let k = correlation[i + 1]
-            .wrapping_sub(sum)
-            .wrapping_shl(14)
-            .wrapping_div(alpha);
+        let numerator = correlation[i + 1].wrapping_shl(10).wrapping_sub(sum) >> 8;
+        let k = numerator.wrapping_shl(14).wrapping_div(divisor);
         parcor[i] = k;
         if k.wrapping_abs() >= one {
             return false;
         }
-        scratch[i] = k;
+        scratch[i] = k.wrapping_shl(10);
         for j in 0..i {
-            scratch[j] = coefficients[j]
-                .wrapping_shl(14)
-                .wrapping_sub(k.wrapping_mul(coefficients[i - j - 1]))
-                .wrapping_shr(14);
+            scratch[j] =
+                coefficients[j].wrapping_sub(k.wrapping_mul(coefficients[i - j - 1] >> 10) >> 4);
         }
         coefficients[..=i].copy_from_slice(&scratch[..=i]);
-        alpha = mul14(alpha, one.wrapping_sub(mul14(k, k)));
+        alpha = divisor.wrapping_mul(one.wrapping_sub(mul14(k, k))) >> 6;
+    }
+    for coefficient in &mut coefficients[..order] {
+        *coefficient = coefficient.wrapping_shr(10);
     }
     true
 }

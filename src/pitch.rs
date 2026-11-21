@@ -2,8 +2,8 @@
 //! estimates.
 //!
 //! Acquisition checks that repeated minima agree. Tracking refines the period
-//! in a window of 40 lags. The reporting bounds filter only the feedback to
-//! the host.
+//! in a rate-scaled window of candidate lags. The reporting bounds filter only
+//! the feedback to the host.
 
 mod search;
 pub(crate) mod tracker;

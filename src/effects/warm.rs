@@ -6,16 +6,24 @@ use crate::numeric::db_to_gain;
 use crate::numeric::fixed::{Fixed, Q12, Q14, Q8};
 use crate::{Error, SampleRate};
 
-/// The update interval of the peak follower, in frames.
-const WINDOW_FRAMES: usize = 100;
+/// Returns the peak-follower update interval in frames (~2.27 ms; 100 frames
+/// at 44.1 kHz).
+const fn window_frames(rate: SampleRate) -> usize {
+    let frames = (100 * rate.as_u32() as usize + 22_050) / 44_100;
+    if frames < 1 {
+        1
+    } else {
+        frames
+    }
+}
 
 /// Asymmetric input saturation, followed by a 50 Hz high-pass filter.
 ///
 /// Warm operates after Punch and before pitch detection. Its adaptive
-/// normalization updates every 100 enabled frames. When Warm is disabled,
-/// the envelope and filter histories do not change. When Warm is enabled
-/// again, they continue from their last state, unless the processor was
-/// reset.
+/// normalization updates after each window of enabled frames (approximately
+/// 2.27 ms; 100 frames at 44.1 kHz). When Warm is disabled, the envelope and
+/// filter histories do not change. When Warm is enabled again, they continue
+/// from their last state, unless the processor was reset.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -59,11 +67,13 @@ impl WarmConfig {
 /// filter.
 #[derive(Debug)]
 pub(crate) struct Warm {
+    /// The peak-window length in frames for the prepared rate.
+    window_frames: usize,
     /// The 50 Hz one-pole high-pass output filter.
     filter: Biquad,
     /// The kept Q14 peak envelope from completed windows.
     peak: Q14,
-    /// The largest absolute Q14 sample in the current 100-frame window.
+    /// The largest absolute Q14 sample in the current peak window.
     window_peak: Q14,
     /// The number of enabled samples in this window.
     counter: usize,
@@ -87,15 +97,19 @@ impl Warm {
     /// Prepares the fixed high-pass filter and the initial normalization
     /// state.
     pub(crate) fn new(rate: SampleRate, config: WarmConfig) -> Self {
+        let window_frames = window_frames(rate);
         let mut filter = Biquad::new();
         filter.set_design(Design::high_pass_one_pole(rate.hz(), 50.0));
         let mut result = Self {
+            window_frames,
             filter,
             peak: Q14::default(),
             window_peak: Q14::default(),
             counter: 0,
             compression: Q8::ONE,
-            smooth: Q14::from_f64(0.5_f64.powf(1.0 / (rate.hz() as f64 * 0.2 / 100.0))),
+            smooth: Q14::from_f64(
+                0.5_f64.powf(1.0 / (rate.hz() as f64 * 0.2 / window_frames as f64)),
+            ),
             drive: Q12::default(),
             output_gain: Q14::default(),
             input_threshold: Q14::from_f64(db_to_gain(-30.0)),
@@ -141,7 +155,7 @@ impl Warm {
         let mut sample = Q14::from_bits(i32::from(input) >> 1);
         self.window_peak = self.window_peak.max(sample.abs());
         self.counter += 1;
-        if self.counter == WINDOW_FRAMES {
+        if self.counter == self.window_frames {
             self.counter = 0;
             self.peak = if sample.abs() > self.peak {
                 sample.abs()
