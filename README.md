@@ -352,21 +352,26 @@ For `wasm32-unknown-unknown`, the optional `wasm` feature of the crate gives
 JavaScript bindings and generated TypeScript declarations. The npm package
 contains these bindings.
 
-The npm package is one ES module for both browsers and Node.js. It contains
+The npm package is an ES module package for browsers and Node.js. It contains
 these items:
 
 - One Wasm binary.
-- The generated bindings.
-- A shared `loadTunelet` entry point.
+- The generated bindings (`tunelet/wasm`).
+- A shared root entry point (`tunelet`) with `loadTunelet`, `loadTuneletWasm`,
+  `Tunelet` and `TuneletFloat32`.
+- Web Audio worklet modules (`tunelet/worklet` and
+  `tunelet/worklet-processor`).
 
 ### Load the module
 
 Both environments use the same imports and the same initialization call. An
 import of the package does not load the binary. Call `loadTunelet()` before
-you use `Tunelet` or `defaultConfig()`.
+you use `Tunelet`, `TuneletFloat32` or `defaultConfig()`.
 
 - Node.js reads the packaged binary from a file URL relative to the module.
 - Browsers fetch the served Wasm asset.
+- In `AudioWorkletGlobalScope`, a default `loadTunelet()` call rejects with an
+  error because `fetch` is not available.
 
 Concurrent calls share one initialization promise. The package keeps the
 result of a successful initialization. If a load fails, the promise rejects,
@@ -386,6 +391,12 @@ rules. The first concurrent call selects the source. Later arguments do not
 replace an initialized module. A custom binary must match the generated
 bindings.
 
+To prepare Wasm for an `AudioWorklet`, call `loadTuneletWasm(source?)` on the
+main thread. It resolves the binary into an `ArrayBuffer` or a
+`WebAssembly.Module` without `fetch` inside the worklet. Then pass that module
+or byte buffer to `initSync({ module })` in `AudioWorkletGlobalScope`, or call
+`createTuneletWorkletNode` from `tunelet/worklet`.
+
 The package root also exports `loadTunelet` as its default export. For direct
 control of Wasm initialization, `tunelet/wasm` gives the generated default
 initializer and `initSync`. The package root re-exports `initSync` too. Use
@@ -394,12 +405,13 @@ gives only ESM exports. CommonJS applications can use `await import("tunelet")`.
 
 ### Deployment
 
-Browser bundlers must keep or emit the Wasm asset that
+Browser bundlers must keep or emit the Wasm asset and the worklet module that
 `new URL(..., import.meta.url)` refers to. For a browser deployment without a
 bundler, do these steps:
 
 1. Serve `dist/` and `pkg/`, and keep their relative layout.
-2. Map the `tunelet` import to `dist/index.js`, or import that URL directly.
+2. Map `tunelet` to `dist/index.js` and `tunelet/worklet` to `dist/worklet.js`,
+   or import those URLs directly.
 
 Serve the assets over HTTP(S). The package does not support a local `file:`
 page that opens the JavaScript.
@@ -408,8 +420,10 @@ page that opens the JavaScript.
 
 | Operation                         | TypeScript API                                           |
 | --------------------------------- | -------------------------------------------------------- |
-| Shared initialization             | `loadTunelet(source?)`                                   |
-| Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
+| Shared initialization             | `loadTunelet(source?)`, `loadTuneletWasm(source?)`       |
+| Processor classes                 | `Tunelet` (`Int16Array`), `TuneletFloat32` (`Float32Array`) |
+| Web Audio worklet                 | `createTuneletWorkletNode(context, options?)`, `TuneletWorkletNode` |
+| Mono audio to planar stereo       | `process(input, left, right, events?)`                   |
 | In-place mono downmix             | `processMono(audio, events?)`                            |
 | Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
 | Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
@@ -422,17 +436,66 @@ page that opens the JavaScript.
 
 ### Audio buffers
 
-All audio buffers are `Int16Array` buffers, and they must fit in the prepared
-frame limit. These rules apply:
+`Tunelet` accepts `Int16Array` buffers, and `TuneletFloat32` accepts
+`Float32Array` buffers. Every call must fit in the prepared `maxBlockFrames`
+limit. These rules apply to both classes:
 
 - Stereo output arrays must not overlap.
-- The input can overlap an output, because the binding copies the input
+- The input can overlap an output, because the processor copies the input
   first.
 - Buffers must stay attached during each call.
 
-Web Audio uses Float32 samples, which you must convert to and from 16-bit
-PCM. This package does not install an AudioWorklet or an integration with an
-audio device.
+`TuneletFloat32` preallocates three `Int16Array` buffers (`input`, `left` and
+`right`) at construction. It maps `NaN` to zero, clamps `Float32Array` inputs
+to `-1.0..=1.0`, calls `Tunelet` and multiplies outputs by `1.0 / 32768.0`:
+
+```ts
+import { loadTunelet, TuneletFloat32 } from "tunelet";
+
+await loadTunelet();
+const processor = new TuneletFloat32(48000, 1024);
+const input = new Float32Array(1024);
+const left = new Float32Array(1024);
+const right = new Float32Array(1024);
+processor.process(input, left, right);
+processor.free();
+```
+
+Native Rust hosts, such as [`cpal`](https://docs.rs/cpal/latest/cpal/) streams
+that supply `f32` slices, still use the `i16` methods on `Processor` and
+convert samples in the host. `TuneletFloat32`, `loadTuneletWasm` and the
+`AudioWorklet` modules exist only in TypeScript as an explicit exception to
+the API equivalence rule in `AGENTS.md`.
+
+### Web Audio AudioWorklet
+
+Import `createTuneletWorkletNode` from `tunelet/worklet` on the main thread to
+connect `tunelet` into a Web Audio graph:
+
+```ts
+import { createTuneletWorkletNode } from "tunelet/worklet";
+
+const context = new AudioContext({ sampleRate: 48000 });
+const node = await createTuneletWorkletNode(context);
+sourceNode.connect(node).connect(context.destination);
+```
+
+`createTuneletWorkletNode` loads the Wasm bytes on the main thread, registers
+`tunelet/worklet-processor` on `context.audioWorklet` and passes the binary in
+`processorOptions` to `initSync`. The worklet does not call `fetch`.
+
+Sample rates outside 44.1 kHz and 48 kHz are out of scope. Both
+`createTuneletWorkletNode` and `TuneletWorkletNode` reject unsupported
+`AudioContext` sample rates before they create a node.
+
+`TuneletWorkletProcessor` preallocates `Float32Array` scratch arrays and
+processes Web Audio blocks in chunks of at most `maxBlockFrames` (128 by
+default). `TuneletWorkletNode` communicates with the processor over
+`MessagePort` through `config()`, `setConfig(config)`, `sendMidi(event)`,
+`sendCorrectionMidi(event)`, `sendControl(event)`, `sendEvents(events)`,
+`reset()`, `beginDrain()`, `waitForDrain()`, `feedback()`, `takeFeedback()`,
+`telemetry()`, `takeTelemetry()`, `formantEnvelope(maxFrequencyHz, points)` and
+`free()`.
 
 ### Configuration objects
 
@@ -495,21 +558,24 @@ call with more points than before reserve memory.
 
 ### Memory allocation
 
-The constructor allocates reusable PCM buffers. A successful call that
-processes audio without events does not allocate new Rust PCM storage.
-However, the call copies the audio across the boundary between JavaScript and
-Wasm. These items can allocate:
+The constructors of `Tunelet`, `TuneletFloat32` and `TuneletWorkletProcessor`
+preallocate their reusable PCM conversion and scratch buffers. A successful
+steady-state call that processes or drains audio without events does not
+allocate new Rust PCM storage or new JavaScript conversion buffers. However,
+the call copies the audio across the boundary between JavaScript and Wasm.
+These items can allocate:
 
 - Object conversion.
-- Supplied events.
+- Supplied events and `MessagePort` messages.
 - Errors.
 - Feedback and telemetry.
 - The formant envelopes.
 
-The generated glue can also make temporary views. This binding is for general
-use, and it does not guarantee hard real-time behavior for allocation or
-scheduling. Drain completion and reset keep the same state as the equivalent
-Rust functions.
+As `src/wasm.rs` notes, the generated `wasm-bindgen` glue can also make
+temporary views on Wasm memory when it copies data. These bindings are for
+general use, and they do not guarantee hard real-time behavior or an
+`AudioWorklet` callback that is free of allocation. Drain completion and reset
+keep the same state as the equivalent Rust functions.
 
 ## Build from source
 

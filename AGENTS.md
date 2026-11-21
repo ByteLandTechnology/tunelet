@@ -40,10 +40,13 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 
 - Make the smallest possible change. Do not rename, move or format
   code that is not part of the task.
-- The public API is all items that `src/lib.rs` exports, `src/wasm.rs`
-  and `src/index.ts`. Do not add, change or remove public items if the
-  task does not tell you to. Keep the Rust, Wasm and TypeScript APIs
-  equivalent.
+- The public API is all items that `src/lib.rs`, `src/wasm.rs`,
+  `src/index.ts`, `src/worklet.ts` and `src/worklet-processor.ts`
+  export. Do not add, change or remove public items if the task does not
+  tell you to. Keep the Rust, Wasm and TypeScript APIs equivalent. As an
+  explicit exception, `TuneletFloat32`, `loadTuneletWasm` and the
+  `AudioWorklet` modules exist only in TypeScript, while native Rust
+  `Processor` uses `i16`.
 - Keep the crate lints in `src/lib.rs`: `#![forbid(unsafe_code)]`,
   `#![deny(missing_docs)]`, `#![deny(rustdoc::broken_intra_doc_links)]`
   and `#![warn(unreachable_pub)]`. Each public item must have rustdoc
@@ -84,8 +87,9 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 - `src/numeric.rs`, `src/numeric/`: the fixed-point functions, the
   random number generator and the lookup tables.
 - `src/wasm.rs`: the wasm-bindgen and tsify bindings (`wasm` feature).
-- `src/index.ts`: the `loadTunelet` entry point. See also `package.json`
-  and `tsconfig.json`.
+- `src/index.ts`, `src/worklet.ts`, `src/worklet-processor.ts`:
+  `loadTunelet`, `loadTuneletWasm`, `TuneletFloat32` and the Web Audio
+  worklet modules. See also `package.json` and `tsconfig.json`.
 
 ## Build and verify
 
@@ -97,7 +101,7 @@ cargo doc --locked --no-deps
 ```
 
 If you change the Wasm or TypeScript code, also run these commands.
-`npm run build` compiles `src/wasm.rs` and `src/index.ts`:
+`npm run build` compiles `src/wasm.rs` and the TypeScript modules in `src/`:
 
 ```sh
 rustup target add wasm32-unknown-unknown
