@@ -1,6 +1,7 @@
 //! Reverse-loop playback with a continuous input history and boundary fades.
 
 use crate::error::check_count;
+use crate::numeric::clamp_i32;
 use crate::numeric::fixed::{Fixed, Q14};
 use crate::Error;
 
@@ -56,6 +57,16 @@ impl AlienConfig {
     pub fn validate(self) -> Result<(), Error> {
         check_count("alien.loop_frames", i64::from(self.loop_frames), 1, 96_000)
     }
+}
+
+/// Blends two Q14 samples in `i64` with `weight` for `right`, clamped to `i32`.
+#[inline]
+fn blend_q14(left: Q14, right: Q14, weight: Q14) -> Q14 {
+    let inv = i64::from((Q14::ONE - weight).to_bits());
+    let weight = i64::from(weight.to_bits());
+    Q14::from_bits(clamp_i32(
+        (i64::from(left.to_bits()) * inv + i64::from(right.to_bits()) * weight) >> 14,
+    ))
 }
 
 /// Returns the boundary fade length for `loop_frames`: zero at 1, and at most
@@ -227,10 +238,9 @@ impl Alien {
                     let old = self.shadow.sample(&self.buffer, self.read);
                     let fade: Q14 = Fixed::<0>::from_bits(self.cursor_fade_frames as i32)
                         .div(Fixed::<0>::from_bits(FADE_FRAMES as i32));
-                    let inv = Q14::ONE - fade;
                     wet = [
-                        (old[0].mul::<14, 28>(inv) + wet[0].mul::<14, 28>(fade)).rescale(),
-                        (old[1].mul::<14, 28>(inv) + wet[1].mul::<14, 28>(fade)).rescale(),
+                        blend_q14(old[0], wet[0], fade),
+                        blend_q14(old[1], wet[1], fade),
                     ];
                 }
                 self.shadow.step();
@@ -240,10 +250,9 @@ impl Alien {
             } else {
                 let mix: Q14 = Fixed::<0>::from_bits(self.wet_frames as i32)
                     .div(Fixed::<0>::from_bits(FADE_FRAMES as i32));
-                let dry = Q14::ONE - mix;
                 [
-                    (input[0].mul::<14, 28>(dry) + wet[0].mul::<14, 28>(mix)).rescale(),
-                    (input[1].mul::<14, 28>(dry) + wet[1].mul::<14, 28>(mix)).rescale(),
+                    blend_q14(input[0], wet[0], mix),
+                    blend_q14(input[1], wet[1], mix),
                 ]
             }
         };

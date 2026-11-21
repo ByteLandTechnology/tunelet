@@ -2,6 +2,7 @@
 
 use crate::error::check_range;
 use crate::filter::{Biquad, Design};
+use crate::numeric::clamp_i32;
 use crate::numeric::fixed::{Fixed, Q14};
 use crate::{Error, SampleRate};
 
@@ -211,7 +212,8 @@ impl ReverbBank {
         scratch: usize,
     ) -> [Q14; 2] {
         let [left, right] = frame;
-        let mono = (left + right).div::<0, 14>(TWO);
+        let mono =
+            Q14::from_bits(((i64::from(left.to_bits()) + i64::from(right.to_bits())) / 2) as i32);
         let t = *taps;
         let d = &mut self.delay;
         let wet = match self.config.mode {
@@ -342,10 +344,7 @@ impl ReverbBank {
             }
         };
         d.step();
-        let peak = wet[0]
-            .to_bits()
-            .wrapping_abs()
-            .max(wet[1].to_bits().wrapping_abs());
+        let peak = wet[0].abs().to_bits().max(wet[1].abs().to_bits());
         self.level = (self.level - (self.level >> 8)).max(peak);
         wet
     }
@@ -390,7 +389,7 @@ fn q14(coefficient: f64) -> Q14 {
     Q14::from_f64(coefficient)
 }
 
-/// Multiplies two Q14 values with a wrapping 32-bit product before the shift.
+/// Multiplies two Q14 values in `i64` and clamps the shifted result to `i32`.
 #[inline]
 fn mul(left: Q14, right: Q14) -> Q14 {
     left.mul(right)
@@ -563,18 +562,23 @@ impl Reverb {
             return frame;
         }
         let [left, right] = frame;
-        let mono = (left + right).div::<0, 14>(TWO);
+        let mono =
+            Q14::from_bits(((i64::from(left.to_bits()) + i64::from(right.to_bits())) / 2) as i32);
         let dry_input = if self.mono_dry_mix == Q14::ZERO {
             [left, right]
         } else if self.mono_dry_mix == Q14::ONE {
             [mono, mono]
         } else {
-            let stereo_weight = Q14::ONE - self.mono_dry_mix;
+            let stereo_weight = i64::from((Q14::ONE - self.mono_dry_mix).to_bits());
+            let mono_weight = i64::from(self.mono_dry_mix.to_bits());
+            let mono_bits = i64::from(mono.to_bits());
             [
-                (left.mul::<14, 28>(stereo_weight) + mono.mul::<14, 28>(self.mono_dry_mix))
-                    .rescale(),
-                (right.mul::<14, 28>(stereo_weight) + mono.mul::<14, 28>(self.mono_dry_mix))
-                    .rescale(),
+                Q14::from_bits(clamp_i32(
+                    (i64::from(left.to_bits()) * stereo_weight + mono_bits * mono_weight) >> 14,
+                )),
+                Q14::from_bits(clamp_i32(
+                    (i64::from(right.to_bits()) * stereo_weight + mono_bits * mono_weight) >> 14,
+                )),
             ]
         };
         let dry_part = if self.dry_gain == Q14::ONE {
@@ -615,7 +619,7 @@ impl Reverb {
         }
         if self.config.enabled || self.banks[0].active || self.banks[1].active {
             for sample in wet_sum {
-                self.wet_peak = self.wet_peak.max(sample.to_bits().wrapping_abs());
+                self.wet_peak = self.wet_peak.max(sample.abs().to_bits());
             }
         }
         [dry_part[0] + wet_sum[0], dry_part[1] + wet_sum[1]]

@@ -22,7 +22,7 @@
 //! to one of these orders changes the rendered samples:
 //! - The order of the reader updates.
 //! - The order in which stages read random values.
-//! - The order of the wrapping arithmetic.
+//! - The order of the fixed-point arithmetic.
 
 mod history;
 
@@ -32,7 +32,7 @@ use crate::formant::{Formant, FormantConfig, ANALYSIS_FRAMES};
 use crate::harmony::{HarmonyConfig, HarmonyState, HARMONY_VOICES};
 use crate::midi::MidiEvent;
 use crate::numeric::fixed::{Q12, Q14, Q6, Q8};
-use crate::numeric::{ring, NumericContext, HISTORY};
+use crate::numeric::{clamp_i32, ring, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
@@ -220,11 +220,11 @@ pub struct ResynthesisConfig {
     /// Validation applies to these controls, and they can receive MIDI, also
     /// while Choir is selected.
     pub harmony: HarmonyConfig,
-    /// The pan gain of the harmony voices, 0..=1. The default is 0.5.
+    /// The linear gain of the four harmony voices, 0..=1. The default is 0.5.
     ///
-    /// The code applies this gain only if `stereo_output` is `true`. The
-    /// harmony path without pan does not use this control. It does not scale
-    /// the lead voice.
+    /// If `stereo_output` is `true`, the stereo pan gains include this gain.
+    /// If `stereo_output` is `false`, this gain scales each harmony voice
+    /// directly. It does not scale the lead voice.
     pub harmony_gain: f32,
     /// The modulation depth, 0..=24, without a unit. The default is 0 (off).
     ///
@@ -347,6 +347,16 @@ const SWITCH_FADE_STEP: Q14 = Q14::from_bits(64);
 /// Half of `Q14::ONE`, used to keep the louder bank on rapid switches.
 const HALF_FADE: Q14 = Q14::from_bits(8192);
 
+/// Blends two Q14 samples in `i64` with `weight` for `right`, clamped to `i32`.
+#[inline]
+fn blend_q14(left: Q14, right: Q14, weight: Q14) -> Q14 {
+    let inv = i64::from((Q14::ONE - weight).to_bits());
+    let weight = i64::from(weight.to_bits());
+    Q14::from_bits(clamp_i32(
+        (i64::from(left.to_bits()) * inv + i64::from(right.to_bits()) * weight) >> 14,
+    ))
+}
+
 /// Blends `mono` and `panned` stereo buses with `stereo_mix` in Q14.
 #[inline]
 fn blend_stereo_bus(mono: [Q14; 2], panned: [Q14; 2], stereo_mix: Q14) -> [Q14; 2] {
@@ -355,10 +365,9 @@ fn blend_stereo_bus(mono: [Q14; 2], panned: [Q14; 2], stereo_mix: Q14) -> [Q14; 
     } else if stereo_mix == Q14::ONE {
         panned
     } else {
-        let mono_weight = Q14::ONE - stereo_mix;
         [
-            (mono[0].mul::<14, 28>(mono_weight) + panned[0].mul::<14, 28>(stereo_mix)).rescale(),
-            (mono[1].mul::<14, 28>(mono_weight) + panned[1].mul::<14, 28>(stereo_mix)).rescale(),
+            blend_q14(mono[0], panned[0], stereo_mix),
+            blend_q14(mono[1], panned[1], stereo_mix),
         ]
     }
 }
@@ -366,10 +375,9 @@ fn blend_stereo_bus(mono: [Q14; 2], panned: [Q14; 2], stereo_mix: Q14) -> [Q14; 
 /// Blends two stereo Q14 frames with `weight` for `right`.
 #[inline]
 fn blend_frames(left: [Q14; 2], right: [Q14; 2], weight: Q14) -> [Q14; 2] {
-    let inv = Q14::ONE - weight;
     [
-        (left[0].mul::<14, 28>(inv) + right[0].mul::<14, 28>(weight)).rescale(),
-        (left[1].mul::<14, 28>(inv) + right[1].mul::<14, 28>(weight)).rescale(),
+        blend_q14(left[0], right[0], weight),
+        blend_q14(left[1], right[1], weight),
     ]
 }
 
@@ -392,6 +400,8 @@ struct VoiceBank {
     fades: [Q14; 16],
     /// The Q14 left and right gains of the choir voices in this bank.
     pan: [[Q14; 2]; 16],
+    /// If stereo pan is off, the Q14 linear gain of the harmony voices.
+    harmony_gain: Q14,
     /// The Q14 pan gains of the harmony voices in this bank.
     harmony_pan: [[Q14; 2]; HARMONY_VOICES],
 }
@@ -409,6 +419,7 @@ impl VoiceBank {
             old_positions: [initial; 16],
             fades: [Q14::ONE; 16],
             pan: [[Q14::ONE; 2]; 16],
+            harmony_gain: Q14::ZERO,
             harmony_pan: [[Q14::ZERO; 2]; HARMONY_VOICES],
         }
     }
@@ -451,6 +462,7 @@ impl VoiceBank {
                 self.pan[voice] = [Q14::ONE; 2];
             }
         }
+        self.harmony_gain = Q14::from_f64(harmony_gain as f64);
         for (voice, fraction) in [0.3333333333333333, 0.6666666666666666, 0.0, 1.0]
             .into_iter()
             .enumerate()
@@ -741,8 +753,8 @@ impl Resynthesis {
     ///
     /// The coefficients are the correction decay, the drift decay and the
     /// drift amount. The histories and the controller phase do not change.
-    /// The harmony level is part of the stereo pan gains. Thus, the path
-    /// without pan never applies that control.
+    /// The stereo pan gains include the harmony gain. The mono harmony path
+    /// uses a separate Q14 gain.
     fn configure_coefficients(&mut self) {
         self.shift = Q14::from_f64(self.config.pitch_ratio as f64);
         self.modulation = (self.config.harmonic_modulation as f64 / 8.0 * 16.0) as i32;
@@ -1066,8 +1078,7 @@ impl Resynthesis {
     ///
     /// If correction is disabled or the active table is empty, the ratio moves
     /// toward 1.0. If the target selection starts again and the shifted
-    /// period is not positive, the ratio becomes 1.0 immediately. A
-    /// multiplication by fixed-point 1.0 still wraps. Do not remove it.
+    /// period is not positive, the ratio becomes 1.0 immediately.
     fn update_correction(&mut self, period: Q6) {
         let mut target_ratio = Q14::ONE;
         if self.config.correction.enabled && self.scale.count != 0 {
@@ -1098,8 +1109,7 @@ impl Resynthesis {
             } else {
                 period >> (-self.octave) as u32
             });
-            // The comparisons multiply by 1.0 to keep the wrap of the product.
-            while table_period(self.scale_index + 1).mul::<14, 6>(Q14::ONE) < target {
+            while table_period(self.scale_index + 1) < target {
                 self.scale_index += 1;
                 if self.scale_index == count {
                     self.scale_index = 0;
@@ -1107,7 +1117,7 @@ impl Resynthesis {
                     self.octave -= 1;
                 }
             }
-            while target.mul::<14, 6>(Q14::ONE) < table_period(self.scale_index) {
+            while target < table_period(self.scale_index) {
                 if self.scale_index == 0 {
                     self.scale_index = count - 1;
                     target = target << 1;
@@ -1231,8 +1241,7 @@ impl Resynthesis {
             };
             let fmt =
                 self.synthesize_lead_formant(slot, lpc, center, is_active, allow_noise, numeric);
-            let raw_weight = Q14::ONE - self.formant_mix;
-            (raw.mul::<14, 28>(raw_weight) + fmt.mul::<14, 28>(self.formant_mix)).rescale()
+            blend_q14(raw, fmt, self.formant_mix)
         };
         self.lead[write] = value;
         (value, ratio, period)
@@ -1327,10 +1336,8 @@ impl Resynthesis {
             panned_sum[0] = panned_sum[0] + value.mul(pan[0]);
             panned_sum[1] = panned_sum[1] + value.mul(pan[1]);
         }
-        let mono_bus = Q14::ONE.mul(mono_sum);
-        let panned_bus = [Q14::ONE.mul(panned_sum[0]), Q14::ONE.mul(panned_sum[1])];
         (
-            blend_stereo_bus([mono_bus, mono_bus], panned_bus, self.stereo_mix),
+            blend_stereo_bus([mono_sum, mono_sum], panned_sum, self.stereo_mix),
             final_ratio,
             output_period,
         )
@@ -1378,6 +1385,11 @@ impl Resynthesis {
             } else {
                 self.shadow.move_reader(write, voice_slot, current, period);
             }
+            let harmony_gain = if is_active {
+                self.active.harmony_gain
+            } else {
+                self.shadow.harmony_gain
+            };
             let pan = if voice_slot > 0 {
                 if is_active {
                     self.active.harmony_pan[voice_slot - 1]
@@ -1395,16 +1407,14 @@ impl Resynthesis {
                 };
                 if voice_slot == 0 {
                     raw_lead = value;
-                } else {
-                    value = value.mul(self.harmony_gains[voice_slot - 1]);
-                }
-                raw_mono = raw_mono + value;
-                if voice_slot > 0 {
-                    raw_panned[0] = raw_panned[0] + value.mul(pan[0]);
-                    raw_panned[1] = raw_panned[1] + value.mul(pan[1]);
-                } else {
+                    raw_mono = raw_mono + value;
                     raw_panned[0] = raw_panned[0] + value;
                     raw_panned[1] = raw_panned[1] + value;
+                } else {
+                    value = value.mul(self.harmony_gains[voice_slot - 1]);
+                    raw_mono = raw_mono + value.mul(harmony_gain);
+                    raw_panned[0] = raw_panned[0] + value.mul(pan[0]);
+                    raw_panned[1] = raw_panned[1] + value.mul(pan[1]);
                 }
             }
             if self.formant_mix > Q14::ZERO {
@@ -1416,16 +1426,14 @@ impl Resynthesis {
                 if voice_slot == 0 {
                     lpc_lead = value;
                     lead_center = center;
-                } else {
-                    value = value.mul(self.harmony_gains[voice_slot - 1]);
-                }
-                lpc_mono = lpc_mono + value;
-                if voice_slot > 0 {
-                    lpc_panned[0] = lpc_panned[0] + value.mul(pan[0]);
-                    lpc_panned[1] = lpc_panned[1] + value.mul(pan[1]);
-                } else {
+                    lpc_mono = lpc_mono + value;
                     lpc_panned[0] = lpc_panned[0] + value;
                     lpc_panned[1] = lpc_panned[1] + value;
+                } else {
+                    value = value.mul(self.harmony_gains[voice_slot - 1]);
+                    lpc_mono = lpc_mono + value.mul(harmony_gain);
+                    lpc_panned[0] = lpc_panned[0] + value.mul(pan[0]);
+                    lpc_panned[1] = lpc_panned[1] + value.mul(pan[1]);
                 }
             }
             if is_active {
@@ -1500,8 +1508,7 @@ impl Resynthesis {
                     false,
                     numeric,
                 );
-                let raw_weight = Q14::ONE - self.formant_mix;
-                (raw_lead.mul::<14, 28>(raw_weight) + fmt.mul::<14, 28>(self.formant_mix)).rescale()
+                blend_q14(raw_lead, fmt, self.formant_mix)
             };
             self.lead[write] = lead_value;
         }
@@ -1750,11 +1757,10 @@ impl Resynthesis {
             if self.current_output_period != Q6::ZERO {
                 // The phase advances by depth x 4 x ratio / period, in Q14
                 // cycles.
-                let step = self
-                    .modulation
-                    .wrapping_mul(4)
-                    .wrapping_mul(final_ratio.to_bits())
-                    .wrapping_div(self.current_output_period.to_bits());
+                let step = clamp_i32(
+                    (i64::from(self.modulation) * 4 * i64::from(final_ratio.to_bits()))
+                        / i64::from(self.current_output_period.to_bits()),
+                );
                 self.modulation_phase = self.modulation_phase + Q14::from_bits(step);
                 if self.modulation_phase > Q14::ONE {
                     self.modulation_phase = self.modulation_phase - Q14::ONE;
@@ -1779,11 +1785,14 @@ impl Resynthesis {
         }
         // The dry branch is the delayed raw input. It bypasses the shift
         // filters, the voice readers, the formant stages and the harmonic
-        // modulation. Keep the two products in Q22. Rescale their wrapping sum
+        // modulation. Calculate the Q22 blend in `i64`, then shift and clamp
         // to Q14 one time only.
-        let wet = Q8::ONE - self.dry_mix;
+        let dry_mix = i64::from(self.dry_mix.to_bits());
+        let wet = i64::from((Q8::ONE - self.dry_mix).to_bits());
+        let dry = i64::from(dry.to_bits());
         for sum in &mut mix {
-            *sum = (dry.mul::<8, 22>(self.dry_mix) + sum.mul::<8, 22>(wet)).rescale();
+            let blended = (dry * dry_mix + i64::from(sum.to_bits()) * wet) >> 8;
+            *sum = Q14::from_bits(clamp_i32(blended));
         }
         mix
     }
