@@ -616,10 +616,9 @@ impl Processor {
 
     /// Renders one frame through the full chain and updates the peak meters.
     ///
-    /// Resynthesis produces Q14 audio. Output gain is Q8. The multiplication
-    /// wraps before the shift. PCM conversion clips to the symmetric 16-bit
-    /// range. In the mono layout, the downmix occurs before the peak
-    /// measurement.
+    /// Resynthesis produces Q14 audio. Output gain is Q8. The gain product
+    /// uses `i64` arithmetic before the symmetric `-32767..=32767` PCM clamp.
+    /// In the mono layout, the downmix occurs before the peak measurement.
     fn next(&mut self, mut input: i16, layout: OutputLayout) -> [i16; 2] {
         self.input_peak = self.input_peak.max((input as i32).abs());
         if self.config.punch.enabled {
@@ -632,11 +631,9 @@ impl Processor {
         self.last_resample_ratio = self.resynthesis.resample_ratio();
         let alien = self.alien.process_sample(voice);
         let reverb = self.reverb.process_sample(alien, layout);
-        let gain = (self.config.output_gain as f64 * 256.0) as i32;
+        let gain = (self.config.output_gain as f64 * 256.0) as i64;
         let mut result = reverb.map(|sample| {
-            (sample.to_bits().wrapping_mul(gain) >> 8)
-                .wrapping_shl(1)
-                .clamp(-32767, 32767) as i16
+            (((i64::from(sample.to_bits()) * gain) >> 8) << 1).clamp(-32767, 32767) as i16
         });
         if matches!(layout, OutputLayout::Mono) {
             let mono = ((i32::from(result[0]) + i32::from(result[1])) >> 1) as i16;

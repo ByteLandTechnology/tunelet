@@ -160,7 +160,7 @@ fn q14(coefficient: f64) -> Q14 {
     Q14::from_f64(coefficient)
 }
 
-/// Multiplies two Q14 values with a wrapping 32-bit product before the shift.
+/// Multiplies two Q14 values in `i64` and clamps the shifted result to `i32`.
 #[inline]
 fn mul(left: Q14, right: Q14) -> Q14 {
     left.mul(right)
@@ -225,7 +225,8 @@ impl Reverb {
     /// or mono wet peak measurement. The mono measurement uses a shift.
     pub(crate) fn process_sample(&mut self, frame: [Q14; 2], layout: OutputLayout) -> [Q14; 2] {
         let [left, right] = frame;
-        let mono = (left + right).div::<0, 14>(TWO);
+        let mono =
+            Q14::from_bits(((i64::from(left.to_bits()) + i64::from(right.to_bits())) / 2) as i32);
         let t = self.taps;
         let dry = Q14::ONE - self.mix;
         let d = &mut self.delay;
@@ -376,11 +377,15 @@ impl Reverb {
         match layout {
             OutputLayout::Stereo => {
                 for wet in [left_wet, right_wet] {
-                    self.wet_peak = self.wet_peak.max(wet.to_bits().wrapping_abs());
+                    self.wet_peak = self.wet_peak.max(wet.abs().to_bits());
                 }
             }
             OutputLayout::Mono => {
-                let wet = ((left_wet + right_wet) >> 1).to_bits().wrapping_abs();
+                let wet = Q14::from_bits(
+                    ((i64::from(left_wet.to_bits()) + i64::from(right_wet.to_bits())) >> 1) as i32,
+                )
+                .abs()
+                .to_bits();
                 self.wet_peak = self.wet_peak.max(wet);
             }
         }
