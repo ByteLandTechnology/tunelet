@@ -161,10 +161,10 @@ pub(crate) struct CorrectionTable {
     ///
     /// If these periods change, the active targets do not reload.
     base_periods: [i32; 12],
-    /// The held MIDI keys.
-    ///
-    /// A reset keeps key 127, and mask creation excludes it.
+    /// The held MIDI keys 0..=127.
     pub keyboard: [bool; 128],
+    /// This flag is `true` while MIDI overrides the configured note mask.
+    overridden: bool,
 }
 
 impl CorrectionTable {
@@ -177,10 +177,16 @@ impl CorrectionTable {
             notes: [0; 12],
             base_periods: [0; 12],
             keyboard: [false; 128],
+            overridden: false,
         };
         result.set_sample_rate(rate);
         result.set_notes(mask);
         result
+    }
+
+    /// Returns `true` if MIDI currently overrides the configured note mask.
+    pub(crate) fn is_overridden(&self) -> bool {
+        self.overridden
     }
 
     /// Calculates the period table again for `rate`, but does not reload the
@@ -203,6 +209,7 @@ impl CorrectionTable {
     /// An empty mask sets `count` to zero. The midpoint entries are then
     /// ignored, not cleared.
     pub(crate) fn set_notes(&mut self, mask: NoteMask) {
+        self.overridden = false;
         self.count = 0;
         for i in 0..12 {
             if mask.0[11 - i] {
@@ -219,26 +226,33 @@ impl CorrectionTable {
             self.midpoints[0] = self.midpoints[self.count] / 2;
         }
     }
-    /// Releases keys 0..=126, and keeps key 127 and the active target table.
-    ///
-    /// A later MIDI event builds the table again from the new keyboard state.
-    pub(crate) fn reset(&mut self) {
-        self.keyboard[..127].fill(false);
+    /// Releases keys 0..=127. If MIDI overrode the table, loads `notes` again.
+    pub(crate) fn reset(&mut self, notes: NoteMask) {
+        self.keyboard.fill(false);
+        if self.overridden {
+            self.set_notes(notes);
+        }
     }
     /// Applies an event whose MIDI ranges were already checked.
-    pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent) {
+    ///
+    /// If all keys in 0..=127 are released, restores `notes`.
+    pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent, notes: NoteMask) {
         match event {
             MidiEvent::NoteOn { note, velocity, .. } => {
-                self.keyboard[note as usize] = velocity != 0
+                self.keyboard[usize::from(note)] = velocity != 0
             }
-            MidiEvent::NoteOff { note, .. } => self.keyboard[note as usize] = false,
-            MidiEvent::AllNotesOff => self.reset(),
+            MidiEvent::NoteOff { note, .. } => self.keyboard[usize::from(note)] = false,
+            MidiEvent::AllNotesOff => self.keyboard.fill(false),
         }
         let mut mask = [false; 12];
-        // Correction excludes key 127, and a reset keeps that key.
-        for i in 0..127 {
-            mask[i % 12] |= self.keyboard[i];
+        for (i, &held) in self.keyboard.iter().enumerate() {
+            mask[i % 12] |= held;
         }
-        self.set_notes(NoteMask(mask));
+        if mask == [false; 12] {
+            self.set_notes(notes);
+        } else {
+            self.set_notes(NoteMask(mask));
+            self.overridden = true;
+        }
     }
 }

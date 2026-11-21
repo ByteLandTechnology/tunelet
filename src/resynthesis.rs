@@ -68,10 +68,11 @@ pub enum MultiVoiceMode {
 /// empty or correction is disabled, the ratio moves toward 1.0 at the same
 /// rate.
 ///
-/// Correction MIDI replaces the active note table. It does not change this
-/// configuration. A change to `notes` or to `enabled` loads the configured
-/// mask again. Reset releases the correction keys 0..=126. It keeps key 127
-/// and the active note table. Key 127 has no effect on the note table.
+/// While at least one key in 0..=127 is held, correction MIDI overrides the
+/// active note table. It does not change this configuration. When all keys
+/// release, or on All Notes Off, the configured `notes` load again. A
+/// resynthesis configuration update or a reset also loads `notes` again after
+/// a MIDI override. Reset releases the correction keys 0..=127.
 ///
 /// At construction, the chromatic table uses 44.1 kHz periods, also for a
 /// 48 kHz processor. Each of these events loads the periods for the prepared
@@ -96,8 +97,8 @@ pub struct CorrectionConfig {
     /// The configured target pitch classes. The default is
     /// [`NoteMask::CHROMATIC`].
     ///
-    /// All boolean masks are valid. MIDI can replace the active table. This
-    /// replacement stays until this mask or `enabled` changes.
+    /// All boolean masks are valid. Held correction MIDI keys override the
+    /// active table temporarily. When all keys release, this mask loads again.
     pub notes: NoteMask,
     /// The half-life of the smoothing in milliseconds, 0..=400. The default
     /// is 0.
@@ -217,8 +218,8 @@ pub struct ResynthesisConfig {
     /// A change to this value resets some audio histories and the feedback.
     /// [`crate::Processor::set_config`] gives the details.
     pub stereo_output: bool,
-    /// The controls for the four harmony voices. The default is MIDI-channel
-    /// allocation.
+    /// The controls for the four harmony voices. The default is two
+    /// smart-interval voices in C major.
     ///
     /// Validation applies to these controls, and they can receive MIDI, also
     /// while Choir is selected.
@@ -646,6 +647,7 @@ impl Resynthesis {
         self.harmony.apply_config(config.harmony);
         if old.correction.notes != config.correction.notes
             || old.correction.enabled != config.correction.enabled
+            || self.scale.is_overridden()
         {
             self.scale.set_notes(config.correction.notes);
             self.scale_initialized = false;
@@ -669,12 +671,13 @@ impl Resynthesis {
         }
     }
 
-    /// Releases the correction keys 0..=126 and resets the audio state.
+    /// Releases the correction keys 0..=127 and resets the audio state.
     ///
-    /// The active correction table, key 127 and the items that
+    /// If correction MIDI overrode the active table, this function loads the
+    /// configured notes again. If not, the active table and the items that
     /// `reset_audio` keeps do not change.
     pub(crate) fn reset(&mut self) {
-        self.scale.reset();
+        self.scale.reset(self.config.correction.notes);
         self.reset_audio();
     }
 
@@ -729,7 +732,8 @@ impl Resynthesis {
     /// Applies a correction MIDI event that the API or the block code checked
     /// before.
     pub(crate) fn apply_correction_midi(&mut self, event: MidiEvent) {
-        self.scale.apply_validated_midi(event);
+        self.scale
+            .apply_validated_midi(event, self.config.correction.notes);
         self.scale_initialized = false;
     }
 
