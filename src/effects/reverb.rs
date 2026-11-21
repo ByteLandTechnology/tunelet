@@ -160,7 +160,7 @@ fn q14(coefficient: f64) -> Q14 {
     Q14::from_f64(coefficient)
 }
 
-/// Multiplies two Q14 values with a wrapping 32-bit product before the shift.
+/// Multiplies two Q14 values in `i64` and clamps the shifted result to `i32`.
 #[inline]
 fn mul(left: Q14, right: Q14) -> Q14 {
     left.mul(right)
@@ -228,7 +228,8 @@ impl Reverb {
             return frame;
         }
         let [left, right] = frame;
-        let mono = (left + right).div::<0, 14>(TWO);
+        let mono =
+            Q14::from_bits(((i64::from(left.to_bits()) + i64::from(right.to_bits())) / 2) as i32);
         let t = self.taps;
         let wet = match self.config.mode {
             ReverbMode::Echo => {
@@ -309,7 +310,7 @@ impl Reverb {
         };
         self.delay.step();
         for sample in wet {
-            self.wet_peak = self.wet_peak.max(sample.to_bits().wrapping_abs());
+            self.wet_peak = self.wet_peak.max(sample.abs().to_bits());
         }
         // Schroeder and Binaural mix the mono dry signal.
         let dry = Q14::ONE - self.mix;
