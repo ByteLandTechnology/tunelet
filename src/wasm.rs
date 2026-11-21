@@ -196,10 +196,11 @@ impl WasmProcessor {
         self.input.len()
     }
 
-    /// The nominal resynthesis delay in frames.
+    /// The nominal resynthesis latency: 1,593 frames at both sample rates.
     ///
-    /// Other signal paths have different timing. See the `latencyFrames`
-    /// property for the timing of the dry path and the voices.
+    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
+    /// and effects have their own timing. Thus, this value does not align all
+    /// paths.
     #[wasm_bindgen(getter, js_name = latencyFrames)]
     pub fn latency_frames(&self) -> usize {
         self.processor.latency_frames()
@@ -259,7 +260,7 @@ impl WasmProcessor {
         let frames = input.length() as usize;
         Error::check_length(frames, left.length() as usize)?;
         Error::check_length(frames, right.length() as usize)?;
-        self.check_frames(frames)?;
+        self.processor.check_block(frames)?;
         let events = decode_events(events)?;
         input.copy_to(&mut self.input[..frames]);
         self.processor.process_planar(
@@ -290,7 +291,7 @@ impl WasmProcessor {
         events: Option<Ts<BlockEvents>>,
     ) -> Result<(), JsError> {
         let frames = audio.length() as usize;
-        self.check_frames(frames)?;
+        self.processor.check_block(frames)?;
         let events = decode_events(events)?;
         audio.copy_to(&mut self.input[..frames]);
         self.processor
@@ -302,8 +303,8 @@ impl WasmProcessor {
     /// Starts a finite tail budget and returns its frame count as a number.
     ///
     /// Call this method one time after the final input block. Another call
-    /// starts the full budget again, but it does not clear the histories. See
-    /// `beginDrain` for completion.
+    /// starts the full budget again, but it does not clear the histories. Refer
+    /// to `drain` for completion.
     #[wasm_bindgen(js_name = beginDrain)]
     pub fn begin_drain(&mut self) -> usize {
         self.processor.begin_drain()
@@ -332,7 +333,7 @@ impl WasmProcessor {
     pub fn drain(&mut self, left: &Int16Array, right: &Int16Array) -> Result<usize, JsError> {
         let frames = left.length() as usize;
         Error::check_length(frames, right.length() as usize)?;
-        self.check_frames(frames)?;
+        self.processor.check_block(frames)?;
         let count = self
             .processor
             .drain_planar(&mut self.left[..frames], &mut self.right[..frames])?;
@@ -343,8 +344,9 @@ impl WasmProcessor {
 
     /// Renders a mono tail block and returns its frame count.
     ///
-    /// The method fills the unused output with zeros. The downmix, completion
-    /// and feedback behavior are the same as for `drainMono`.
+    /// The method fills the unused output with zeros. The downmix and the peak
+    /// feedback are the same as for `processMono`. The return values, empty
+    /// arrays and completion are the same as for `drain`.
     ///
     /// # Errors
     ///
@@ -353,7 +355,7 @@ impl WasmProcessor {
     #[wasm_bindgen(js_name = drainMono)]
     pub fn drain_mono(&mut self, audio: &Int16Array) -> Result<usize, JsError> {
         let frames = audio.length() as usize;
-        self.check_frames(frames)?;
+        self.processor.check_block(frames)?;
         let count = self.processor.drain_mono(&mut self.input[..frames])?;
         audio.copy_from(&self.input[..frames]);
         Ok(count)
@@ -488,18 +490,6 @@ impl WasmProcessor {
     /// new instance, construct a new `Tunelet`.
     pub fn reset(&mut self) {
         self.processor.reset();
-    }
-}
-
-impl WasmProcessor {
-    /// Checks the block limit before a method uses a prefix of the buffers.
-    fn check_frames(&self, frames: usize) -> Result<(), Error> {
-        let max = self.input.len();
-        if frames > max {
-            Err(Error::BlockTooLarge { frames, max })
-        } else {
-            Ok(())
-        }
     }
 }
 
