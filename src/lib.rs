@@ -100,8 +100,17 @@
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+#![deny(rustdoc::bare_urls)]
+#![deny(rustdoc::broken_footnote)]
 #![deny(rustdoc::broken_intra_doc_links)]
-#![warn(unreachable_pub)]
+#![deny(rustdoc::invalid_codeblock_attributes)]
+#![deny(rustdoc::invalid_html_tags)]
+#![deny(rustdoc::invalid_rust_codeblocks)]
+#![deny(rustdoc::private_intra_doc_links)]
+#![deny(rustdoc::redundant_explicit_links)]
+#![deny(rustdoc::unescaped_backticks)]
+#![deny(rustdoc::unused_footnote_definition)]
+#![deny(unreachable_pub)]
 
 mod config;
 mod effects;

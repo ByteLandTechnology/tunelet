@@ -45,9 +45,18 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
   task does not tell you to. Keep the Rust, Wasm and TypeScript APIs
   equivalent.
 - Keep the crate lints in `src/lib.rs`: `#![forbid(unsafe_code)]`,
-  `#![deny(missing_docs)]`, `#![deny(rustdoc::broken_intra_doc_links)]`
-  and `#![warn(unreachable_pub)]`. Each public item must have rustdoc
-  that includes its parameter ranges.
+  `#![deny(missing_docs)]` and `#![deny(unreachable_pub)]`. Also keep
+  the rustdoc lints: `#![deny(rustdoc::bare_urls)]`,
+  `#![deny(rustdoc::broken_footnote)]`,
+  `#![deny(rustdoc::broken_intra_doc_links)]`,
+  `#![deny(rustdoc::invalid_codeblock_attributes)]`,
+  `#![deny(rustdoc::invalid_html_tags)]`,
+  `#![deny(rustdoc::invalid_rust_codeblocks)]`,
+  `#![deny(rustdoc::private_intra_doc_links)]`,
+  `#![deny(rustdoc::redundant_explicit_links)]`,
+  `#![deny(rustdoc::unescaped_backticks)]` and
+  `#![deny(rustdoc::unused_footnote_definition)]`. Each public item
+  must have rustdoc that includes its parameter ranges.
 - In the Rust API, only construction can allocate memory. Audio calls,
   controls, feedback, reset and drain must not allocate memory, acquire
   locks or do I/O. The Wasm binding can also allocate when it converts
@@ -105,8 +114,8 @@ npm ci
 npm run build
 ```
 
-- Make sure that there are no new warnings. This includes broken
-  rustdoc links.
+- Make sure that there are no new warnings or lint errors. This
+  includes `unreachable_pub` and the rustdoc lints in `src/lib.rs`.
 - The crate has no tests (`test = false`). Do not add tests or test
   support if the task does not tell you to.
 - To verify a DSP change, render PCM from a fixed input and seed before
