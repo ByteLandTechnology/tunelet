@@ -185,19 +185,50 @@ impl Reverb {
             scratch: layout.capacity - 1,
             wet_peak: 0,
         };
-        result.set_config(config);
+        result.prepare_mix();
+        result.prepare_diffusion();
+        result.prepare_decay();
+        result.prepare_brightness();
         result
     }
-    /// Updates the coefficients and does not clear the delay or filter state.
+    /// Updates the coefficients that changed and does not clear the delay or
+    /// filter state.
     /// The f32 multiplication by 100 occurs before the f64 division and the
     /// quantization. If you combine these expressions, the quantized
     /// coefficients can change.
     pub(crate) fn set_config(&mut self, config: ReverbConfig) {
+        let old = self.config;
         self.config = config;
-        self.mix = Q14::from_f64((config.mix * 100.0) as f64 / 100.0);
-        self.diffuse = Q14::from_f64((config.diffusion * 100.0) as f64 / 100.0);
-        self.decay = Q14::from_f64((config.decay * 100.0) as f64 / 105.0);
-        let brightness = config
+        if old.mix != config.mix {
+            self.prepare_mix();
+        }
+        if old.diffusion != config.diffusion {
+            self.prepare_diffusion();
+        }
+        if old.decay != config.decay {
+            self.prepare_decay();
+        }
+        if old.brightness_hz != config.brightness_hz {
+            self.prepare_brightness();
+        }
+    }
+    /// Quantizes the wet fraction to Q14.
+    fn prepare_mix(&mut self) {
+        self.mix = Q14::from_f64((self.config.mix * 100.0) as f64 / 100.0);
+    }
+    /// Quantizes the diffusion control to Q14.
+    fn prepare_diffusion(&mut self) {
+        self.diffuse = Q14::from_f64((self.config.diffusion * 100.0) as f64 / 100.0);
+    }
+    /// Quantizes the feedback coefficient to Q14.
+    fn prepare_decay(&mut self) {
+        self.decay = Q14::from_f64((self.config.decay * 100.0) as f64 / 105.0);
+    }
+    /// Updates the coefficients of the two low-pass filters and keeps their
+    /// histories.
+    fn prepare_brightness(&mut self) {
+        let brightness = self
+            .config
             .brightness_hz
             .min((self.rate.hz() as f64 * 0.49) as f32);
         let design = Design::low_pass_one_pole(self.rate.hz(), brightness);

@@ -662,9 +662,9 @@ impl Processor {
     /// unused frames.
     ///
     /// The method mutes aspiration temporarily, but does not change the
-    /// settings that the host sees. It restores the configuration before
-    /// completion resets the state. `Some(0)` records completion, so later
-    /// drain calls continue to return zero.
+    /// settings that the host sees. It restores aspiration before completion
+    /// resets the state. `Some(0)` records completion, so later drain calls
+    /// continue to return zero.
     fn drain_into(
         &mut self,
         frames: usize,
@@ -672,19 +672,11 @@ impl Processor {
     ) -> Result<usize, Error> {
         self.check_block(frames)?;
         let count = self.drain_remaining.unwrap_or(0).min(frames);
-        let configured = self.config.resynthesis;
-        if configured.formant.aspiration_mix != 0.0 {
-            let mut silent = configured;
-            silent.formant.aspiration_mix = 0.0;
-            // Zero aspiration is valid in all validated configurations.
-            self.resynthesis.apply_config(silent);
-        }
+        self.resynthesis.set_aspiration_muted(true);
         for index in 0..count {
             write(index, self.next(0));
         }
-        if configured.formant.aspiration_mix != 0.0 {
-            self.resynthesis.apply_config(configured);
-        }
+        self.resynthesis.set_aspiration_muted(false);
         if let Some(remaining) = self.drain_remaining {
             let remaining = remaining - count;
             if remaining == 0 {

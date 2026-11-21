@@ -91,6 +91,8 @@ impl PunchConfig {
 pub(crate) struct Punch {
     /// The prepared rate, which converts the envelope times to sample windows.
     rate: SampleRate,
+    /// The validated controls for this stage.
+    config: PunchConfig,
     /// The adaptive Q14 peak envelope. The impact control sets its release.
     slow: Q14,
     /// The second Q14 peak envelope, with a fixed release half-life of 5
@@ -119,18 +121,22 @@ impl Punch {
     pub(crate) fn new(rate: SampleRate, config: PunchConfig) -> Self {
         let mut result = Self {
             rate,
+            config,
             slow: Q14::default(),
             fast: Q14::default(),
             counter: 0,
             peak: Q14::default(),
             slow_decay: Q14::default(),
-            fast_decay: Q14::default(),
+            fast_decay: Self::decay(rate, 5000.0),
             attack_decay: Q14::default(),
             gain: Q8::ONE,
             ceiling_gain: Q14::default(),
             drive: BASE_DRIVE,
         };
-        result.set_config(config);
+        result.prepare_impact();
+        result.prepare_attack();
+        result.prepare_gain();
+        result.prepare_ceiling();
         result.reset();
         result
     }
@@ -141,24 +147,51 @@ impl Punch {
     pub(crate) fn drive_ratio(&self) -> f32 {
         (self.drive.to_bits() as f64 / BASE_DRIVE.to_bits() as f64) as f32
     }
-    /// Calculates the quantized controls again, and keeps the envelopes and
-    /// the cached drive.
-    /// The processor controls the bypass. This stage never reads an enabled
-    /// flag.
+    /// Calculates the quantized controls that changed, and keeps the envelopes
+    /// and the cached drive.
+    /// The processor controls the bypass. The audio path of this stage does
+    /// not read `enabled`.
     pub(crate) fn set_config(&mut self, config: PunchConfig) {
-        let impact = coefficient_to_exp_value(1.0, 250.0, 5000.0, 1.0 - config.impact);
-        let decay = |milliseconds: f64| {
-            Q14::from_f64(envelope_decay(
-                milliseconds,
-                self.rate.hz() as f64,
-                WINDOW_FRAMES,
-            ))
-        };
-        self.slow_decay = decay(impact as f64);
-        self.fast_decay = decay(5000.0);
-        self.attack_decay = decay(config.attack_ms as f64);
-        self.gain = Q8::from_f64(db_to_gain(config.gain_db as f64));
-        self.ceiling_gain = Q14::from_f64(db_to_gain(config.ceiling_db as f64));
+        let old = self.config;
+        self.config = config;
+        if old.impact != config.impact {
+            self.prepare_impact();
+        }
+        if old.attack_ms != config.attack_ms {
+            self.prepare_attack();
+        }
+        if old.gain_db != config.gain_db {
+            self.prepare_gain();
+        }
+        if old.ceiling_db != config.ceiling_db {
+            self.prepare_ceiling();
+        }
+    }
+    /// Converts a half-life in milliseconds to a Q14 coefficient for the
+    /// 100-frame window.
+    fn decay(rate: SampleRate, milliseconds: f64) -> Q14 {
+        Q14::from_f64(envelope_decay(
+            milliseconds,
+            rate.hz() as f64,
+            WINDOW_FRAMES,
+        ))
+    }
+    /// Calculates the release coefficient of the adaptive follower.
+    fn prepare_impact(&mut self) {
+        let impact = coefficient_to_exp_value(1.0, 250.0, 5000.0, 1.0 - self.config.impact);
+        self.slow_decay = Self::decay(self.rate, impact as f64);
+    }
+    /// Calculates the shared attack coefficient of the two followers.
+    fn prepare_attack(&mut self) {
+        self.attack_decay = Self::decay(self.rate, self.config.attack_ms as f64);
+    }
+    /// Quantizes the linear input gain to Q8.
+    fn prepare_gain(&mut self) {
+        self.gain = Q8::from_f64(db_to_gain(self.config.gain_db as f64));
+    }
+    /// Quantizes the linear output ceiling to Q14.
+    fn prepare_ceiling(&mut self) {
+        self.ceiling_gain = Q14::from_f64(db_to_gain(self.config.ceiling_db as f64));
     }
     /// Clears both envelopes and the current window, then calculates the drive
     /// again from the base drive and the input gain.

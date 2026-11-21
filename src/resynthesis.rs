@@ -352,6 +352,12 @@ fn position_of(frame: i32) -> Q14 {
     Q14::from_bits(frame.wrapping_shl(14))
 }
 
+/// Returns the decay factor for the random choir drift at `rate`.
+fn drift_decay_factor(rate: SampleRate) -> f64 {
+    let base = (rate.hz() / 100.0) as f64 * 0.2;
+    (-std::f64::consts::LN_2 / base).exp()
+}
+
 /// The resynthesis stage.
 ///
 /// The units are as follows:
@@ -545,7 +551,7 @@ impl Resynthesis {
             fade: Q14::ONE,
             current_output_period: Q6::ZERO,
             control_counter: CONTROL_DUE,
-            drift_decay: Q14::ZERO,
+            drift_decay: Q14::from_f64(drift_decay_factor(rate)),
             drift_amount: Q14::ZERO,
             previous_output: [Q14::ZERO; 2],
         };
@@ -555,27 +561,53 @@ impl Resynthesis {
         result
     }
 
-    /// Quantizes the controls and calculates the decay coefficients and the
-    /// voice pan gains again.
+    /// Quantizes all scalar controls and prepares the decay coefficients and
+    /// the voice pan gains.
     ///
-    /// The coefficients are the correction decay, the drift decay and the
-    /// drift amount. The histories and the controller phase do not change.
-    /// The harmony level is part of the stereo pan gains. Thus, the path
-    /// without pan never applies that control.
+    /// The histories and the controller phase do not change.
     fn configure_coefficients(&mut self) {
+        self.configure_pitch_ratio();
+        self.configure_modulation();
+        self.configure_dry_mix();
+        self.configure_retune();
+        self.configure_choir_detune();
+        self.configure_choir_pan();
+        self.configure_harmony_pan();
+    }
+
+    /// Quantizes the global pitch multiplier to Q14.
+    fn configure_pitch_ratio(&mut self) {
         self.shift = Q14::from_f64(self.config.pitch_ratio as f64);
+    }
+
+    /// Quantizes the harmonic modulation depth.
+    fn configure_modulation(&mut self) {
         self.modulation = (self.config.harmonic_modulation as f64 / 8.0 * 16.0) as i32;
+    }
+
+    /// Quantizes the dry mix fraction to Q8.
+    fn configure_dry_mix(&mut self) {
         self.dry_mix = Q8::from_f64((self.config.dry_mix * 100.0) as f64 / 100.0);
+    }
+
+    /// Calculates the Q14 half-life coefficient for correction updates.
+    fn configure_retune(&mut self) {
         self.correction_decay = if self.config.correction.retune_ms == 0.0 {
             Q14::ZERO
         } else {
             let t = self.config.correction.retune_ms / 1000.0;
             Q14::from_f64(0.5_f64.powf(1.0 / ((self.rate.hz() / 5.0) * t) as f64))
         };
-        let base = (self.rate.hz() / 100.0) as f64 * 0.2;
-        let decay = (-std::f64::consts::LN_2 / base).exp();
-        self.drift_decay = Q14::from_f64(decay);
+    }
+
+    /// Calculates the Q14 step weight for the random choir drift.
+    fn configure_choir_detune(&mut self) {
+        let decay = drift_decay_factor(self.rate);
         self.drift_amount = Q14::from_f64((1.0 - decay) * 0.008 * self.config.choir_detune as f64);
+    }
+
+    /// Calculates the Q14 stereo pan gains for the active choir voices.
+    fn configure_choir_pan(&mut self) {
         for voice in 0..self.config.choir_voices as usize {
             if self.config.choir_voices > 1 {
                 let normalized =
@@ -588,6 +620,13 @@ impl Resynthesis {
                 self.pan[voice] = [Q14::ONE; 2];
             }
         }
+    }
+
+    /// Calculates the Q14 stereo pan gains for the four harmony voices.
+    ///
+    /// The harmony level is part of the stereo pan gains. Thus, the path
+    /// without pan never applies that control.
+    fn configure_harmony_pan(&mut self) {
         for (voice, fraction) in [0.3333333333333333, 0.6666666666666666, 0.0, 1.0]
             .into_iter()
             .enumerate()
@@ -641,16 +680,26 @@ impl Resynthesis {
     pub(crate) fn apply_config(&mut self, config: ResynthesisConfig) {
         let old = self.config;
         self.config = config;
-        self.pitch.set_config(config.pitch);
-        self.formant.set_config(config.formant);
-        self.harmony.apply_config(config.harmony);
+        if old.pitch != config.pitch {
+            self.pitch.set_config(config.pitch);
+        }
+        if old.formant != config.formant {
+            self.formant.set_config(config.formant);
+        }
+        if old.harmony != config.harmony {
+            self.harmony.apply_config(config.harmony);
+        }
         if old.correction.notes != config.correction.notes
             || old.correction.enabled != config.correction.enabled
         {
             self.scale.set_notes(config.correction.notes);
             self.scale_initialized = false;
         }
+        if old.correction.retune_ms != config.correction.retune_ms {
+            self.configure_retune();
+        }
         if old.pitch_ratio != config.pitch_ratio {
+            self.configure_pitch_ratio();
             self.configure_shift_filters();
         }
         if old.mode != config.mode || old.choir_delay != config.choir_delay {
@@ -661,12 +710,33 @@ impl Resynthesis {
                 self.positions[voice] = self.positions[0];
             }
         }
-        self.configure_coefficients();
+        if old.choir_detune != config.choir_detune {
+            self.configure_choir_detune();
+        }
+        if old.choir_voices != config.choir_voices
+            || old.choir_spread_percent != config.choir_spread_percent
+        {
+            self.configure_choir_pan();
+        }
+        if old.harmony_gain != config.harmony_gain {
+            self.configure_harmony_pan();
+        }
+        if old.harmonic_modulation != config.harmonic_modulation {
+            self.configure_modulation();
+        }
+        if old.dry_mix != config.dry_mix {
+            self.configure_dry_mix();
+        }
         if old.stereo_output != config.stereo_output {
             // A stereo change resets the audio state. The correction keyboard
             // keeps its held keys.
             self.reset_audio();
         }
+    }
+
+    /// Mutes or restores formant aspiration and keeps the configured controls.
+    pub(crate) fn set_aspiration_muted(&mut self, muted: bool) {
+        self.formant.set_aspiration_muted(muted);
     }
 
     /// Releases the correction keys 0..=126 and resets the audio state.
