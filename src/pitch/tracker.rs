@@ -90,8 +90,7 @@ pub(crate) struct PitchTracker {
     tracking_counter: i32,
     /// The latest refined Q6 period. A restart of acquisition sets it to zero.
     period: Q6,
-    /// The last refined Q6 period. A restart or an audio reset does not clear
-    /// it.
+    /// The last refined Q6 period. A restart or a flush does not clear it.
     previous_period: Q6,
     /// The Q14 threshold of the normalized difference. It applies only to the
     /// acceptance of acquisition minima.
@@ -147,13 +146,29 @@ impl PitchTracker {
     /// memories, and requests acquisition.
     /// The acquisition tables clear at the next decimated call. The previous
     /// usable period stays until another tracking update replaces it.
-    pub(crate) fn reset(&mut self) {
+    pub(crate) fn flush(&mut self) {
         self.raw.fill(0);
         self.write = 0;
         self.restart();
         for pre in &mut self.pre {
             pre.reset();
         }
+    }
+
+    /// Restores the initial state of [`Self::new`] without allocation.
+    pub(crate) fn reset(&mut self) {
+        self.flush();
+        self.detection.fill(0);
+        self.detection_index = 0;
+        self.detection_count = 0;
+        self.energy.fill(0);
+        self.cross.fill(0);
+        self.tracking_energy.fill(0);
+        self.tracking_cross.fill(0);
+        self.base = 0;
+        self.tracking_counter = 0;
+        self.previous_period = Q6::default();
+        self.best = 0;
     }
 
     /// Invalidates the current period and keeps the previous usable period.

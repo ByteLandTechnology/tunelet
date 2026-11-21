@@ -60,6 +60,12 @@ pub enum ControlEvent {
     /// Later events in the same block still run. The processor continues to
     /// render from this frame.
     Reset,
+    /// This event flushes immediately before the event frame, with the
+    /// semantics of [`crate::Processor::flush`].
+    ///
+    /// Later events in the same block still run. The processor continues to
+    /// render from this frame.
+    Flush,
 }
 
 impl ControlEvent {
@@ -69,9 +75,9 @@ impl ControlEvent {
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfig`] for an invalid configuration or gain.
-    /// Returns [`Error::InvalidMidi`] for invalid MIDI fields. Reset is always
-    /// valid. The process call that contains the event checks the offset and
-    /// the order.
+    /// Returns [`Error::InvalidMidi`] for invalid MIDI fields. Reset and Flush
+    /// are always valid. The process call that contains the event checks the
+    /// offset and the order.
     pub fn validate(self) -> Result<(), Error> {
         match self {
             Self::Configure(config) => config.validate(),
@@ -82,7 +88,7 @@ impl ControlEvent {
             Self::Reverb(config) => config.validate(),
             Self::OutputGain(gain) => validate_output_gain(gain),
             Self::Midi(event) | Self::CorrectionMidi(event) => event.validate(),
-            Self::Reset => Ok(()),
+            Self::Reset | Self::Flush => Ok(()),
         }
     }
 }

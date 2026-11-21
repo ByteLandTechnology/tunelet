@@ -5,7 +5,7 @@
 //! stream. The order in which stages read values is part of the repeatable
 //! result. If you enable a stage that reads the stream, later stages get
 //! different values. This generator is for audio. It is not a cryptographic
-//! random source. An audio reset does not set a new seed.
+//! random source. A flush does not set a new seed.
 
 /// The 48-bit linear congruential state, made from a 32-bit seed.
 #[derive(Debug)]

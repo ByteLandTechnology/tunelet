@@ -22,10 +22,10 @@
 //! - The optional harmony `voices` field defaults to 4.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
-//! `{ type, value }`, and the reset control has no `value`. MIDI messages use
-//! `{ type, channel, note, velocity }`, with the fields that apply to the
-//! selected variant. The TypeScript declarations come from the same Rust types
-//! that validation uses.
+//! `{ type, value }`, and the `reset` and `flush` controls have no `value`.
+//! MIDI messages use `{ type, channel, note, velocity }`, with the fields that
+//! apply to the selected variant. The TypeScript declarations come from the
+//! same Rust types that validation uses.
 //!
 //! The class allocates the PCM storage at construction and uses it again for
 //! each block. These operations can allocate:
@@ -294,30 +294,47 @@ impl WasmProcessor {
         Ok(())
     }
 
-    /// Starts a finite tail budget and returns its frame count as a number.
+    /// Starts an adaptive drain and returns its upper-bound frame count as a
+    /// number.
     ///
     /// Call this method one time after the final input block. Another call
-    /// starts the full budget again, but it does not clear the histories. See
-    /// `beginDrain` for completion.
+    /// starts the full budget again, and it does not clear the histories.
     #[wasm_bindgen(js_name = beginDrain)]
     pub fn begin_drain(&mut self) -> usize {
         self.processor.begin_drain()
     }
 
-    /// Returns the tail budget of the current configuration, not the remaining
-    /// drain count.
+    /// Returns the upper-bound tail budget of the current configuration.
+    ///
+    /// For the active drain budget, read `drainRemaining`.
     #[wasm_bindgen(js_name = tailFrames)]
     pub fn tail_frames(&self) -> usize {
         self.processor.tail_frames()
     }
 
+    /// The upper-bound frame count that is left in the active drain, or
+    /// `undefined`.
+    ///
+    /// The value is `undefined` before `beginDrain` and after the final
+    /// zero-frame drain call. It decreases on each positive drain block and
+    /// becomes `0` immediately after the final positive block.
+    #[wasm_bindgen(getter, js_name = drainRemaining)]
+    pub fn drain_remaining(&self) -> Option<usize> {
+        self.processor.drain_remaining()
+    }
+
     /// Renders stereo tail frames into `Int16Array` buffers of equal length.
     ///
     /// The method returns the number of rendered frames and fills the unused
-    /// output with zeros. If the drain is not active or is complete, the method
-    /// returns zero. Empty arrays do not use the budget. Completion resets the
-    /// histories and the feedback in the final drain call, also when that call
-    /// returns audio.
+    /// output with zeros. After the resynthesis and Alien delays pass, the
+    /// drain stops early after 17,000 consecutive frames within ±24 PCM on
+    /// both channels.
+    ///
+    /// The final positive block sets `drainRemaining` to `0` and keeps the
+    /// peaks and the frame counts in `feedback` and `telemetry`. The next
+    /// non-empty drain call returns `0`, resets the processor and sets
+    /// `drainRemaining` to `undefined`. Empty arrays do not advance the drain
+    /// or trigger that reset.
     ///
     /// # Errors
     ///
@@ -338,8 +355,9 @@ impl WasmProcessor {
 
     /// Renders a mono tail block and returns its frame count.
     ///
-    /// The method fills the unused output with zeros. The downmix, completion
-    /// and feedback behavior are the same as for `drainMono`.
+    /// The method fills the unused output with zeros. The downmix, adaptive
+    /// silence stop, deferred reset and feedback behavior are the same as for
+    /// `drain`.
     ///
     /// # Errors
     ///
@@ -465,13 +483,24 @@ impl WasmProcessor {
         Ok(valid)
     }
 
-    /// Resets the audio histories and feedback, as the native processor does.
+    /// Restores the initial state of the active configuration, without memory
+    /// allocation.
     ///
-    /// The configuration, the random stream and some controller and filter
-    /// state do not change. This method cancels any active drain. For a fully
-    /// new instance, construct a new `Tunelet`.
+    /// The preparation and the active configuration stay the same. All DSP
+    /// histories, keyboard state, random state, meters and active drain state
+    /// return to the start of a new `Tunelet`.
     pub fn reset(&mut self) {
         self.processor.reset();
+    }
+
+    /// Clears audio delay lines, held notes 0..=126 and meters for live
+    /// continuity.
+    ///
+    /// The active configuration, the random stream, reverb filter memories,
+    /// harmony release envelopes and formant generation stay intact. This
+    /// method cancels any active drain.
+    pub fn flush(&mut self) {
+        self.processor.flush();
     }
 }
 

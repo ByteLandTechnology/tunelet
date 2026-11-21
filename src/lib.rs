@@ -64,27 +64,32 @@
 //! change the audio.
 //!
 //! After the last input block, call [`Processor::begin_drain`] one time. Then
-//! render drain blocks until a call returns zero. Each call fills the unused
-//! output with zeros. The drain uses a finite configured budget and mutes
-//! aspiration. It is not a silence detector.
+//! render drain blocks until a non-empty call returns zero. Each call fills
+//! the unused output with zeros and mutes aspiration.
+//! [`Processor::tail_frames`] gives the configured upper bound, and
+//! [`Processor::drain_remaining`] gives the active upper-bound count.
 //!
-//! The call that uses all of the budget does the same reset as
-//! [`Processor::reset`]. This occurs also if that call returns audio. A
-//! successful process call, a successful configuration call or a reset
-//! cancels the drain.
+//! After the resynthesis and Alien delays pass, the drain stops early after
+//! 17,000 consecutive frames within ±24 PCM on both channels. The final
+//! positive block sets [`Processor::drain_remaining`] to `Some(0)` and keeps
+//! [`Feedback`] and [`Telemetry`]. The next non-empty drain call returns zero
+//! and runs [`Processor::reset`]. A successful process call, configuration
+//! call, [`Processor::reset`] or [`Processor::flush`] cancels the drain.
 //!
-//! [`Processor::reset`] keeps the configuration and some controller state, for
-//! example the random stream. Its documentation lists the state that it keeps.
-//! If you need a fully new instance, make a new processor.
+//! [`Processor::reset`] and [`ControlEvent::Reset`] restore the initial state
+//! of the active configuration without allocation, and match [`Processor::new`]
+//! from frame zero. [`Processor::flush`] and [`ControlEvent::Flush`] clear
+//! delay lines, held notes 0..=126 and meters while they keep the random
+//! stream and live controller continuity.
 //!
 //! # Execution model
 //!
 //! Construction allocates the audio storage. After construction, the calls for
-//! audio, controls, feedback, reset and drain do not allocate memory. They do
-//! not acquire locks and do no I/O. Each processor owns its histories and its
-//! random stream. Fixed-point arithmetic uses explicit wrapping and
-//! quantization. If you change the order of the arithmetic, the samples can
-//! change.
+//! audio, controls, feedback, telemetry, reset, flush and drain do not
+//! allocate memory. They do not acquire locks and do no I/O. Each processor
+//! owns its histories and its random stream. Fixed-point arithmetic uses
+//! explicit wrapping and quantization. If you change the order of the
+//! arithmetic, the samples can change.
 //!
 //! The default build uses only safe Rust and has no dependencies.
 //!

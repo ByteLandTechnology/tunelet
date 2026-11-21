@@ -269,18 +269,33 @@ The drain gives the tail of the reverb and the voices after the last input
 block. To get the tail, do these steps:
 
 1. Call `begin_drain()` one time.
-2. Call `drain`, `drain_planar` or `drain_mono` until the call returns zero.
+2. Call `drain`, `drain_planar` or `drain_mono` with a non-empty buffer until
+   the call returns zero.
 3. From each drain call, use only the frames that the call returns.
 
-The drain fills the unused output with zeros. The drain has a finite budget,
-`tail_frames()`, which can include silence. The last drain call resets the
-audio histories and the feedback. A successful call that processes audio or
-sets the configuration cancels the drain. `reset()` also cancels the drain.
+The drain fills the unused output with zeros. `tail_frames()` gives the upper
+bound for the active configuration, and `drain_remaining()` gives the active
+upper-bound count (`None` when no drain is active). After the resynthesis and
+Alien delays pass, the drain stops early after 17,000 consecutive frames within
+±24 PCM on both channels.
 
-### Reset
+The final positive drain block sets `drain_remaining()` to `Some(0)` and keeps
+`feedback()` and `telemetry()` intact. The next non-empty drain call returns
+zero, runs `reset()` and sets `drain_remaining()` to `None`. Empty drain
+buffers neither advance the silence window nor run that reset. A successful
+call that processes audio or sets the configuration cancels the drain.
+`reset()` and `flush()` also cancel the drain.
 
-`reset()` keeps the configuration, the random stream and some controller and
-filter state. If you need a fully new state, construct a new processor.
+### Reset and flush
+
+`reset()` and `ControlEvent::Reset` restore the initial state of the active
+configuration without allocation. After `reset()`, the output matches
+`Processor::new` with the same configuration sample for sample from frame zero.
+
+`flush()` and `ControlEvent::Flush` clear the audio delay lines, held notes
+0..=126 and the meters for live transport jumps. They keep the active
+configuration, the random stream, reverb damping filter memories, harmony
+release envelopes and formant generation.
 
 ## Feedback and telemetry
 
@@ -293,6 +308,7 @@ These calls read the state of the processor. They do not change the audio.
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
 | `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
+| `drain_remaining()`  | The active upper-bound drain count, or `None` outside a drain     |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
 
 The telemetry includes these items:
@@ -333,6 +349,7 @@ allocate memory, acquire locks or do I/O:
 - Feedback
 - Telemetry
 - Reset
+- Flush
 - Drain
 
 All operations that can fail do their validation before they change the
@@ -417,8 +434,8 @@ page that opens the JavaScript.
 | Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
 | Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`         |
 | Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)` |
-| Configured tail budget            | `tailFrames()`                                           |
-| Reset or release memory           | `reset()`, `free()`                                      |
+| Tail budget and drain status      | `tailFrames()`, `drainRemaining`                         |
+| Reset, flush or release memory    | `reset()`, `flush()`, `free()`                           |
 
 ### Audio buffers
 
@@ -456,8 +473,9 @@ telemetry use `bigint`. Frame offsets, block lengths and latency use
 ### Events
 
 The optional event argument is a `TimedEvent[]`. Controls use a `type`
-discriminant and a `value` payload. The reset control has no payload. For
-example, this event changes the final gain before the first frame:
+discriminant and a `value` payload. The `reset` and `flush` controls have no
+payload. For example, this event changes the final gain before the first
+frame:
 
 ```ts
 { offset: 0, event: { type: "outputGain", value: 0.5 } }

@@ -70,8 +70,9 @@ pub enum MultiVoiceMode {
 ///
 /// Correction MIDI replaces the active note table. It does not change this
 /// configuration. A change to `notes` or to `enabled` loads the configured
-/// mask again. Reset releases the correction keys 0..=126. It keeps key 127
-/// and the active note table. Key 127 has no effect on the note table.
+/// mask again. A flush releases the correction keys 0..=126 and keeps key 127
+/// and the active note table. A reset loads the configured mask again and
+/// clears all keys. Key 127 has no effect on the note table.
 ///
 /// At construction, the chromatic table uses 44.1 kHz periods, also for a
 /// 48 kHz processor. Each of these events loads the periods for the prepared
@@ -248,8 +249,9 @@ pub struct ResynthesisConfig {
     /// Only the low 32 bits select the sequence. If a configuration change
     /// gives a different 64-bit value, the processor starts the stream again
     /// from the low 32 bits. This is also true for a change to only the high
-    /// bits. Reset keeps the current position in the stream. The enabled
-    /// stages set the number of random values that the code reads.
+    /// bits. A flush keeps the current position in the stream. A reset starts
+    /// the stream again from the low 32 bits. The enabled stages set the
+    /// number of random values that the code reads.
     pub random_seed: u64,
 }
 
@@ -413,8 +415,8 @@ pub(crate) struct Resynthesis {
     positions: [Q14; 16],
     /// The Q14 random choir drift offsets of the secondary voices.
     drift: [Q14; 16],
-    /// The Q14 multipliers, each equal to 1.0 plus the drift. An audio reset
-    /// sets them to 1.0, but it keeps the drift state.
+    /// The Q14 multipliers, each equal to 1.0 plus the drift. A flush sets
+    /// them to 1.0, and keeps the drift state.
     drift_ratio: [Q14; 16],
     /// The Q14 left and right gains of the choir voices. The code reads them
     /// only if the stereo pan is enabled.
@@ -424,8 +426,8 @@ pub(crate) struct Resynthesis {
     harmony_pan: [[Q14; 2]; HARMONY_VOICES],
     /// The last Q14 target ratios from the harmony controller.
     harmony_ratios: [Q14; HARMONY_VOICES],
-    /// The last Q12 gain envelopes from the harmony controller. An audio
-    /// reset keeps them.
+    /// The last Q12 gain envelopes from the harmony controller. A flush keeps
+    /// them.
     harmony_gains: [Q12; HARMONY_VOICES],
     /// The effective Q14 ratios of the lead and the four harmony readers from
     /// the last frame. In Choir mode, only the lead slot changes. Only the
@@ -456,7 +458,7 @@ pub(crate) struct Resynthesis {
     /// The plain integer modulation depth. It is the public control times
     /// two, truncated.
     modulation: i32,
-    /// The Q14 phase in the cosine cycle. An audio reset keeps it.
+    /// The Q14 phase in the cosine cycle. A flush keeps it.
     modulation_phase: Q14,
     /// The Q8 weight of the delayed raw audio. The wet weight is 1.0 minus
     /// this weight.
@@ -503,17 +505,7 @@ impl Resynthesis {
             },
             formant: Formant::new(rate, config.formant),
             harmony: HarmonyState::new(rate, config.harmony),
-            scale: {
-                // The initial chromatic table uses 44.1 kHz periods at the two
-                // rates. If the notes load again, the periods for the
-                // configured rate become active.
-                let mut scale = CorrectionTable::new(SampleRate::Hz44100, NoteMask::default());
-                scale.set_sample_rate(rate);
-                if config.correction.notes != NoteMask::default() {
-                    scale.set_notes(config.correction.notes);
-                }
-                scale
-            },
+            scale: Self::initial_scale(rate, config.correction.notes),
             filtered: prepare_history(Q14::ZERO),
             lead: prepare_history(Q14::ZERO),
             periods: prepare_history(Q6::ZERO),
@@ -551,8 +543,21 @@ impl Resynthesis {
         };
         result.configure_coefficients();
         result.configure_shift_filters();
-        result.reset();
+        result.clear_histories();
         result
+    }
+
+    /// Builds the initial correction table in the same way as construction.
+    ///
+    /// The initial chromatic table uses 44.1 kHz periods at the two rates. If
+    /// the notes load again, the periods for the configured rate become active.
+    fn initial_scale(rate: SampleRate, notes: NoteMask) -> CorrectionTable {
+        let mut scale = CorrectionTable::new(SampleRate::Hz44100, NoteMask::default());
+        scale.set_sample_rate(rate);
+        if notes != NoteMask::default() {
+            scale.set_notes(notes);
+        }
+        scale
     }
 
     /// Quantizes the controls and calculates the decay coefficients and the
@@ -663,19 +668,37 @@ impl Resynthesis {
         }
         self.configure_coefficients();
         if old.stereo_output != config.stereo_output {
-            // A stereo change resets the audio state. The correction keyboard
+            // A stereo change flushes the audio state. The correction keyboard
             // keeps its held keys.
-            self.reset_audio();
+            self.flush_audio();
         }
     }
 
-    /// Releases the correction keys 0..=126 and resets the audio state.
+    /// Releases the correction keys 0..=126 and flushes the audio state.
     ///
     /// The active correction table, key 127 and the items that
-    /// `reset_audio` keeps do not change.
+    /// `flush_audio` keeps do not change.
+    pub(crate) fn flush(&mut self) {
+        self.scale.flush();
+        self.flush_audio();
+    }
+
+    /// Restores the initial state of [`Self::new`] without allocation.
     pub(crate) fn reset(&mut self) {
-        self.scale.reset();
-        self.reset_audio();
+        self.pitch.reset();
+        self.formant.reset();
+        self.harmony.reset();
+        self.scale = Self::initial_scale(self.rate, self.config.correction.notes);
+        self.drift.fill(Q14::ZERO);
+        self.pan = [[Q14::ONE; 2]; 16];
+        self.harmony_gains.fill(Q12::ZERO);
+        self.scale_index = 0;
+        self.octave = 0;
+        self.modulation_phase = Q14::ZERO;
+        self.control_counter = CONTROL_DUE;
+        self.configure_coefficients();
+        self.configure_shift_filters();
+        self.clear_histories();
     }
 
     /// Clears the audio and period histories, the tracker, the formant
@@ -690,12 +713,18 @@ impl Resynthesis {
     /// - The modulation phase.
     /// - The control counter.
     /// - The harmony release envelopes and the last harmony gains.
-    fn reset_audio(&mut self) {
-        self.pitch.reset();
+    fn flush_audio(&mut self) {
+        self.pitch.flush();
+        self.formant.flush();
+        self.harmony.flush();
+        self.clear_histories();
+    }
+
+    /// Clears the sample, period and ratio rings and sets the readers and
+    /// correction state back to their initial positions.
+    fn clear_histories(&mut self) {
         self.raw.fill(Q14::ZERO);
         self.write = 0;
-        self.formant.reset();
-        self.harmony.reset();
         self.filtered.fill(Q14::ZERO);
         self.lead.fill(Q14::ZERO);
         self.periods.fill(Q6::ZERO);

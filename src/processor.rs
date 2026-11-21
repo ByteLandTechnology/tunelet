@@ -1,7 +1,7 @@
 //! The processor: audio blocks, timed controls, host feedback and the tail.
 
 use crate::effects::alien::{self, Alien};
-use crate::effects::punch::{Punch, PunchConfig};
+use crate::effects::punch::Punch;
 use crate::effects::reverb::{self, Reverb};
 use crate::effects::warm::Warm;
 use crate::events::{ValidatedEvent, ValidatedEvents};
@@ -9,6 +9,9 @@ use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
 use crate::resynthesis::{self, Resynthesis};
 use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
+
+/// The symmetric PCM amplitude bound for the drain silence window.
+const DRAIN_SILENCE_PCM: i16 = 24;
 
 /// A prepared vocal processor with state, mono input and stereo synthesis.
 ///
@@ -18,12 +21,12 @@ use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
 /// [`crate::ResynthesisConfig::stereo_output`] selects the voice panning
 /// separately.
 ///
-/// The audio, configuration, reset and drain calls need exclusive access to
-/// this instance. Each processor owns its histories and numeric state, and
-/// there is no global audio state. These prepared operations do not allocate,
-/// do not lock and do no I/O. Public operations that can fail validate before
-/// they change state or output. Refer to the [crate documentation](crate) for
-/// the signal chain and the lifecycle.
+/// The audio, configuration, reset, flush and drain calls need exclusive
+/// access to this instance. Each processor owns its histories and numeric
+/// state, and there is no global audio state. These prepared operations do not
+/// allocate, do not lock and do no I/O. Public operations that can fail
+/// validate before they change state or output. Refer to the [crate
+/// documentation](crate) for the signal chain and the lifecycle.
 pub struct Processor {
     /// The fixed rate and the block limit for each call.
     preparation: PrepareConfig,
@@ -64,11 +67,16 @@ pub struct Processor {
     ///
     /// The count saturates at the maximum value.
     frames: u64,
-    /// The number of frames of silent input that are left for the drain.
+    /// The upper bound on drain frames that are left.
     ///
     /// `None` means that the drain is not active. `Some(0)` means that the
-    /// drain is complete.
+    /// drain is complete and waits for the final zero-frame drain call.
     drain_remaining: Option<usize>,
+    /// The drain frames that must pass before the silence counter starts.
+    drain_holdoff: usize,
+    /// The consecutive stereo frames within [`DRAIN_SILENCE_PCM`] after the
+    /// holdoff.
+    drain_silent_frames: usize,
 }
 
 impl std::fmt::Debug for Processor {
@@ -86,13 +94,13 @@ impl Processor {
     ///
     /// Each processor is independent. `preparation` fixes the rate and the
     /// block limit for each call. After construction, the audio, control,
-    /// feedback, reset and drain calls do not allocate, do not lock and do no
-    /// I/O. Audio histories, pitch reports and meters start clear. The random
-    /// stream starts from the low 32 bits of `random_seed`.
+    /// feedback, reset, flush and drain calls do not allocate, do not lock and
+    /// do no I/O. Audio histories, pitch reports and meters start clear. The
+    /// random stream starts from the low 32 bits of `random_seed`.
     ///
-    /// Punch uses its default cached drive until the first window of 100
-    /// frames with Punch enabled. The initial note table of correction has the
-    /// rate behavior that [`crate::CorrectionConfig`] describes.
+    /// Punch calculates its initial drive from `config.punch.gain_db`. The
+    /// initial note table of correction has the rate behavior that
+    /// [`crate::CorrectionConfig`] describes.
     ///
     /// # Errors
     ///
@@ -103,13 +111,10 @@ impl Processor {
     pub fn new(preparation: PrepareConfig, config: ProcessorConfig) -> Result<Self, Error> {
         config.validate()?;
         let rate = preparation.sample_rate;
-        // Drive uses the default gain until the first 100-frame peak window.
-        let mut punch = Punch::new(rate, PunchConfig::default());
-        punch.set_config(config.punch);
         Ok(Self {
             preparation,
             config,
-            punch,
+            punch: Punch::new(rate, config.punch),
             warm: Warm::new(rate, config.warm),
             resynthesis: Box::new(Resynthesis::new(rate, config.resynthesis)),
             alien: Alien::new(config.alien),
@@ -121,6 +126,8 @@ impl Processor {
             last_resample_ratio: 0.0,
             frames: 0,
             drain_remaining: None,
+            drain_holdoff: 0,
+            drain_silent_frames: 0,
         })
     }
 
@@ -200,7 +207,7 @@ impl Processor {
         events: &[TimedEvent],
     ) -> Result<(), Error> {
         let mut events = self.validate(audio, events)?;
-        self.drain_remaining = None;
+        self.cancel_drain();
         for (index, sample) in audio.iter_mut().enumerate() {
             while let Some(event) = events.next_at(index) {
                 self.apply(event);
@@ -212,22 +219,28 @@ impl Processor {
     }
 
     /// Starts a tail with the current [`tail_frames`](Self::tail_frames)
-    /// budget and returns that budget.
+    /// upper-bound budget and returns that budget.
     ///
     /// Call this method one time after the last input block. Another call
-    /// starts the full budget again, but does not clear histories. A
-    /// successful process call, a successful configuration call or a reset
-    /// cancels the drain.
+    /// starts the full budget again, and does not clear histories. A
+    /// successful process call, a successful configuration call, a reset or a
+    /// flush cancels the drain.
     ///
     /// The drain uses silent input and mutes aspiration temporarily. Each
     /// drain call returns a frame count and fills the unused output with zeros.
-    /// The call that uses all of the budget does a [`reset`](Self::reset),
-    /// also if it returns frames. An empty buffer uses no budget. The budget
-    /// can include silence. The reset at the end of the budget stops the
-    /// fixed-point output that is left in the histories that it clears.
+    /// After the resynthesis and Alien budgets pass, the drain stops early if
+    /// stereo output stays within 24 PCM for 17,000 frames. Every positive
+    /// drain call preserves [`Feedback`] and [`Telemetry`]. The next non-empty
+    /// drain call returns zero and does a [`reset`](Self::reset). An empty
+    /// buffer does not advance the drain or do the reset.
     pub fn begin_drain(&mut self) -> usize {
         let count = self.tail_frames();
         self.drain_remaining = Some(count);
+        self.drain_holdoff = self
+            .resynthesis
+            .tail_frames()
+            .saturating_add(alien::tail_frames(self.config.alien));
+        self.drain_silent_frames = 0;
         count
     }
 
@@ -235,8 +248,9 @@ impl Processor {
     ///
     /// Call [`begin_drain`](Self::begin_drain) first. Before a drain starts or
     /// after it finishes, this method returns zero and clears the output. The
-    /// method always fills unused frames with zeros. An empty buffer does not
-    /// advance the drain.
+    /// method always fills unused frames with zeros. The first non-empty call
+    /// after completion returns zero and resets the processor. An empty buffer
+    /// does not advance the drain or do the reset.
     ///
     /// # Errors
     ///
@@ -251,8 +265,9 @@ impl Processor {
     /// Renders the tail into separate output channels of equal size.
     ///
     /// The return values, the zeros in unused samples, empty buffers and
-    /// completion are the same as for [`drain`](Self::drain). A final call can
-    /// return frames and also do the reset in that call.
+    /// completion are the same as for [`drain`](Self::drain). Positive calls
+    /// keep the peaks and the frame count until the next non-empty call
+    /// returns zero and resets the processor.
     ///
     /// # Errors
     ///
@@ -275,9 +290,10 @@ impl Processor {
     /// The downmix is the same as in
     /// [`process_mono_in_place`](Self::process_mono_in_place). The method
     /// fills unused samples with zeros. If the drain is not active or is
-    /// complete, the method returns zero. An empty output uses no budget. At
-    /// completion, the method does a reset, as
-    /// [`begin_drain`](Self::begin_drain) describes.
+    /// complete, the method returns zero. An empty output uses no budget and
+    /// does not do the deferred reset. After completion, the next non-empty
+    /// call returns zero and does a reset, as [`begin_drain`](Self::begin_drain)
+    /// describes.
     ///
     /// # Errors
     ///
@@ -305,6 +321,17 @@ impl Processor {
                 self.preparation.sample_rate,
                 self.config.reverb,
             ))
+    }
+
+    /// Returns the upper bound on drain frames that are left, or `None` if no
+    /// drain is active.
+    ///
+    /// Before [`begin_drain`](Self::begin_drain) and after the final
+    /// zero-frame drain call, this method returns `None`. After the final
+    /// positive drain block, it returns `Some(0)` until a non-empty drain call
+    /// returns zero and resets the processor.
+    pub fn drain_remaining(&self) -> Option<usize> {
+        self.drain_remaining
     }
 
     /// Returns the fixed sample rate and block limit.
@@ -492,9 +519,9 @@ impl Processor {
             self.resynthesis.apply_config(config.resynthesis);
         }
         if self.config.resynthesis.stereo_output != config.resynthesis.stereo_output {
-            // Resynthesis resets its histories if its stereo setting changes.
+            // Resynthesis flushes its histories if its stereo setting changes.
             self.alien.reset();
-            self.reverb.reset();
+            self.reverb.flush();
             self.peak = 0;
             self.clear_telemetry_peaks();
             self.last_resample_ratio = 0.0;
@@ -509,16 +536,39 @@ impl Processor {
             self.reverb.set_config(config.reverb);
         }
         self.config = config;
-        self.drain_remaining = None;
+        self.cancel_drain();
     }
 
-    /// Clears the audio histories, held notes, pitch feedback, peak and frame
-    /// count.
+    /// Restores the initial state of [`Self::new`] for the current
+    /// configuration, with zero allocations.
+    ///
+    /// This method clears all audio histories, filter memories, pitch state,
+    /// formant models, harmony state, held MIDI keys, meters and the frame
+    /// count. It also starts the random stream again from
+    /// [`crate::ResynthesisConfig::random_seed`], resets the arctangent lookup
+    /// cursor and cancels any active drain. The prepared sample rate, the
+    /// block limit and the active [`ProcessorConfig`] stay the same.
+    pub fn reset(&mut self) {
+        self.punch.reset();
+        self.warm.reset();
+        self.resynthesis.reset();
+        self.alien.reset();
+        self.reverb.reset();
+        self.numeric = NumericContext::new(self.config.resynthesis.random_seed as u32);
+        self.peak = 0;
+        self.clear_telemetry_peaks();
+        self.frames = 0;
+        self.last_resample_ratio = 0.0;
+        self.cancel_drain();
+    }
+
+    /// Clears the audio histories, held notes, pitch feedback, peaks and frame
+    /// count, while controller continuity stays intact.
     ///
     /// This method cancels an active drain. It also clears the correction
-    /// ratio, the Punch envelopes, the Warm filters, the Alien recording and
-    /// the reverb delays. It releases the harmony MIDI notes and, in
-    /// MIDI-chord mode, the chord voices. It keeps these items:
+    /// ratio, the Punch envelopes, the Warm filters, the Alien history and the
+    /// reverb delays. It releases the harmony MIDI notes and, in MIDI-chord
+    /// mode, the chord voices. It keeps these items:
     ///
     /// - the configuration
     /// - the random stream and the arctangent lookup position of Punch
@@ -531,21 +581,30 @@ impl Processor {
     /// - the prepared chord targets of the named and degree chord sources
     /// - the choir drift
     /// - the control-step counter of Choir and Harmony
-    /// - the phase of the harmonic modulation.
+    /// - the phase of the harmonic modulation
+    /// - the formant generation counter.
     ///
     /// When the method clears the held keys, it does not load the configured
-    /// scale again. For a fully new state, make a new processor.
-    pub fn reset(&mut self) {
+    /// scale again. For a deterministic initial state, call
+    /// [`reset`](Self::reset).
+    pub fn flush(&mut self) {
         self.punch.reset();
         self.warm.reset();
-        self.resynthesis.reset();
+        self.resynthesis.flush();
         self.alien.reset();
-        self.reverb.reset();
+        self.reverb.flush();
         self.peak = 0;
         self.clear_telemetry_peaks();
         self.frames = 0;
         self.last_resample_ratio = 0.0;
+        self.cancel_drain();
+    }
+
+    /// Cancels any active or completed drain and clears the silence counters.
+    fn cancel_drain(&mut self) {
         self.drain_remaining = None;
+        self.drain_holdoff = 0;
+        self.drain_silent_frames = 0;
     }
 
     /// Checks the block size, then checks all events without a change.
@@ -574,8 +633,8 @@ impl Processor {
     /// Applies a validated control immediately before its frame is rendered.
     ///
     /// A partial configuration event replaces one stage in the active
-    /// configuration. MIDI and reset events act directly. A reset does not
-    /// discard later events in the block.
+    /// configuration. MIDI, reset and flush events act directly. A reset or a
+    /// flush does not discard later events in the block.
     fn apply(&mut self, event: ValidatedEvent) {
         let mut config = self.config;
         match event.into_inner() {
@@ -596,6 +655,10 @@ impl Processor {
             }
             ControlEvent::Reset => {
                 self.reset();
+                return;
+            }
+            ControlEvent::Flush => {
+                self.flush();
                 return;
             }
         }
@@ -648,7 +711,7 @@ impl Processor {
         mut write: impl FnMut(usize, [i16; 2]),
     ) -> Result<(), Error> {
         let mut events = self.validate(input, events)?;
-        self.drain_remaining = None;
+        self.cancel_drain();
         for (index, sample) in input.iter().enumerate() {
             while let Some(event) = events.next_at(index) {
                 self.apply(event);
@@ -661,17 +724,27 @@ impl Processor {
     /// Renders only the budget that is left. The caller writes zeros in the
     /// unused frames.
     ///
-    /// The method mutes aspiration temporarily, but does not change the
-    /// settings that the host sees. It restores the configuration before
-    /// completion resets the state. `Some(0)` records completion, so later
-    /// drain calls continue to return zero.
+    /// The method mutes aspiration temporarily, and does not change the
+    /// settings that the host sees. `Some(0)` records completion, and the next
+    /// non-empty drain call resets the processor and returns zero.
     fn drain_into(
         &mut self,
         frames: usize,
         mut write: impl FnMut(usize, [i16; 2]),
     ) -> Result<usize, Error> {
         self.check_block(frames)?;
-        let count = self.drain_remaining.unwrap_or(0).min(frames);
+        if frames == 0 {
+            return Ok(0);
+        }
+        let remaining = match self.drain_remaining {
+            None => return Ok(0),
+            Some(0) => {
+                self.reset();
+                return Ok(0);
+            }
+            Some(remaining) => remaining,
+        };
+        let limit = remaining.min(frames);
         let configured = self.config.resynthesis;
         if configured.formant.aspiration_mix != 0.0 {
             let mut silent = configured;
@@ -679,18 +752,30 @@ impl Processor {
             // Zero aspiration is valid in all validated configurations.
             self.resynthesis.apply_config(silent);
         }
-        for index in 0..count {
-            write(index, self.next(0));
+        let mut count = 0;
+        for index in 0..limit {
+            let frame = self.next(0);
+            write(index, frame);
+            count += 1;
+            if self.drain_holdoff > 0 {
+                self.drain_holdoff -= 1;
+            } else if frame[0].abs() <= DRAIN_SILENCE_PCM && frame[1].abs() <= DRAIN_SILENCE_PCM {
+                self.drain_silent_frames += 1;
+                if self.drain_silent_frames >= reverb::DELAY_CAPACITY {
+                    break;
+                }
+            } else {
+                self.drain_silent_frames = 0;
+            }
         }
         if configured.formant.aspiration_mix != 0.0 {
             self.resynthesis.apply_config(configured);
         }
-        if let Some(remaining) = self.drain_remaining {
-            let remaining = remaining - count;
-            if remaining == 0 {
-                self.reset();
-            }
-            self.drain_remaining = Some(remaining);
+        let left = remaining - count;
+        if left == 0 || self.drain_silent_frames >= reverb::DELAY_CAPACITY {
+            self.drain_remaining = Some(0);
+        } else {
+            self.drain_remaining = Some(left);
         }
         Ok(count)
     }
@@ -715,8 +800,8 @@ pub struct Feedback {
     /// unity.
     ///
     /// It does not include the configured pitch shift or the ratios of
-    /// individual voices. It is zero before processing, after a reset or after
-    /// a change of stereo output.
+    /// individual voices. It is zero before the first block, after a reset,
+    /// after a flush or after a change of stereo output.
     pub resample_ratio: f32,
     /// The reported input pitch period in samples, with fractional samples.
     ///
@@ -755,16 +840,16 @@ pub struct Feedback {
     pub voiced: bool,
     /// The largest absolute clipped stereo sample, divided by 32768.
     ///
-    /// The peak window starts at construction, at a reset, at a change of
-    /// stereo output or at a call to [`Processor::take_feedback`]. The value
-    /// is in 0..=32767/32768. The mono downmix occurs after this measurement.
-    /// [`Processor::feedback`] does not clear the value.
+    /// The peak window starts at construction, at a reset, at a flush, at a
+    /// change of stereo output or at a call to [`Processor::take_feedback`].
+    /// The value is in 0..=32767/32768. The mono downmix occurs after this
+    /// measurement. [`Processor::feedback`] does not clear the value.
     pub peak_level: f32,
-    /// The number of frames processed since construction or the last reset,
-    /// with drain frames included.
+    /// The number of frames processed since construction, the last reset or
+    /// the last flush, with drain frames included.
     ///
-    /// The count saturates at `u64::MAX`. Drain completion resets it in the
-    /// last drain call.
+    /// The count saturates at `u64::MAX`. After drain completion, the next
+    /// non-empty drain call returns zero and resets this count.
     pub processed_frames: u64,
     /// The nominal resynthesis latency, as [`Processor::latency_frames`] gives.
     #[cfg_attr(
@@ -783,9 +868,9 @@ pub struct Feedback {
 /// `Default` gives a snapshot with all zeros.
 ///
 /// The three peak fields measure a window. The window starts at
-/// construction, at a reset, at a change of stereo output or at a call to
-/// [`Processor::take_telemetry`]. This window is independent of the peak
-/// window of [`Feedback`].
+/// construction, at a reset, at a flush, at a change of stereo output or at a
+/// call to [`Processor::take_telemetry`]. This window is independent of the
+/// peak window of [`Feedback`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -794,8 +879,8 @@ pub struct Feedback {
     tsify(large_number_types_as_bigints)
 )]
 pub struct Telemetry {
-    /// The number of frames processed since construction or the last reset,
-    /// as [`Feedback::processed_frames`] gives.
+    /// The number of frames processed since construction, the last reset or
+    /// the last flush, as [`Feedback::processed_frames`] gives.
     pub processed_frames: u64,
     /// The largest absolute input sample in the window, divided by 32768.
     ///
@@ -872,10 +957,11 @@ pub struct Telemetry {
     /// The reverse reader is two times this number of frames behind the
     /// recording position. The value advances also while Alien is disabled.
     pub alien_phase_frames: u32,
-    /// The wrapping count of formant analyses since construction.
+    /// The wrapping count of formant analyses since construction or the last
+    /// reset.
     ///
     /// The count increases every 441 frames while the formant stage is
-    /// enabled. Compare two values to find if
+    /// enabled. A flush keeps this count. Compare two values to find if
     /// [`Processor::formant_envelope`] can give a new result.
     pub formant_generation: u32,
 }

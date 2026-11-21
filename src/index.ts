@@ -4,8 +4,9 @@
  * Call `loadTunelet()` before you construct processors or read the default
  * configuration. Both environments use the same generated bindings and the
  * same Wasm binary. This module re-exports all named exports of the module
- * that wasm-bindgen generates, which include `Tunelet`, `defaultConfig`,
- * `initSync` and the configuration, event and feedback types.
+ * that wasm-bindgen generates. Those exports include `Tunelet` (with `reset`,
+ * `flush` and `drainRemaining`), `defaultConfig`, `initSync` and the
+ * configuration, event, feedback and telemetry types.
  */
 import init, { initSync } from "../pkg/tunelet.js";
 import type { InitInput, InitOutput } from "../pkg/tunelet.js";

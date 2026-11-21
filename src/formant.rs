@@ -312,9 +312,8 @@ impl Formant {
     /// the aspiration filter.
     ///
     /// The function also selects and clears the initial bank pair, and starts
-    /// the correlation smoothing again. The other banks stay allocated. The
-    /// stage clears each bank when it uses that bank again.
-    pub(crate) fn reset(&mut self) {
+    /// the correlation smoothing again. The generation counter stays as it is.
+    pub(crate) fn flush(&mut self) {
         self.input.fill(0_i32);
 
         self.stamps.fill(Stamp::default());
@@ -326,6 +325,22 @@ impl Formant {
         self.design_counter = 0;
         self.noise_filter.reset();
         self.smooth_reset = true;
+    }
+    /// Restores the initial state of [`Self::new`] without allocation.
+    pub(crate) fn reset(&mut self) {
+        self.temporary.fill(0_i32);
+        self.inverse.fill([0; MAX_ORDER]);
+        self.models.fill([0; MAX_ORDER]);
+        self.orders = [0; BANKS];
+        self.correlation_history = [[0; 111]; 2];
+        self.correlation_sum = [0; 111];
+        self.smooth_index = 0;
+        self.smooth_filled = 0;
+        self.stretch_map[self.stretch_count..].fill(0);
+        self.areas = [0; MAX_ORDER];
+        self.stretched_areas = [0; MAX_ORDER];
+        self.generation = 0;
+        self.flush();
     }
     /// Starts a new model and a new correlation window when pitch acquisition
     /// locks.
