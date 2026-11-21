@@ -652,6 +652,7 @@ impl Resynthesis {
         }
         if old.pitch_ratio != config.pitch_ratio {
             self.configure_shift_filters();
+            self.scale_initialized = false;
         }
         if old.mode != config.mode || old.choir_delay != config.choir_delay {
             self.create_delays();
@@ -861,9 +862,9 @@ impl Resynthesis {
     /// global shift is part of the normalization.
     ///
     /// If correction is disabled or the active table is empty, the ratio moves
-    /// toward 1.0. If the target selection starts again and the shifted
-    /// period is not positive, the ratio becomes 1.0 immediately. A
-    /// multiplication by fixed-point 1.0 still wraps. Do not remove it.
+    /// toward 1.0. If the shifted period is not positive, the ratio becomes
+    /// 1.0 immediately and the target selection starts again. A multiplication
+    /// by fixed-point 1.0 still wraps. Do not remove it.
     fn update_correction(&mut self, period: Q6) {
         let mut target_ratio = Q14::ONE;
         if self.config.correction.enabled && self.scale.count != 0 {
@@ -873,7 +874,6 @@ impl Resynthesis {
             let table_period = |index: usize| Q6::from_bits(self.scale.midpoints[index]);
             let mut target: Q6;
             if !self.scale_initialized {
-                self.scale_initialized = true;
                 self.scale_index = 0;
                 self.octave = 0;
                 target = self.shift.mul(period);
@@ -888,12 +888,22 @@ impl Resynthesis {
                         break;
                     }
                 }
+                if target <= Q6::ZERO {
+                    self.correction = Q14::ONE;
+                    return;
+                }
+                self.scale_initialized = true;
             }
             target = self.shift.mul(if self.octave >= 0 {
                 period << self.octave as u32
             } else {
                 period >> (-self.octave) as u32
             });
+            if target <= Q6::ZERO {
+                self.scale_initialized = false;
+                self.correction = Q14::ONE;
+                return;
+            }
             // The comparisons multiply by 1.0 to keep the wrap of the product.
             while table_period(self.scale_index + 1).mul::<14, 6>(Q14::ONE) < target {
                 self.scale_index += 1;
