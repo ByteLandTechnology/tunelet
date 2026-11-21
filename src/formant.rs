@@ -22,7 +22,9 @@ use crate::error::check_range;
 use crate::filter::{Biquad, Design};
 use crate::lpc;
 use crate::numeric::fixed::{Q14, Q6};
-use crate::numeric::{db_to_gain, fast_sinc, history_frames, mul14, round_q14, NumericContext};
+use crate::numeric::{
+    clamp_i32, db_to_gain, fast_sinc, history_frames, mul14, round_q14, NumericContext,
+};
 use crate::{Error, SampleRate};
 
 /// The controls for vocal-tract changes and synthesized aspiration during
@@ -388,7 +390,7 @@ impl Formant {
     /// glottal coefficient. It uses the common signed rounding rule.
     #[inline]
     pub(crate) fn remove_glottal(&self, sample: i32, previous: i32) -> i32 {
-        sample.wrapping_sub(round_q14(previous.wrapping_mul(self.glottal)))
+        sample.saturating_sub(round_q14(i64::from(previous) * i64::from(self.glottal)))
     }
     /// Puts the glottal envelope back from a Q14 excitation and the previous
     /// output.
@@ -397,7 +399,7 @@ impl Formant {
     /// channel.
     #[inline]
     pub(crate) fn model_glottal(&self, sample: i32, previous: i32) -> i32 {
-        sample.wrapping_add(round_q14(previous.wrapping_mul(self.glottal)))
+        sample.saturating_add(round_q14(i64::from(previous) * i64::from(self.glottal)))
     }
     /// Stores the pre-emphasized input, tries a model design if one is due,
     /// and returns the inverse-filtered sample.
@@ -554,7 +556,8 @@ impl Formant {
             let mut previous = self.temporary[count - 1];
             for sample in &mut self.temporary[..count + order] {
                 let current = *sample;
-                *sample = current.wrapping_sub(round_q14(previous.wrapping_mul(self.glottal)));
+                *sample = current
+                    .saturating_sub(round_q14(i64::from(previous) * i64::from(self.glottal)));
                 previous = current;
             }
             // One common binary scale must apply to all lags. If a new product
@@ -683,9 +686,9 @@ impl Formant {
 
     /// Applies the blended prediction-error filter to the delayed input.
     ///
-    /// The full sum of products wraps before one signed half-unit shift. The
-    /// function blends the coefficients for the current transition. Then it
-    /// multiplies them with the previous samples.
+    /// The full sum of Q28 products accumulates in `i64` before one signed
+    /// shift and an `i32` clamp. The function blends the coefficients for the
+    /// current transition. Then it multiplies them with the previous samples.
     fn inverse(&self, position: usize) -> i32 {
         let hist_frames = self.history_frames;
         let ana_frames = self.analysis_frames;
@@ -699,11 +702,11 @@ impl Formant {
         let previous_base = self.previous * max_order;
         let current_base = self.current * max_order;
         let mut cursor = read;
-        let mut sum = 0_i32;
+        let mut sum = 0_i64;
         for i in 0..self.order {
             let coefficient = if self.blend < 16384 {
                 mul14(16384 - self.blend, self.inverse[previous_base + i])
-                    .wrapping_add(mul14(self.blend, self.inverse[current_base + i]))
+                    .saturating_add(mul14(self.blend, self.inverse[current_base + i]))
             } else {
                 self.inverse[current_base + i]
             };
@@ -712,9 +715,9 @@ impl Formant {
             } else {
                 cursor - 1
             };
-            sum = sum.wrapping_add(self.input[cursor].wrapping_mul(coefficient));
+            sum = sum.saturating_add(i64::from(self.input[cursor]) * i64::from(coefficient));
         }
-        self.input[read].wrapping_sub(round_q14(sum))
+        self.input[read].saturating_sub(round_q14(sum))
     }
     /// Blends random aspiration into a Q14 sample word. The signal modulates
     /// the aspiration, and a high-pass filter changes it.
@@ -732,9 +735,9 @@ impl Formant {
             .noise_filter
             .process_sample(Q14::from_bits(noise))
             .to_bits();
-        let noise = mul14(self.noise_amplitude, filtered).wrapping_shl(6);
-        mul14(sample, 16384_i32.wrapping_sub(self.noise_gain))
-            .wrapping_add(mul14(noise, self.noise_gain))
+        let noise = clamp_i32(i64::from(mul14(self.noise_amplitude, filtered)) << 6);
+        mul14(sample, 16384_i32.saturating_sub(self.noise_gain))
+            .saturating_add(mul14(noise, self.noise_gain))
     }
     /// Finds and blends the synthesis model of the stamp at a signed history
     /// frame.
@@ -752,7 +755,7 @@ impl Formant {
             order = order.max(self.orders[stamp.previous]);
             for (i, value) in output[..order].iter_mut().enumerate() {
                 *value = mul14(16384 - stamp.blend, self.models[previous_base + i])
-                    .wrapping_add(mul14(stamp.blend, self.models[current_base + i]));
+                    .saturating_add(mul14(stamp.blend, self.models[current_base + i]));
             }
         } else {
             output[..order].copy_from_slice(&self.models[current_base..current_base + order]);
@@ -776,7 +779,7 @@ impl Formant {
         if stamp.blend < 16384 {
             for (i, value) in output[..order].iter_mut().enumerate() {
                 *value = mul14(16384 - stamp.blend, self.inverse[previous_base + i])
-                    .wrapping_add(mul14(stamp.blend, self.inverse[current_base + i]));
+                    .saturating_add(mul14(stamp.blend, self.inverse[current_base + i]));
             }
         } else {
             output[..order].copy_from_slice(&self.inverse[current_base..current_base + order]);
@@ -861,7 +864,7 @@ impl Formant {
         let mut coefficients = [0; MAX_SYNTHESIS_ORDER];
         let order = self.coefficients(position, &mut coefficients);
         let max_order = self.max_order;
-        let mut sum = 0_i32;
+        let mut sum = 0_i64;
         let mut cursor = self.history_index;
         for &coefficient in &coefficients[..order] {
             cursor = if cursor == 0 {
@@ -869,15 +872,15 @@ impl Formant {
             } else {
                 cursor - 1
             };
-            sum = sum.wrapping_add(self.history[0][cursor].wrapping_mul(coefficient));
+            sum = sum.saturating_add(i64::from(self.history[0][cursor]) * i64::from(coefficient));
         }
-        let sample = sample.wrapping_add(round_q14(sum));
+        let sample = sample.saturating_add(round_q14(sum));
         self.history[0][self.history_index] = sample;
         self.history_index += 1;
         if self.history_index == max_order {
             self.history_index = 0;
         }
-        round_q14(sample.wrapping_mul(self.width))
+        round_q14(i64::from(sample) * i64::from(self.width))
     }
     /// Synthesizes two Q14 channels with one stamped model for the two
     /// channels. Each channel has its own feedback history.
@@ -893,25 +896,26 @@ impl Formant {
         position: i32,
         context: &mut NumericContext,
     ) -> [i32; 2] {
-        let mid = samples[0].wrapping_add(samples[1]).wrapping_shr(1);
-        let noise = self.add_noise(mid, context).wrapping_sub(mid);
+        let mid = ((i64::from(samples[0]) + i64::from(samples[1])) >> 1) as i32;
+        let noise = self.add_noise(mid, context).saturating_sub(mid);
         for sample in &mut samples {
-            *sample = sample.wrapping_add(noise);
+            *sample = sample.saturating_add(noise);
         }
         let mut coefficients = [0; MAX_SYNTHESIS_ORDER];
         let order = self.coefficients(position, &mut coefficients);
         let max_order = self.max_order;
         for (channel, sample) in samples.iter_mut().enumerate() {
-            let mut sum = 0_i32;
+            let mut sum = 0_i64;
             for (i, &coefficient) in coefficients[..order].iter().enumerate() {
-                sum = sum.wrapping_add(
-                    self.history[channel][(self.history_index + max_order - i - 1) % max_order]
-                        .wrapping_mul(coefficient),
+                sum = sum.saturating_add(
+                    i64::from(
+                        self.history[channel][(self.history_index + max_order - i - 1) % max_order],
+                    ) * i64::from(coefficient),
                 );
             }
-            *sample = sample.wrapping_add(round_q14(sum));
+            *sample = sample.saturating_add(round_q14(sum));
             self.history[channel][self.history_index] = *sample;
-            *sample = round_q14(sample.wrapping_mul(self.width));
+            *sample = round_q14(i64::from(*sample) * i64::from(self.width));
         }
         self.history_index = (self.history_index + 1) % max_order;
         samples
