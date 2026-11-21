@@ -485,32 +485,34 @@ impl VoiceBank {
         }
     }
 
-    /// Advances one Q14 reader by `ratio` and starts a period crossfade if it
-    /// jumps at a boundary.
-    fn move_reader(&mut self, write: usize, voice: usize, ratio: Q14, period: Q6) -> Q14 {
-        let offset = self.delays[voice];
+    /// Advances one Q14 reader by `ratio` in `bounds`.
+    ///
+    /// `bounds` holds the upper limit, the lower limit and the Q14 period
+    /// jump. If the reader jumps, the method saves the old position and starts
+    /// the crossfade again.
+    #[inline]
+    fn step_reader(&mut self, voice: usize, ratio: Q14, bounds: (Q14, Q14, Q14)) -> Q14 {
+        let (upper, lower, jump) = bounds;
         self.old_positions[voice] = self.old_positions[voice] + ratio;
         let mut position = self.positions[voice] + ratio;
-        let write = write as i32;
-        let upper = position_of(write - 40 - offset);
-        let span = (period.to_bits() >> 6).wrapping_mul(12).wrapping_div(10);
-        let lower = position_of(
-            write
-                .wrapping_sub(span)
-                .wrapping_sub(40)
-                .wrapping_sub(offset),
-        );
         if position >= upper {
             self.old_positions[voice] = position;
             self.fades[voice] = Q14::ZERO;
-            position = position - period.rescale();
+            position = position - jump;
         } else if position <= lower {
             self.old_positions[voice] = position;
             self.fades[voice] = Q14::ZERO;
-            position = position + period.rescale();
+            position = position + jump;
         }
         self.positions[voice] = position;
         position
+    }
+
+    /// Advances one Q14 reader by `ratio` and starts a period crossfade if it
+    /// jumps at a boundary.
+    fn move_reader(&mut self, write: usize, voice: usize, ratio: Q14, period: Q6) -> Q14 {
+        let bounds = reader_bounds(write, period, self.delays[voice]);
+        self.step_reader(voice, ratio, bounds)
     }
 
     /// Interpolates `buffer` at `voice` and blends `old_positions` if a jump
@@ -538,6 +540,24 @@ impl VoiceBank {
 #[inline]
 fn position_of(frame: i32) -> Q14 {
     Q14::from_bits(frame.wrapping_shl(14))
+}
+
+/// Returns the upper limit, the lower limit and the Q14 period jump for a
+/// reader.
+///
+/// `offset` is an integer voice delay behind `write`.
+#[inline]
+fn reader_bounds(write: usize, period: Q6, offset: i32) -> (Q14, Q14, Q14) {
+    let write = write as i32;
+    let upper = position_of(write - 40 - offset);
+    let span = (period.to_bits() >> 6).wrapping_mul(12).wrapping_div(10);
+    let lower = position_of(
+        write
+            .wrapping_sub(span)
+            .wrapping_sub(40)
+            .wrapping_sub(offset),
+    );
+    (upper, lower, period.rescale())
 }
 
 /// The resynthesis stage.
@@ -1365,6 +1385,12 @@ impl Resynthesis {
         let mut lead_center = 0_i32;
         let mut lead_ratio = Q14::ONE;
         let mut final_ratio = Q14::ONE;
+        let bounds = reader_bounds(write, period, 0);
+        let harmony_gain = if is_active {
+            self.active.harmony_gain
+        } else {
+            self.shadow.harmony_gain
+        };
         for voice_slot in 0..5 {
             let mut current: Q14 = if voice_slot == 0 {
                 ratio
@@ -1381,21 +1407,31 @@ impl Resynthesis {
             final_ratio = current;
             if is_active {
                 self.voice_ratios[voice_slot] = current;
-                self.active.move_reader(write, voice_slot, current, period);
+                self.active.step_reader(voice_slot, current, bounds);
             } else {
-                self.shadow.move_reader(write, voice_slot, current, period);
+                self.shadow.step_reader(voice_slot, current, bounds);
             }
-            let harmony_gain = if is_active {
-                self.active.harmony_gain
-            } else {
-                self.shadow.harmony_gain
-            };
             let pan = if voice_slot > 0 {
-                if is_active {
-                    self.active.harmony_pan[voice_slot - 1]
+                let voice = voice_slot - 1;
+                let pan = if is_active {
+                    self.active.harmony_pan[voice]
                 } else {
-                    self.shadow.harmony_pan[voice_slot - 1]
+                    self.shadow.harmony_pan[voice]
+                };
+                // If the Q12 gain or the active bus gains are zero, the voice
+                // adds zero to the mix.
+                let mono_silent = self.stereo_mix == Q14::ONE || harmony_gain == Q14::ZERO;
+                let pan_silent =
+                    self.stereo_mix == Q14::ZERO || (pan[0].to_bits() | pan[1].to_bits()) == 0;
+                if self.harmony_gains[voice] == Q12::ZERO || (mono_silent && pan_silent) {
+                    if is_active {
+                        self.active.step_fade(voice_slot);
+                    } else {
+                        self.shadow.step_fade(voice_slot);
+                    }
+                    continue;
                 }
+                pan
             } else {
                 [Q14::ONE; 2]
             };
@@ -1643,12 +1679,12 @@ impl Resynthesis {
             self.control_counter += 1;
             if counter == CONTROL_DUE {
                 self.control_counter = 0;
+                let corrected_period = if ratio == Q14::ZERO {
+                    Q6::ZERO
+                } else {
+                    period.div(ratio)
+                };
                 for voice in 0..HARMONY_VOICES {
-                    let corrected_period = if ratio == Q14::ZERO {
-                        Q6::ZERO
-                    } else {
-                        period.div(ratio)
-                    };
                     let (voice_ratio, gain) = self.harmony.advance_voice(corrected_period, voice);
                     self.harmony_ratios[voice] = voice_ratio;
                     self.harmony_gains[voice] = gain;
