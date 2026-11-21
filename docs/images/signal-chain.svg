@@ -92,7 +92,7 @@
   <circle cx="325" cy="110" r="3.5" fill="var(--dry)"/>
   <circle cx="675" cy="110" r="3.5" fill="var(--dry)"/>
   <path class="dry" d="M325,110 V220 H675 V114" marker-end="url(#dryarrow)"/>
-  <text class="drytext" x="500" y="240"><tspan class="code">dry_mix</tspan>: the dry path, 1,543 frames of delay (default 0)</text>
+  <text class="drytext" x="500" y="240"><tspan class="code">dry_mix</tspan>: the dry path, 1,593 frames of delay (default 0)</text>
 
   <!-- Legend -->
   <rect class="node" x="10" y="266" width="26" height="16" rx="4"/>

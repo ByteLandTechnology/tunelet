@@ -191,10 +191,10 @@ impl WasmProcessor {
         self.input.len()
     }
 
-    /// The nominal resynthesis delay in frames.
+    /// The nominal resynthesis delay in frames: 1,593 at both sample rates.
     ///
-    /// Other signal paths have different timing. See the `latencyFrames`
-    /// property for the timing of the dry path and the voices.
+    /// The dry path also has a delay of 1,593 frames. Resampled voices, choir
+    /// delays and effects use different delays.
     #[wasm_bindgen(getter, js_name = latencyFrames)]
     pub fn latency_frames(&self) -> usize {
         self.processor.latency_frames()
@@ -271,8 +271,8 @@ impl WasmProcessor {
     /// Replaces the audio in a mono `Int16Array` with the stereo downmix.
     ///
     /// The timing, the events and the drain cancellation are the same as for
-    /// `process`. Peak feedback measures the stereo output before the downmix,
-    /// as in the native processor.
+    /// `process`. Peak feedback and telemetry measure the mono signal after the
+    /// downmix, as in the native processor.
     ///
     /// # Errors
     ///
@@ -338,8 +338,9 @@ impl WasmProcessor {
 
     /// Renders a mono tail block and returns its frame count.
     ///
-    /// The method fills the unused output with zeros. The downmix, completion
-    /// and feedback behavior are the same as for `drainMono`.
+    /// The method fills the unused output with zeros. The downmix and the peak
+    /// measurements are the same as for `processMono`. Completion is the same
+    /// as for `drain`.
     ///
     /// # Errors
     ///
@@ -374,7 +375,7 @@ impl WasmProcessor {
         Ok(self.processor.feedback().into_ts()?)
     }
 
-    /// Returns the feedback and clears only the stereo peak window.
+    /// Returns the feedback and clears only the peak window.
     ///
     /// The other feedback fields and all audio histories do not change.
     ///

@@ -172,7 +172,8 @@ voice. It disables the effects and the formant stage.
 | Output gain    | Linear gain, 0..=64                                         | 1              | `output_gain`            |
 
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+dry path starts after Warm and has a delay of 1,593 frames. All six reverb
+modes keep the stereo dry signal.
 
 ### Harmony sources
 
@@ -288,7 +289,7 @@ These calls read the state of the processor. They do not change the audio.
 
 | Call                 | Data                                                              |
 | -------------------- | ----------------------------------------------------------------- |
-| `feedback()`         | The pitch, the stereo peak, the correction ratio, the frame count |
+| `feedback()`         | The pitch, the output peak, the correction ratio, the frame count |
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
@@ -304,8 +305,9 @@ The telemetry includes these items:
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
 The peak windows of the telemetry are independent of the peak window of the
-feedback. The latency is nominal. Dry mixes, resampled voices and effects
-have different timing.
+feedback. In mono calls, the output and reverb wet peaks measure the audio
+after the downmix. The dry path has the 1,593-frame delay. Resampled voices,
+choir delays and effects use different delays.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
