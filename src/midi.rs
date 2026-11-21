@@ -5,11 +5,21 @@ use crate::{Error, MidiProblem};
 
 /// The supported MIDI note controls, with zero-based channel numbers.
 ///
-/// Use [`crate::ControlEvent::Midi`] for harmony. Use
-/// [`crate::ControlEvent::CorrectionMidi`] for the independent correction
-/// keyboard. The typed representation can contain `u8` values that are not
-/// valid. [`Self::validate`] and the event preflight of the processor check
-/// the MIDI ranges. Note numbers use A4 = 69 at 440 Hz.
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " Use [`crate::ControlEvent::Midi`] for harmony. Use",
+    doc = " [`crate::ControlEvent::CorrectionMidi`] for the independent correction",
+    doc = " keyboard. The typed representation can contain `u8` values that are not",
+    doc = " valid. [`Self::validate`] and the event preflight of the processor check",
+    doc = " the MIDI ranges. Note numbers use A4 = 69 at 440 Hz."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " Use a `\"midi\"` control event for harmony. Use a `\"correctionMidi\"`",
+    doc = " control event for the independent correction keyboard. The processor",
+    doc = " checks the channel, note and velocity ranges before it processes a",
+    doc = " block. Note numbers use A4 = 69 at 440 Hz."
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -25,7 +35,14 @@ pub enum MidiEvent {
         note: u8,
         /// The velocity, 0..=127.
         ///
-        /// Zero releases the note, as [`Self::NoteOff`] does.
+        #[cfg_attr(
+            not(all(feature = "wasm", target_arch = "wasm32")),
+            doc = " Zero releases the note, as [`Self::NoteOff`] does."
+        )]
+        #[cfg_attr(
+            all(feature = "wasm", target_arch = "wasm32"),
+            doc = " Zero releases the note, as `\"noteOff\"` does."
+        )]
         velocity: u8,
     },
     /// A note stops.

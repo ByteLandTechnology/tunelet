@@ -89,12 +89,27 @@ pub enum MultiVoiceMode {
 pub struct CorrectionConfig {
     /// Enables the selection of correction targets. The default is `true`.
     ///
-    /// If you disable correction, the ratio moves toward 1.0 with `retune_ms`
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " If you disable correction, the ratio moves toward 1.0 with `retune_ms`"
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " If you disable correction, the ratio moves toward 1.0 with `retuneMs`"
+    )]
     /// at the next tracking updates. The ratio does not change to 1.0
     /// immediately.
     pub enabled: bool,
-    /// The configured target pitch classes. The default is
-    /// [`NoteMask::CHROMATIC`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The configured target pitch classes. The default is",
+        doc = " [`NoteMask::CHROMATIC`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The configured target pitch classes. The default enables all twelve",
+        doc = " pitch classes."
+    )]
     ///
     /// All boolean masks are valid. MIDI can replace the active table. This
     /// replacement stays until this mask or `enabled` changes.
@@ -166,8 +181,16 @@ impl CorrectionConfig {
     tsify(large_number_types_as_bigints)
 )]
 pub struct ResynthesisConfig {
-    /// The acquisition sensitivity and the reporting bounds. The
-    /// default is [`PitchConfig::default`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The acquisition sensitivity and the reporting bounds. The",
+        doc = " default is [`PitchConfig::default`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The acquisition sensitivity and the reporting bounds. See",
+        doc = " `PitchConfig` for the defaults."
+    )]
     pub pitch: PitchConfig,
     /// The target notes and the retune time. The default is enabled
     /// chromatic correction with a retune time of zero.
@@ -181,7 +204,14 @@ pub struct ResynthesisConfig {
     pub pitch_ratio: f32,
     /// The vocal-tract changes and aspiration. They are disabled by default.
     pub formant: FormantConfig,
-    /// The voice arrangement. The default is [`MultiVoiceMode::Choir`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The voice arrangement. The default is [`MultiVoiceMode::Choir`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The voice arrangement. The default is `\"choir\"`."
+    )]
     ///
     /// Harmony renders the lead voice and a maximum of four harmony voices.
     pub mode: MultiVoiceMode,
@@ -208,14 +238,28 @@ pub struct ResynthesisConfig {
     pub choir_delay: f32,
     /// The stereo width of the choir, 0..=100%. The default is 100%.
     ///
-    /// The code uses this value only if `stereo_output` enables the voice pan
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The code uses this value only if `stereo_output` enables the voice pan"
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The code uses this value only if `stereoOutput` enables the voice pan"
+    )]
     /// and the choir has more than one voice.
     pub choir_spread_percent: f32,
     /// Enables a stereo pan for each voice. The default is `false`.
     ///
     /// This value is independent of the buffer layout of the process method.
     /// A change to this value resets some audio histories and the feedback.
-    /// [`crate::Processor::set_config`] gives the details.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " [`crate::Processor::set_config`] gives the details."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " `setConfig` gives the details."
+    )]
     pub stereo_output: bool,
     /// The controls for the four harmony voices. The default is MIDI-channel
     /// allocation.
@@ -225,7 +269,14 @@ pub struct ResynthesisConfig {
     pub harmony: HarmonyConfig,
     /// The pan gain of the harmony voices, 0..=1. The default is 0.5.
     ///
-    /// The code applies this gain only if `stereo_output` is `true`. The
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The code applies this gain only if `stereo_output` is `true`. The"
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The code applies this gain only if `stereoOutput` is `true`. The"
+    )]
     /// harmony path without pan does not use this control. It does not scale
     /// the lead voice.
     pub harmony_gain: f32,

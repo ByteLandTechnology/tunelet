@@ -28,7 +28,14 @@ pub struct PitchConfig {
     pub threshold: f32,
     /// The lower bound of the feedback in hertz (inclusive), 40..=2000.
     ///
-    /// The default is 40. It must be strictly less than `max_frequency_hz`.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The default is 40. It must be strictly less than `max_frequency_hz`."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The default is 40. It must be strictly less than `maxFrequencyHz`."
+    )]
     /// These bounds do not change the tracking, the correction or the
     /// resampling. A feedback query applies the current bounds to the kept
     /// analysis. It does not process another sample.
@@ -36,7 +43,14 @@ pub struct PitchConfig {
     /// The upper bound of the feedback in hertz (inclusive), 40..=2000.
     ///
     /// The default is 1100. It must be strictly greater than
-    /// `min_frequency_hz`. Results outside the bounds are reported as
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " `min_frequency_hz`. Results outside the bounds are reported as"
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " `minFrequencyHz`. Results outside the bounds are reported as"
+    )]
     /// unvoiced, with zero frequency and zero period.
     pub max_frequency_hz: f32,
 }

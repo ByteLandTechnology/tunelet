@@ -10,12 +10,22 @@ use crate::{Error, EventProblem, ProcessorConfig, ResynthesisConfig};
 
 /// A configuration or MIDI control that applies before a frame in the block.
 ///
-/// Give controls to a process call as [`TimedEvent`] values. The call borrows
-/// the slice only for that call. There is no heap allocation and no deferred
-/// queue. A stage event replaces all settings of that stage. To change one
-/// field, start from the current configuration of the processor.
-/// Configuration changes have the same effects on state as
-/// [`crate::Processor::set_config`].
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " Give controls to a process call as [`TimedEvent`] values. The call borrows",
+    doc = " the slice only for that call. There is no heap allocation and no deferred",
+    doc = " queue. A stage event replaces all settings of that stage. To change one",
+    doc = " field, start from the current configuration of the processor.",
+    doc = " Configuration changes have the same effects on state as",
+    doc = " [`crate::Processor::set_config`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " Give controls to a process call in `TimedEvent` objects. There is no",
+    doc = " deferred queue after the call. A stage event replaces all settings of",
+    doc = " that stage. To change one field, start from `config()`. Configuration",
+    doc = " changes have the same effects on state as `setConfig`."
+)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),

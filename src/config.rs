@@ -127,9 +127,18 @@ impl PrepareConfig {
 /// configuration does active pitch processing. It is not a bypass with zero
 /// latency.
 ///
-/// Change a copy, then apply it with [`crate::Processor::set_config`] or
-/// [`crate::ControlEvent::Configure`]. The validation examines all fields
-/// before a change has an effect. This includes the fields of disabled stages.
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " Change a copy, then apply it with [`crate::Processor::set_config`] or",
+    doc = " [`crate::ControlEvent::Configure`]. The validation examines all fields",
+    doc = " before a change has an effect. This includes the fields of disabled stages."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " Change a copy, then apply it with `setConfig` or a `\"configure\"`",
+    doc = " control event. The validation examines all fields before a change has",
+    doc = " an effect. This includes the fields of disabled stages."
+)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -150,7 +159,14 @@ pub struct ProcessorConfig {
     /// The stage for pitch tracking, correction, voice resynthesis and
     /// formant control.
     ///
-    /// The default is [`ResynthesisConfig::default`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The default is [`ResynthesisConfig::default`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " See `ResynthesisConfig` for the defaults."
+    )]
     pub resynthesis: ResynthesisConfig,
     /// The reverse-loop effect after resynthesis.
     ///

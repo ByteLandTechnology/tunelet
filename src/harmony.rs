@@ -34,10 +34,20 @@ const GAIN_RELEASE: Q12 = Q12::from_bits(81);
 
 /// The source of target periods for the four harmony voices.
 ///
-/// The default is [`Self::MidiChannels`]. The static interval and chord
-/// sources use the related [`HarmonyConfig`] fields. The MIDI sources use
-/// [`crate::ControlEvent::Midi`]. The configuration of the sources that are
-/// not selected is still validated and kept.
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " The default is [`Self::MidiChannels`]. The static interval and chord",
+    doc = " sources use the related [`HarmonyConfig`] fields. The MIDI sources use",
+    doc = " [`crate::ControlEvent::Midi`]. The configuration of the sources that are",
+    doc = " not selected is still validated and kept."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " The default is `\"midiChannels\"`. The static interval and chord sources",
+    doc = " use the related `HarmonyConfig` fields. The MIDI sources use `\"midi\"`",
+    doc = " control events. The configuration of the sources that are not selected",
+    doc = " is still validated and kept."
+)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -111,7 +121,14 @@ pub enum HarmonyScale {
     MinorMajorSeventh,
 }
 
-/// A named chord for [`HarmonySource::ChordByName`].
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " A named chord for [`HarmonySource::ChordByName`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " A named chord for `\"chordByName\"`."
+)]
 ///
 /// Each variant lists the semitones above the root. These values do not
 /// include the inversion, the key transposition, the register or the voicing
@@ -162,12 +179,26 @@ pub enum ChordName {
 }
 
 /// A diatonic chord with its root on a degree of the selected
-/// [`HarmonyScale`].
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " [`HarmonyScale`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " `HarmonyScale`."
+)]
 ///
 /// Triads use the root, third and fifth scale degrees. Seventh chords also
 /// use the seventh. Degrees above the seventh go into higher octaves. The
 /// degree names do not set a major or minor quality. The selected scale
-/// supplies the tones. The default is the tonic triad, [`Self::I`].
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " supplies the tones. The default is the tonic triad, [`Self::I`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " supplies the tones. The default is the tonic triad, `\"i\"`."
+)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
 #[cfg_attr(
@@ -261,7 +292,14 @@ pub enum Inversion {
     serde(rename_all = "camelCase")
 )]
 pub struct HarmonyConfig {
-    /// The pitch source. The default is [`HarmonySource::MidiChannels`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The pitch source. The default is [`HarmonySource::MidiChannels`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The pitch source. The default is `\"midiChannels\"`."
+    )]
     pub source: HarmonySource,
     /// The pitch class of the tonic. The default is C. Smart intervals, named
     /// chords and degree chords use it. It does not transpose direct MIDI
@@ -270,7 +308,14 @@ pub struct HarmonyConfig {
     /// The scale for smart intervals and degree chords. The default is major.
     pub scale: HarmonyScale,
     /// Four fixed semitone offsets, each in -24..=24. The default is all
-    /// zeros. [`HarmonySource::FixedInterval`] uses them. A value of 12 makes
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " zeros. [`HarmonySource::FixedInterval`] uses them. A value of 12 makes"
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " zeros. `\"fixedInterval\"` uses them. A value of 12 makes"
+    )]
     /// the pitch one octave higher.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
@@ -278,17 +323,38 @@ pub struct HarmonyConfig {
     )]
     pub chromatic_intervals: [i8; HARMONY_VOICES],
     /// Four offsets in scale steps, each in -14..=14. The default is all
-    /// zeros. [`HarmonySource::SmartInterval`] uses them. Seven steps make
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " zeros. [`HarmonySource::SmartInterval`] uses them. Seven steps make"
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " zeros. `\"smartInterval\"` uses them. Seven steps make"
+    )]
     /// the pitch one octave higher.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         tsify(type = "[number, number, number, number]")
     )]
     pub diatonic_intervals: [i8; HARMONY_VOICES],
-    /// The named chord for [`HarmonySource::ChordByName`]. The default is
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The named chord for [`HarmonySource::ChordByName`]. The default is"
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The named chord for `\"chordByName\"`. The default is"
+    )]
     /// major.
     pub chord: ChordName,
-    /// The chord on a scale degree for [`HarmonySource::ChordByDegree`]. The
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The chord on a scale degree for [`HarmonySource::ChordByDegree`]. The"
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The chord on a scale degree for `\"chordByDegree\"`. The"
+    )]
     /// default is I.
     pub degree: ChordDegree,
     /// The inversion for named chords and degree chords. The default is root
@@ -317,8 +383,16 @@ pub struct HarmonyConfig {
     pub portamento_ms: f32,
     /// The number of voices that sound in the interval sources, 0..=4.
     ///
-    /// The default is 4. [`HarmonySource::FixedInterval`] and
-    /// [`HarmonySource::SmartInterval`] use the first `voices` voices. The
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The default is 4. [`HarmonySource::FixedInterval`] and",
+        doc = " [`HarmonySource::SmartInterval`] use the first `voices` voices. The"
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The default is 4. `\"fixedInterval\"` and `\"smartInterval\"` use the",
+        doc = " first `voices` voices. The"
+    )]
     /// other voices release with the usual gain envelope. The chord and MIDI
     /// sources ignore this field. In JavaScript, the field is optional and
     /// a missing value gives the default.

@@ -5,7 +5,14 @@ use crate::filter::{Biquad, Design};
 use crate::numeric::fixed::{Fixed, Q14};
 use crate::{Error, SampleRate};
 
-/// The echo or reverberation network. The default is [`Self::Echo`].
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " The echo or reverberation network. The default is [`Self::Echo`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " The echo or reverberation network. The default is `\"echo\"`."
+)]
 ///
 /// All modes share one delay buffer. A mode change uses the same buffer
 /// contents and damping filter memories. Thus a transition can play audio
@@ -53,8 +60,15 @@ pub struct ReverbConfig {
     /// Enables the selected network. The default is `false`. In bypass, the
     /// histories do not change.
     pub enabled: bool,
-    /// The topology of the delay network. The default is
-    /// [`ReverbMode::Echo`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The topology of the delay network. The default is",
+        doc = " [`ReverbMode::Echo`]."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The topology of the delay network. The default is `\"echo\"`."
+    )]
     pub mode: ReverbMode,
     /// The wet fraction, 0..=1.
     ///

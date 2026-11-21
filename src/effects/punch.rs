@@ -41,8 +41,16 @@ pub struct PunchConfig {
     /// The transient emphasis without a unit, 0..=1.
     ///
     /// The default is 0.5. It sets the release half-life of the adaptive
-    /// follower: 5000 ms at 0, 250 ms at 0.5 and 1 ms at 1. The attack uses
-    /// `attack_ms`.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " follower: 5000 ms at 0, 250 ms at 0.5 and 1 ms at 1. The attack uses",
+        doc = " `attack_ms`."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " follower: 5000 ms at 0, 250 ms at 0.5 and 1 ms at 1. The attack uses",
+        doc = " `attackMs`."
+    )]
     pub impact: f32,
     /// The output ceiling of the saturation in dBFS, -96..=0.
     ///

@@ -42,7 +42,8 @@
 //! `free()` method.
 
 use crate::{
-    Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
+    ConfigProblem, Error, EventProblem, Feedback, PrepareConfig, Processor, ProcessorConfig,
+    SampleRate, Telemetry, TimedEvent,
 };
 use js_sys::{Float32Array, Int16Array};
 use serde::{Deserialize, Serialize};
@@ -73,7 +74,7 @@ pub struct BlockEvents(Vec<TimedEvent>);
 /// JavaScript `Error`.
 #[wasm_bindgen(js_name = defaultConfig)]
 pub fn default_config() -> Result<Ts<ProcessorConfig>, JsError> {
-    Ok(ProcessorConfig::default().into_ts()?)
+    ProcessorConfig::default().into_ts().map_err(ts_error)
 }
 
 /// A stateful PCM processor that JavaScript uses as the `Tunelet` class.
@@ -119,7 +120,7 @@ pub struct WasmProcessor {
 impl WasmProcessor {
     /// Prepares a processor and its reusable PCM buffers.
     ///
-    /// `sample_rate` must be 44100 or 48000. `max_block_frames` must be an
+    /// `sampleRate` must be 44100 or 48000. `maxBlockFrames` must be an
     /// integer in 1..=4294967295. It is a limit for each call, and smaller
     /// blocks and empty blocks are also valid. If you omit `config`, the
     /// processor uses the default configuration. The constructor validates
@@ -140,8 +141,8 @@ impl WasmProcessor {
     /// histories.
     #[wasm_bindgen(constructor)]
     pub fn new(
-        sample_rate: f64,
-        max_block_frames: f64,
+        #[wasm_bindgen(js_name = sampleRate)] sample_rate: f64,
+        #[wasm_bindgen(js_name = maxBlockFrames)] max_block_frames: f64,
         config: Option<Ts<ProcessorConfig>>,
     ) -> Result<WasmProcessor, JsError> {
         // Accept JavaScript numbers without the u32 coercion of wasm-bindgen.
@@ -149,22 +150,28 @@ impl WasmProcessor {
         let rate = match sample_rate {
             44100.0 => SampleRate::Hz44100,
             48000.0 => SampleRate::Hz48000,
-            _ => return Err(JsError::new("sampleRate must be 44100 or 48000")),
+            _ => {
+                let value = format_js_number(sample_rate);
+                return Err(JsError::new(&format!(
+                    "sampleRate is {value}, must be 44100 or 48000"
+                )));
+            }
         };
         if !(1.0..=f64::from(u32::MAX)).contains(&max_block_frames)
             || max_block_frames.fract() != 0.0
         {
-            return Err(JsError::new(
-                "maxBlockFrames must be an integer in 1..=4294967295",
-            ));
+            let value = format_js_number(max_block_frames);
+            return Err(JsError::new(&format!(
+                "maxBlockFrames is {value}, must be an integer in 1..=4294967295"
+            )));
         }
         let max_block_frames = max_block_frames as usize;
-        let preparation = PrepareConfig::new(rate, max_block_frames)?;
+        let preparation = PrepareConfig::new(rate, max_block_frames).map_err(wasm_error)?;
         let config = match config {
-            Some(value) => value.to_rust()?,
+            Some(value) => value.to_rust().map_err(ts_error)?,
             None => ProcessorConfig::default(),
         };
-        let processor = Processor::new(preparation, config)?;
+        let processor = Processor::new(preparation, config).map_err(wasm_error)?;
         Ok(Self {
             processor,
             input: pcm_buffer(max_block_frames)?,
@@ -209,7 +216,7 @@ impl WasmProcessor {
     ///
     /// If the conversion to a JavaScript object fails, this method throws.
     pub fn config(&self) -> Result<Ts<ProcessorConfig>, JsError> {
-        Ok(self.processor.config().into_ts()?)
+        self.processor.config().into_ts().map_err(ts_error)
     }
 
     /// Decodes and validates a configuration, then replaces the complete
@@ -224,7 +231,8 @@ impl WasmProcessor {
     /// After an error, all processor state and any active drain stay the same.
     #[wasm_bindgen(js_name = setConfig)]
     pub fn set_config(&mut self, config: Ts<ProcessorConfig>) -> Result<(), JsError> {
-        self.processor.set_config(config.to_rust()?)?;
+        let config = config.to_rust().map_err(ts_error)?;
+        self.processor.set_config(config).map_err(wasm_error)?;
         Ok(())
     }
 
@@ -252,17 +260,19 @@ impl WasmProcessor {
         events: Option<Ts<BlockEvents>>,
     ) -> Result<(), JsError> {
         let frames = input.length() as usize;
-        Error::check_length("left", frames, left.length() as usize)?;
-        Error::check_length("right", frames, right.length() as usize)?;
-        self.check_frames(frames)?;
+        Error::check_length("left", frames, left.length() as usize).map_err(wasm_error)?;
+        Error::check_length("right", frames, right.length() as usize).map_err(wasm_error)?;
+        self.check_frames(frames).map_err(wasm_error)?;
         let events = decode_events(events)?;
         input.copy_to(&mut self.input[..frames]);
-        self.processor.process_planar(
-            &self.input[..frames],
-            &mut self.left[..frames],
-            &mut self.right[..frames],
-            &events.0,
-        )?;
+        self.processor
+            .process_planar(
+                &self.input[..frames],
+                &mut self.left[..frames],
+                &mut self.right[..frames],
+                &events.0,
+            )
+            .map_err(wasm_error)?;
         left.copy_from(&self.left[..frames]);
         right.copy_from(&self.right[..frames]);
         Ok(())
@@ -285,11 +295,12 @@ impl WasmProcessor {
         events: Option<Ts<BlockEvents>>,
     ) -> Result<(), JsError> {
         let frames = audio.length() as usize;
-        self.check_frames(frames)?;
+        self.check_frames(frames).map_err(wasm_error)?;
         let events = decode_events(events)?;
         audio.copy_to(&mut self.input[..frames]);
         self.processor
-            .process_mono_in_place(&mut self.input[..frames], &events.0)?;
+            .process_mono_in_place(&mut self.input[..frames], &events.0)
+            .map_err(wasm_error)?;
         audio.copy_from(&self.input[..frames]);
         Ok(())
     }
@@ -326,11 +337,12 @@ impl WasmProcessor {
     /// drain state do not change.
     pub fn drain(&mut self, left: &Int16Array, right: &Int16Array) -> Result<usize, JsError> {
         let frames = left.length() as usize;
-        Error::check_length("right", frames, right.length() as usize)?;
-        self.check_frames(frames)?;
+        Error::check_length("right", frames, right.length() as usize).map_err(wasm_error)?;
+        self.check_frames(frames).map_err(wasm_error)?;
         let count = self
             .processor
-            .drain_planar(&mut self.left[..frames], &mut self.right[..frames])?;
+            .drain_planar(&mut self.left[..frames], &mut self.right[..frames])
+            .map_err(wasm_error)?;
         left.copy_from(&self.left[..frames]);
         right.copy_from(&self.right[..frames]);
         Ok(count)
@@ -348,8 +360,11 @@ impl WasmProcessor {
     #[wasm_bindgen(js_name = drainMono)]
     pub fn drain_mono(&mut self, audio: &Int16Array) -> Result<usize, JsError> {
         let frames = audio.length() as usize;
-        self.check_frames(frames)?;
-        let count = self.processor.drain_mono(&mut self.input[..frames])?;
+        self.check_frames(frames).map_err(wasm_error)?;
+        let count = self
+            .processor
+            .drain_mono(&mut self.input[..frames])
+            .map_err(wasm_error)?;
         audio.copy_from(&self.input[..frames]);
         Ok(count)
     }
@@ -371,7 +386,7 @@ impl WasmProcessor {
     ///
     /// If the conversion to a JavaScript object fails, this method throws.
     pub fn feedback(&self) -> Result<Ts<Feedback>, JsError> {
-        Ok(self.processor.feedback().into_ts()?)
+        self.processor.feedback().into_ts().map_err(ts_error)
     }
 
     /// Returns the feedback and clears only the stereo peak window.
@@ -385,7 +400,7 @@ impl WasmProcessor {
     /// object.
     #[wasm_bindgen(js_name = takeFeedback)]
     pub fn take_feedback(&mut self) -> Result<Ts<Feedback>, JsError> {
-        let feedback = self.processor.feedback().into_ts()?;
+        let feedback = self.processor.feedback().into_ts().map_err(ts_error)?;
         self.processor.take_feedback();
         Ok(feedback)
     }
@@ -401,7 +416,7 @@ impl WasmProcessor {
     ///
     /// If the conversion to a JavaScript object fails, this method throws.
     pub fn telemetry(&self) -> Result<Ts<Telemetry>, JsError> {
-        Ok(self.processor.telemetry().into_ts()?)
+        self.processor.telemetry().into_ts().map_err(ts_error)
     }
 
     /// Returns the telemetry and clears only its three peak windows.
@@ -415,7 +430,7 @@ impl WasmProcessor {
     /// object.
     #[wasm_bindgen(js_name = takeTelemetry)]
     pub fn take_telemetry(&mut self) -> Result<Ts<Telemetry>, JsError> {
-        let telemetry = self.processor.telemetry().into_ts()?;
+        let telemetry = self.processor.telemetry().into_ts().map_err(ts_error)?;
         self.processor.take_telemetry();
         Ok(telemetry)
     }
@@ -448,18 +463,19 @@ impl WasmProcessor {
     #[wasm_bindgen(js_name = formantEnvelope)]
     pub fn formant_envelope(
         &mut self,
-        max_frequency_hz: f32,
+        #[wasm_bindgen(js_name = maxFrequencyHz)] max_frequency_hz: f32,
         input: &Float32Array,
         output: &Float32Array,
     ) -> Result<bool, JsError> {
         let points = input.length() as usize;
         // Check before the buffers become longer for a call that cannot succeed.
-        Error::check_length("output", points, output.length() as usize)?;
+        Error::check_length("output", points, output.length() as usize).map_err(wasm_error)?;
         let analysis = envelope_buffer(&mut self.envelope_input, points)?;
         let synthesis = envelope_buffer(&mut self.envelope_output, points)?;
         let valid = self
             .processor
-            .formant_envelope(max_frequency_hz, analysis, synthesis)?;
+            .formant_envelope(max_frequency_hz, analysis, synthesis)
+            .map_err(wasm_error)?;
         input.copy_from(analysis);
         output.copy_from(synthesis);
         Ok(valid)
@@ -493,9 +509,100 @@ impl WasmProcessor {
 /// occurs. If the caller gives an array, the decode can allocate storage.
 fn decode_events(events: Option<Ts<BlockEvents>>) -> Result<BlockEvents, JsError> {
     Ok(match events {
-        Some(value) => value.to_rust()?,
+        Some(value) => value.to_rust().map_err(ts_error)?,
         None => BlockEvents::default(),
     })
+}
+
+/// Formats a JavaScript `number` for error messages.
+fn format_js_number(value: f64) -> String {
+    if value == f64::INFINITY {
+        String::from("Infinity")
+    } else if value == f64::NEG_INFINITY {
+        String::from("-Infinity")
+    } else {
+        value.to_string()
+    }
+}
+
+/// Converts a dotted `snake_case` field path into a `camelCase` JavaScript
+/// property path, with an optional array index.
+fn format_js_field(field: &str, index: Option<usize>) -> String {
+    let mut result = String::with_capacity(field.len() + 4);
+    let mut upper_next = false;
+    for ch in field.chars() {
+        if ch == '_' {
+            upper_next = true;
+        } else if upper_next {
+            result.push(ch.to_ascii_uppercase());
+            upper_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    if let Some(slot) = index {
+        use std::fmt::Write as _;
+        let _ = write!(result, "[{slot}]");
+    }
+    result
+}
+
+/// Formats a `ConfigProblem` with `camelCase` JavaScript property paths.
+fn format_js_config_problem(problem: ConfigProblem) -> String {
+    match problem {
+        ConfigProblem::Unordered {
+            value,
+            other,
+            other_value,
+        } => {
+            let other = format_js_field(other, None);
+            format!("is {value}, must be below {other} ({other_value})")
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Converts a native `Error` into a `JsError` with `camelCase` JavaScript
+/// property paths.
+fn wasm_error(error: Error) -> JsError {
+    let message = match error {
+        Error::InvalidConfig {
+            field,
+            index,
+            problem,
+        } => {
+            let path = format_js_field(field, index);
+            let detail = format_js_config_problem(problem);
+            format!("invalid config: {path} {detail}")
+        }
+        Error::InvalidEvent {
+            index,
+            problem:
+                EventProblem::Config {
+                    field,
+                    index: slot,
+                    problem,
+                },
+        } => {
+            let path = format_js_field(field, slot);
+            let detail = format_js_config_problem(problem);
+            format!("event {index}: {path} {detail}")
+        }
+        other => other.to_string(),
+    };
+    JsError::new(&message)
+}
+
+/// Rewrites Rust module paths in `tsify` conversion errors to public
+/// TypeScript names.
+fn ts_error(error: tsify::Error) -> JsError {
+    let message = error
+        .to_string()
+        .replace("tunelet::wasm::BlockEvents", "TimedEvent[]")
+        .replace("tunelet::config::ProcessorConfig", "ProcessorConfig")
+        .replace("tunelet::processor::Feedback", "Feedback")
+        .replace("tunelet::processor::Telemetry", "Telemetry");
+    JsError::new(&message)
 }
 
 /// Returns the first `points` entries of a reusable envelope buffer. If the

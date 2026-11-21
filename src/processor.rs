@@ -698,11 +698,20 @@ impl Processor {
 
 /// A snapshot of the pitch analysis and the output level that you can copy.
 ///
-/// Get it with [`Processor::feedback`] or [`Processor::take_feedback`]. The
-/// pitch fields describe the tracked input and the correction target. The
-/// peak measures the final clipped stereo output. `Default` gives a snapshot
-/// with all zeros and no target. It does not read the nominal latency of a
-/// prepared processor.
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " Get it with [`Processor::feedback`] or [`Processor::take_feedback`]. The",
+    doc = " pitch fields describe the tracked input and the correction target. The",
+    doc = " peak measures the final clipped stereo output. `Default` gives a snapshot",
+    doc = " with all zeros and no target. It does not read the nominal latency of a",
+    doc = " prepared processor."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " Get it with `feedback` or `takeFeedback`. The pitch fields describe the",
+    doc = " tracked input and the correction target. The peak measures the final",
+    doc = " clipped stereo output."
+)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -721,7 +730,11 @@ pub struct Feedback {
     /// The reported input pitch period in samples, with fractional samples.
     ///
     /// It is zero if the input is unvoiced or outside the reporting bounds of
-    /// [`crate::PitchConfig`].
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " [`crate::PitchConfig`]."
+    )]
+    #[cfg_attr(all(feature = "wasm", target_arch = "wasm32"), doc = " `PitchConfig`.")]
     pub period_samples: f32,
     /// The reported input pitch frequency in hertz.
     ///
@@ -742,10 +755,20 @@ pub struct Feedback {
     /// other cases, the value is the input pitch as a fractional MIDI note. It
     /// is not the final pitch of shifted output or harmony output.
     ///
-    /// The value is `None` if [`voiced`](Self::voiced) is `false`, and only
-    /// then. This occurs if the input is unvoiced or if its frequency is
-    /// outside the current reporting bounds. A target table that has no
-    /// selected target does not give `None`.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The value is `None` if [`voiced`](Self::voiced) is `false`, and only",
+        doc = " then. This occurs if the input is unvoiced or if its frequency is",
+        doc = " outside the current reporting bounds. A target table that has no",
+        doc = " selected target does not give `None`."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The value is `undefined` if `voiced` is `false`, and only then. This",
+        doc = " occurs if the input is unvoiced or if its frequency is outside the",
+        doc = " current reporting bounds. A target table that has no selected target",
+        doc = " does not give `undefined`."
+    )]
     pub target_midi_note: Option<f32>,
     /// This field is `true` if the current pitch estimate is positive and
     /// inside the current reporting bounds.
@@ -756,17 +779,41 @@ pub struct Feedback {
     /// The largest absolute clipped stereo sample, divided by 32768.
     ///
     /// The peak window starts at construction, at a reset, at a change of
-    /// stereo output or at a call to [`Processor::take_feedback`]. The value
-    /// is in 0..=32767/32768. The mono downmix occurs after this measurement.
-    /// [`Processor::feedback`] does not clear the value.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " stereo output or at a call to [`Processor::take_feedback`]. The value",
+        doc = " is in 0..=32767/32768. The mono downmix occurs after this measurement.",
+        doc = " [`Processor::feedback`] does not clear the value."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " stereo output or at a call to `takeFeedback`. The value is in",
+        doc = " 0..=32767/32768. The mono downmix occurs after this measurement.",
+        doc = " `feedback` does not clear the value."
+    )]
     pub peak_level: f32,
     /// The number of frames processed since construction or the last reset,
     /// with drain frames included.
     ///
-    /// The count saturates at `u64::MAX`. Drain completion resets it in the
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The count saturates at `u64::MAX`. Drain completion resets it in the"
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The count saturates at the maximum unsigned 64-bit integer. Drain",
+        doc = " completion resets it in the"
+    )]
     /// last drain call.
     pub processed_frames: u64,
-    /// The nominal resynthesis latency, as [`Processor::latency_frames`] gives.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The nominal resynthesis latency, as [`Processor::latency_frames`] gives."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The nominal resynthesis latency, as `latencyFrames` gives."
+    )]
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(serialize_with = "crate::wasm::serialize_frame_count"),
@@ -778,14 +825,27 @@ pub struct Feedback {
 /// A snapshot of the voices, the levels and the effect state that you can
 /// copy.
 ///
-/// Get it with [`Processor::telemetry`] or [`Processor::take_telemetry`]. The
-/// telemetry is for meters and displays. No audio calculation reads it.
-/// `Default` gives a snapshot with all zeros.
-///
-/// The three peak fields measure a window. The window starts at
-/// construction, at a reset, at a change of stereo output or at a call to
-/// [`Processor::take_telemetry`]. This window is independent of the peak
-/// window of [`Feedback`].
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    doc = " Get it with [`Processor::telemetry`] or [`Processor::take_telemetry`]. The",
+    doc = " telemetry is for meters and displays. No audio calculation reads it.",
+    doc = " `Default` gives a snapshot with all zeros.",
+    doc = "",
+    doc = " The three peak fields measure a window. The window starts at",
+    doc = " construction, at a reset, at a change of stereo output or at a call to",
+    doc = " [`Processor::take_telemetry`]. This window is independent of the peak",
+    doc = " window of [`Feedback`]."
+)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    doc = " Get it with `telemetry` or `takeTelemetry`. The telemetry is for",
+    doc = " meters and displays. No audio calculation reads it.",
+    doc = "",
+    doc = " The three peak fields measure a window. The window starts at",
+    doc = " construction, at a reset, at a change of stereo output or at a call to",
+    doc = " `takeTelemetry`. This window is independent of the peak window of",
+    doc = " `Feedback`."
+)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -795,7 +855,14 @@ pub struct Feedback {
 )]
 pub struct Telemetry {
     /// The number of frames processed since construction or the last reset,
-    /// as [`Feedback::processed_frames`] gives.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " as [`Feedback::processed_frames`] gives."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " as `Feedback.processedFrames` gives."
+    )]
     pub processed_frames: u64,
     /// The largest absolute input sample in the window, divided by 32768.
     ///
@@ -819,17 +886,34 @@ pub struct Telemetry {
     /// The value is 1 for a signal that repeats exactly at the tracked
     /// period. It is 0 for a signal with no relation between cycles and
     /// during pitch acquisition. Use it as a confidence score for
-    /// [`Feedback::voiced`]. The tracker updates the related sums on each
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " [`Feedback::voiced`]. The tracker updates the related sums on each"
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " `Feedback.voiced`. The tracker updates the related sums on each"
+    )]
     /// frame.
     pub clarity: f32,
     /// This field is `true` if the pitch tracker follows a period. It is
     /// `false` during pitch acquisition.
     pub tracking: bool,
-    /// The number of valid entries in [`voice_ratios`](Self::voice_ratios)
-    /// and [`voice_gains`](Self::voice_gains).
-    ///
-    /// The value is 5 in Harmony mode. In Choir mode, it is
-    /// [`crate::ResynthesisConfig::choir_voices`], in 1..=16.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " The number of valid entries in [`voice_ratios`](Self::voice_ratios)",
+        doc = " and [`voice_gains`](Self::voice_gains).",
+        doc = "",
+        doc = " The value is 5 in Harmony mode. In Choir mode, it is",
+        doc = " [`crate::ResynthesisConfig::choir_voices`], in 1..=16."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " The number of valid entries in `voiceRatios` and `voiceGains`.",
+        doc = "",
+        doc = " The value is 5 in Harmony mode. In Choir mode, it is",
+        doc = " `ResynthesisConfig.choirVoices`, in 1..=16."
+    )]
     pub voice_count: u8,
     /// The pitch ratio of each voice on the last frame, where 1 is the input
     /// pitch.
@@ -838,10 +922,21 @@ pub struct Telemetry {
     /// harmony voices. In Choir mode, the entries after the lead are the
     /// secondary voices. Each ratio includes the correction, the configured
     /// pitch shift and the ratio of the voice. The entries after
-    /// [`voice_count`](Self::voice_count) are zero.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " [`voice_count`](Self::voice_count) are zero."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " `voiceCount` are zero."
+    )]
     pub voice_ratios: [f32; 16],
     /// The linear gain of each voice, in the order of
-    /// [`voice_ratios`](Self::voice_ratios).
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " [`voice_ratios`](Self::voice_ratios)."
+    )]
+    #[cfg_attr(all(feature = "wasm", target_arch = "wasm32"), doc = " `voiceRatios`.")]
     ///
     /// The lead and the choir voices have a gain of 1. The gain of a harmony
     /// voice includes the MIDI velocity gain, in 0..=3.98095703125. MIDI
@@ -864,10 +959,24 @@ pub struct Telemetry {
     /// The value is 1 while Warm is disabled.
     pub warm_gain: f32,
     /// The length of the Alien loop in frames, as
-    /// [`crate::AlienConfig::loop_frames`] gives.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " [`crate::AlienConfig::loop_frames`] gives."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " `AlienConfig.loopFrames` gives."
+    )]
     pub alien_loop_frames: u32,
     /// The current frame in the Alien loop. It is less than
-    /// [`alien_loop_frames`](Self::alien_loop_frames).
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " [`alien_loop_frames`](Self::alien_loop_frames)."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " `alienLoopFrames`."
+    )]
     ///
     /// The reverse reader is two times this number of frames behind the
     /// recording position. The value advances also while Alien is disabled.
@@ -876,6 +985,13 @@ pub struct Telemetry {
     ///
     /// The count increases every 441 frames while the formant stage is
     /// enabled. Compare two values to find if
-    /// [`Processor::formant_envelope`] can give a new result.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        doc = " [`Processor::formant_envelope`] can give a new result."
+    )]
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        doc = " `formantEnvelope` can give a new result."
+    )]
     pub formant_generation: u32,
 }
