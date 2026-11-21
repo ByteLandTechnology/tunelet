@@ -6,7 +6,7 @@
  * and the same Wasm binary. This module exports `Tunelet`, `TuneletError`,
  * `defaultConfig`, `initSync`, `loadTunelet` and the public TypeScript types.
  */
-import {
+import rawInit, {
   Tunelet as RawTunelet,
   defaultConfig as rawDefaultConfig,
   initSync as rawInitSync,
@@ -405,7 +405,7 @@ async function instantiateFromInput(
   validateWasmModule(module);
 
   try {
-    const output = rawInitSync({ module });
+    const output = await rawInit({ module_or_path: module });
     return { source, output };
   } catch (error: unknown) {
     throw new TuneletError(
