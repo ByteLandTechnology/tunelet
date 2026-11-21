@@ -18,7 +18,7 @@ use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
 )]
 pub(crate) struct EnvelopeKey {
     /// The active flag, the bank epoch, the stamp fields and the Q14 width.
-    stamp: (bool, u64, usize, usize, i32, i32),
+    stamp: (bool, u64, u8, u8, u16, i32),
     /// The IEEE 754 bits of the validated upper frequency in hertz.
     max_frequency_bits: u32,
     /// The validated number of frequency bins in each slice.

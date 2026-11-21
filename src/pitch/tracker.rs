@@ -65,6 +65,8 @@ pub(crate) struct PitchTracker {
     /// A request to clear the acquisition tables at the next decimated input
     /// sample.
     first: bool,
+    /// The number of frames in `raw` since construction or the last reset.
+    written: u16,
     /// Low-pass filtered and decimated Q14 audio, with space for two maximum
     /// acquisition lags.
     detection: [i32; 2 * ACQUISITION_LAGS],
@@ -120,6 +122,7 @@ impl PitchTracker {
             write: 0,
             detecting: true,
             first: true,
+            written: 0,
             detection: [0; 2 * ACQUISITION_LAGS],
             detection_index: 0,
             detection_count: 0,
@@ -148,7 +151,13 @@ impl PitchTracker {
     /// The acquisition tables clear at the next decimated call. The previous
     /// usable period stays until another tracking update replaces it.
     pub(crate) fn reset(&mut self) {
-        self.raw.fill(0);
+        let written = usize::from(self.written);
+        if written == HISTORY {
+            self.raw.fill(0);
+        } else {
+            self.raw[1..written + 1].fill(0);
+        }
+        self.written = 0;
         self.write = 0;
         self.restart();
         for pre in &mut self.pre {
@@ -561,6 +570,9 @@ impl PitchTracker {
         self.write += 1;
         if self.write == HISTORY {
             self.write = 0;
+        }
+        if usize::from(self.written) < HISTORY {
+            self.written += 1;
         }
         self.raw[self.write] = sample;
         let mut filtered = Q14::from_bits(sample);
