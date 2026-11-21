@@ -1282,9 +1282,11 @@ impl Resynthesis {
                 5
             };
             let shift = position_of(HISTORY as i32);
-            for voice in 0..voices {
-                self.positions[voice] = self.positions[voice] - shift;
-                self.old_positions[voice] = self.old_positions[voice] - shift;
+            for position in &mut self.positions[..voices] {
+                *position = *position - shift;
+            }
+            for position in &mut self.old_positions[..voices] {
+                *position = *position - shift;
             }
         }
         if step.restarted {
