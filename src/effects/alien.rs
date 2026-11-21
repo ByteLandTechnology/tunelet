@@ -74,6 +74,8 @@ pub(crate) struct Alien {
     /// The validated loop length. It is not more than half of the history
     /// capacity.
     loop_len: usize,
+    /// The number of frames in `buffer` since construction or the last reset.
+    written: usize,
 }
 impl Alien {
     /// Allocates a silent stereo ring from validated loop settings.
@@ -84,6 +86,7 @@ impl Alien {
             read: 0,
             phase: 0,
             loop_len: config.loop_frames as usize,
+            written: 0,
         }
     }
     /// Applies a validated configuration, keeps the recorded audio and clamps
@@ -103,7 +106,8 @@ impl Alien {
     /// Clears the recorded audio and sets both cursors to zero, but keeps the
     /// configured loop.
     pub(crate) fn reset(&mut self) {
-        self.buffer.fill([Q14::default(); 2]);
+        self.buffer[..self.written].fill([Q14::default(); 2]);
+        self.written = 0;
         self.read = 0;
         self.phase = 0;
     }
@@ -114,6 +118,9 @@ impl Alien {
     /// validated loop limit keeps that subtraction in a single ring wrap.
     pub(crate) fn process_sample(&mut self, input: [Q14; 2]) -> [Q14; 2] {
         self.buffer[self.read] = input;
+        if self.written < HISTORY_FRAMES {
+            self.written += 1;
+        }
         let result = if self.config.enabled {
             let read = self.read + HISTORY_FRAMES - self.phase * 2;
             let read = if read >= HISTORY_FRAMES {
