@@ -345,7 +345,7 @@ impl PitchTracker {
         }
         let maximum = ((self.detection_count - 6) / 2).min(ACQUISITION_LAGS as i32 - 1) as usize;
         let mut normalized = [0_i32; ACQUISITION_LAGS];
-        #[expect(
+        #[allow(
             clippy::needless_range_loop,
             reason = "one lag index drives three tables in the hot loop"
         )]
@@ -693,30 +693,39 @@ impl PitchTracker {
                             .wrapping_sub(mul14(first, first).wrapping_add(mul14(second, second)));
                         self.tracking_cross[0] = self.cross_at(self.base);
                     } else if best > 21 {
-                        self.base += 1;
-                        best -= 1;
-                        self.tracking_energy.copy_within(1..TRACKING_LAGS, 0);
-                        self.tracking_cross.copy_within(1..TRACKING_LAGS, 0);
-                        let total = self.base + TRACKING_LAGS as i32 - 1;
-                        let first = self.raw[ring(self.write as i32 - total * 2 + 2)];
-                        let second = self.raw[ring(self.write as i32 - total * 2 + 1)];
-                        self.tracking_energy[TRACKING_LAGS - 1] = self.tracking_energy
-                            [TRACKING_LAGS - 2]
-                            .wrapping_add(mul14(second, second).wrapping_add(mul14(first, first)));
-                        self.tracking_cross[TRACKING_LAGS - 1] = self.cross_at(total);
-                    }
-                    match self.interpolated_period(best) {
-                        Some(candidate)
-                            if candidate >= self.min_period && candidate <= self.max_period =>
-                        {
-                            self.period = candidate;
-                            self.previous_period = self.period;
-                            self.best = best;
-                            step.tracking_update = true;
-                        }
-                        _ => {
+                        let next_base = self.base + 1;
+                        if next_base + TRACKING_LAGS as i32 > (HISTORY / 2) as i32 {
                             self.restart();
                             step.restarted = true;
+                        } else {
+                            self.base = next_base;
+                            best -= 1;
+                            self.tracking_energy.copy_within(1..TRACKING_LAGS, 0);
+                            self.tracking_cross.copy_within(1..TRACKING_LAGS, 0);
+                            let total = self.base + TRACKING_LAGS as i32 - 1;
+                            let first = self.raw[ring(self.write as i32 - total * 2 + 2)];
+                            let second = self.raw[ring(self.write as i32 - total * 2 + 1)];
+                            self.tracking_energy[TRACKING_LAGS - 1] =
+                                self.tracking_energy[TRACKING_LAGS - 2].wrapping_add(
+                                    mul14(second, second).wrapping_add(mul14(first, first)),
+                                );
+                            self.tracking_cross[TRACKING_LAGS - 1] = self.cross_at(total);
+                        }
+                    }
+                    if !self.detecting {
+                        match self.interpolated_period(best) {
+                            Some(candidate)
+                                if candidate >= self.min_period && candidate <= self.max_period =>
+                            {
+                                self.period = candidate;
+                                self.previous_period = self.period;
+                                self.best = best;
+                                step.tracking_update = true;
+                            }
+                            _ => {
+                                self.restart();
+                                step.restarted = true;
+                            }
                         }
                     }
                 }
