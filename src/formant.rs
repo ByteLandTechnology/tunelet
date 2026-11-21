@@ -736,15 +736,27 @@ impl Formant {
         input: &mut [f32],
         output: &mut [f32],
     ) -> bool {
-        let mut synthesis = [0; MAX_ORDER];
-        let order = self.coefficients(position, &mut synthesis);
+        let mut raw_synthesis = [0; MAX_ORDER];
+        let order = self.coefficients(position, &mut raw_synthesis);
         if order == 0 {
             input.fill(0.0);
             output.fill(0.0);
             return false;
         }
-        let mut analysis = [0; MAX_ORDER];
-        self.analysis_coefficients(position, &mut analysis);
+        if input.is_empty() {
+            return true;
+        }
+        let mut raw_analysis = [0; MAX_ORDER];
+        self.analysis_coefficients(position, &mut raw_analysis);
+        let scale = 1.0 / 16384.0;
+        let mut analysis = [0.0; ORDER];
+        for (scaled, &coefficient) in analysis.iter_mut().zip(&raw_analysis[..ORDER]) {
+            *scaled = coefficient as f64 * scale;
+        }
+        let mut synthesis = [0.0; MAX_ORDER];
+        for (scaled, &coefficient) in synthesis[..order].iter_mut().zip(&raw_synthesis[..order]) {
+            *scaled = coefficient as f64 * scale;
+        }
         let points = input.len();
         let step = if points > 1 {
             std::f64::consts::PI * 2.0 * max_frequency_hz as f64
@@ -753,28 +765,145 @@ impl Formant {
         } else {
             0.0
         };
-        let glottal = self.glottal as f64 / 16384.0;
-        let width = self.width as f64 / 16384.0;
+        let (step_sine, step_cosine) = step.sin_cos();
+        let glottal = self.glottal as f64 * scale;
+        let width = self.width as f64 * scale;
+        let shared = ORDER.min(order);
+        let (mut cosine, mut sine) = (1.0, 0.0);
+        let (input_chunks, input_tail) = input.as_chunks_mut::<4>();
+        let (output_chunks, output_tail) = output.as_chunks_mut::<4>();
         // |1 - sum(c[i] * z^-(i+1))| at z = e^(j * omega).
-        let magnitude = |coefficients: &[i32], cosine: f64, sine: f64| {
-            let (mut real, mut imaginary) = (1.0, 0.0);
+        for (chunk_index, (inputs, outputs)) in input_chunks
+            .iter_mut()
+            .zip(output_chunks.iter_mut())
+            .enumerate()
+        {
+            let base = chunk_index * 4;
+            if base > 0 {
+                if base.is_multiple_of(64) {
+                    (sine, cosine) = (step * base as f64).sin_cos();
+                } else {
+                    (cosine, sine) = (
+                        cosine * step_cosine - sine * step_sine,
+                        sine * step_cosine + cosine * step_sine,
+                    );
+                }
+            }
+            let mut cosines = [cosine; 4];
+            let mut sines = [sine; 4];
+            for lane in 1..4 {
+                (cosine, sine) = (
+                    cosine * step_cosine - sine * step_sine,
+                    sine * step_cosine + cosine * step_sine,
+                );
+                cosines[lane] = cosine;
+                sines[lane] = sine;
+            }
+            let mut analysis_real = [1.0; 4];
+            let mut analysis_imaginary = [0.0; 4];
+            let mut synthesis_real = [1.0; 4];
+            let mut synthesis_imaginary = [0.0; 4];
+            let mut c = cosines;
+            let mut s = sines;
+            for (&a, &b) in analysis[..shared].iter().zip(&synthesis[..shared]) {
+                for lane in 0..4 {
+                    analysis_real[lane] -= a * c[lane];
+                    analysis_imaginary[lane] += a * s[lane];
+                    synthesis_real[lane] -= b * c[lane];
+                    synthesis_imaginary[lane] += b * s[lane];
+                    (c[lane], s[lane]) = (
+                        c[lane] * cosines[lane] - s[lane] * sines[lane],
+                        s[lane] * cosines[lane] + c[lane] * sines[lane],
+                    );
+                }
+            }
+            for &a in &analysis[shared..] {
+                for lane in 0..4 {
+                    analysis_real[lane] -= a * c[lane];
+                    analysis_imaginary[lane] += a * s[lane];
+                    (c[lane], s[lane]) = (
+                        c[lane] * cosines[lane] - s[lane] * sines[lane],
+                        s[lane] * cosines[lane] + c[lane] * sines[lane],
+                    );
+                }
+            }
+            for &b in &synthesis[shared..order] {
+                for lane in 0..4 {
+                    synthesis_real[lane] -= b * c[lane];
+                    synthesis_imaginary[lane] += b * s[lane];
+                    (c[lane], s[lane]) = (
+                        c[lane] * cosines[lane] - s[lane] * sines[lane],
+                        s[lane] * cosines[lane] + c[lane] * sines[lane],
+                    );
+                }
+            }
+            for lane in 0..4 {
+                let emphasis = ((1.0 - glottal * cosines[lane]).powi(2)
+                    + (glottal * sines[lane]).powi(2))
+                .sqrt()
+                .max(1e-6);
+                let analysis_magnitude = (analysis_real[lane] * analysis_real[lane]
+                    + analysis_imaginary[lane] * analysis_imaginary[lane])
+                    .sqrt()
+                    .max(1e-6);
+                let synthesis_magnitude = (synthesis_real[lane] * synthesis_real[lane]
+                    + synthesis_imaginary[lane] * synthesis_imaginary[lane])
+                    .sqrt()
+                    .max(1e-6);
+                inputs[lane] = (1.0 / (analysis_magnitude * emphasis)) as f32;
+                outputs[lane] = (width / (synthesis_magnitude * emphasis)) as f32;
+            }
+        }
+        let tail_base = input_chunks.len() * 4;
+        for (offset, (input, output)) in input_tail
+            .iter_mut()
+            .zip(output_tail.iter_mut())
+            .enumerate()
+        {
+            let k = tail_base + offset;
+            if k > 0 {
+                if k.is_multiple_of(64) {
+                    (sine, cosine) = (step * k as f64).sin_cos();
+                } else {
+                    (cosine, sine) = (
+                        cosine * step_cosine - sine * step_sine,
+                        sine * step_cosine + cosine * step_sine,
+                    );
+                }
+            }
+            let (mut analysis_real, mut analysis_imaginary) = (1.0, 0.0);
+            let (mut synthesis_real, mut synthesis_imaginary) = (1.0, 0.0);
             let (mut c, mut s) = (cosine, sine);
-            for &coefficient in coefficients {
-                let value = coefficient as f64 / 16384.0;
-                real -= value * c;
-                imaginary += value * s;
+            for (&a, &b) in analysis[..shared].iter().zip(&synthesis[..shared]) {
+                analysis_real -= a * c;
+                analysis_imaginary += a * s;
+                synthesis_real -= b * c;
+                synthesis_imaginary += b * s;
                 (c, s) = (c * cosine - s * sine, s * cosine + c * sine);
             }
-            (real * real + imaginary * imaginary).sqrt().max(1e-6)
-        };
-        for (k, (input, output)) in input.iter_mut().zip(output.iter_mut()).enumerate() {
-            let omega = step * k as f64;
-            let (sine, cosine) = omega.sin_cos();
+            for &a in &analysis[shared..] {
+                analysis_real -= a * c;
+                analysis_imaginary += a * s;
+                (c, s) = (c * cosine - s * sine, s * cosine + c * sine);
+            }
+            for &b in &synthesis[shared..order] {
+                synthesis_real -= b * c;
+                synthesis_imaginary += b * s;
+                (c, s) = (c * cosine - s * sine, s * cosine + c * sine);
+            }
             let emphasis = ((1.0 - glottal * cosine).powi(2) + (glottal * sine).powi(2))
                 .sqrt()
                 .max(1e-6);
-            *input = (1.0 / (magnitude(&analysis[..ORDER], cosine, sine) * emphasis)) as f32;
-            *output = (width / (magnitude(&synthesis[..order], cosine, sine) * emphasis)) as f32;
+            let analysis_magnitude = (analysis_real * analysis_real
+                + analysis_imaginary * analysis_imaginary)
+                .sqrt()
+                .max(1e-6);
+            let synthesis_magnitude = (synthesis_real * synthesis_real
+                + synthesis_imaginary * synthesis_imaginary)
+                .sqrt()
+                .max(1e-6);
+            *input = (1.0 / (analysis_magnitude * emphasis)) as f32;
+            *output = (width / (synthesis_magnitude * emphasis)) as f32;
         }
         true
     }
