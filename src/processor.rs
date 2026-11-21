@@ -41,9 +41,9 @@ pub struct Processor {
     /// The reverse-loop history, which records also while its wet output is
     /// disabled.
     alien: Alien,
-    /// The delay network and the damping filters.
+    /// Dual delay networks and damping filters.
     ///
-    /// In bypass, their histories do not change.
+    /// If disabled, active tails decay with zero input and then clear.
     reverb: Reverb,
     /// The random sequence of this instance and the cached arctangent position.
     numeric: NumericContext,
@@ -57,8 +57,7 @@ pub struct Processor {
     output_peaks: [i32; 2],
     /// The last ratio from correction only.
     ///
-    /// It is zero before the first `process` call, after a reset or after a
-    /// change of stereo output.
+    /// It is zero before the first `process` call and after a reset.
     last_resample_ratio: f32,
     /// The count of rendered frames since reset, with drain frames included.
     ///
@@ -457,18 +456,19 @@ impl Processor {
     /// Validates all configuration fields and applies them.
     ///
     /// The validation also examines the fields of disabled stages. A stage
-    /// that does not change keeps its state. A change of `stereo_output`
-    /// resets the resynthesis audio state, Alien, the reverb delays, the peak
-    /// and the reported ratio. It also releases the harmony MIDI notes. It
-    /// keeps Punch, Warm, the correction keys, the random stream, the reverb
-    /// low-pass memories and the frame count. A change of `random_seed` starts
-    /// the random stream again.
+    /// that does not change keeps its state. Live changes to voice mode, choir
+    /// delay, formant enable, stereo output, Alien and reverb mode crossfade
+    /// smoothly without audio resets. A change of `random_seed` starts the
+    /// random stream again.
     ///
     /// Each successful call cancels a drain, also for an identical
-    /// configuration. A change of reverb mode keeps the delay contents. If you
-    /// disable Punch, Warm or reverb, the history of that stage stops. Alien
-    /// continues to record. A change in either half of the `u64` seed starts
-    /// the stream again, but the new sequence uses only the low 32 bits.
+    /// configuration. A change of reverb mode decays the previous bank while a
+    /// cleared bank starts the new mode. If you disable Punch or Warm, the
+    /// history of that stage stops. If you disable reverb, active tails decay
+    /// with zero input and then clear. Alien continues to record. If you
+    /// enable Alien, it starts a new capture epoch. A change in either half of
+    /// the `u64` seed starts the stream again, but the new sequence uses only
+    /// the low 32 bits.
     ///
     /// # Errors
     ///
@@ -490,14 +490,6 @@ impl Processor {
         }
         if self.config.resynthesis != config.resynthesis {
             self.resynthesis.apply_config(config.resynthesis);
-        }
-        if self.config.resynthesis.stereo_output != config.resynthesis.stereo_output {
-            // Resynthesis resets its histories if its stereo setting changes.
-            self.alien.reset();
-            self.reverb.reset();
-            self.peak = 0;
-            self.clear_telemetry_peaks();
-            self.last_resample_ratio = 0.0;
         }
         if self.config.resynthesis.random_seed != config.resynthesis.random_seed {
             self.numeric.random = RandomStream::new(config.resynthesis.random_seed as u32);
@@ -715,8 +707,8 @@ pub struct Feedback {
     /// unity.
     ///
     /// It does not include the configured pitch shift or the ratios of
-    /// individual voices. It is zero before processing, after a reset or after
-    /// a change of stereo output.
+    /// individual voices. It is zero before the first process call and after a
+    /// reset.
     pub resample_ratio: f32,
     /// The reported input pitch period in samples, with fractional samples.
     ///
@@ -755,10 +747,10 @@ pub struct Feedback {
     pub voiced: bool,
     /// The largest absolute clipped stereo sample, divided by 32768.
     ///
-    /// The peak window starts at construction, at a reset, at a change of
-    /// stereo output or at a call to [`Processor::take_feedback`]. The value
-    /// is in 0..=32767/32768. The mono downmix occurs after this measurement.
-    /// [`Processor::feedback`] does not clear the value.
+    /// The peak window starts at construction, at a reset or at a call to
+    /// [`Processor::take_feedback`]. The value is in 0..=32767/32768. The mono
+    /// downmix occurs after this measurement. [`Processor::feedback`] does not
+    /// clear the value.
     pub peak_level: f32,
     /// The number of frames processed since construction or the last reset,
     /// with drain frames included.
@@ -783,9 +775,8 @@ pub struct Feedback {
 /// `Default` gives a snapshot with all zeros.
 ///
 /// The three peak fields measure a window. The window starts at
-/// construction, at a reset, at a change of stereo output or at a call to
-/// [`Processor::take_telemetry`]. This window is independent of the peak
-/// window of [`Feedback`].
+/// construction, at a reset or at a call to [`Processor::take_telemetry`].
+/// This window is independent of the peak window of [`Feedback`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -811,8 +802,8 @@ pub struct Telemetry {
     /// where 1 is full scale.
     ///
     /// The contribution is the wet signal times the mix, before the output
-    /// gain. It is the larger of the two channels. While the reverb is
-    /// disabled, the window gets no new values.
+    /// gain. It is the larger of the two channels. While all reverb banks are
+    /// idle, the window gets no new values.
     pub reverb_wet_peak: f32,
     /// How periodic the tracked input is, in 0..=1.
     ///
@@ -874,8 +865,7 @@ pub struct Telemetry {
     pub alien_phase_frames: u32,
     /// The wrapping count of formant analyses since construction.
     ///
-    /// The count increases every 441 frames while the formant stage is
-    /// enabled. Compare two values to find if
+    /// The count increases every 441 frames. Compare two values to find if
     /// [`Processor::formant_envelope`] can give a new result.
     pub formant_generation: u32,
 }

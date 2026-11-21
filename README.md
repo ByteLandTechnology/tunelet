@@ -280,7 +280,9 @@ sets the configuration cancels the drain. `reset()` also cancels the drain.
 ### Reset
 
 `reset()` keeps the configuration, the random stream and some controller and
-filter state. If you need a fully new state, construct a new processor.
+filter state. Configuration changes, which include `stereo_output`, crossfade
+the audio state and do not reset histories. If you need a fully new state,
+construct a new processor.
 
 ## Feedback and telemetry
 

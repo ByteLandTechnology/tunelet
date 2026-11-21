@@ -3,8 +3,8 @@
 //! Punch and Warm operate on mono PCM before resynthesis. The processor does
 //! not call their sample methods while they are disabled. Alien and reverb
 //! accept stereo Q14 frames after resynthesis. They have their own bypass
-//! behavior. Alien continues to record during bypass. Reverb keeps its
-//! current delay state during bypass.
+//! behavior. Alien continues to record during bypass. Reverb decays active
+//! tails with zero input and then clears them.
 //!
 //! The configuration types validate the public controls. The prepared stage
 //! types assume that these checks were successful.

@@ -4,20 +4,17 @@
 //! the correction and control steps that are due. The raw input, the tracked
 //! periods and the correction ratios use the same history cursor.
 //!
-//! The source comes from a fixed overlap buffer. If formants are enabled,
-//! this buffer holds the output of the formant inverse analysis. If not,
-//! it holds the raw input. Voice readers read this source at fractional
-//! positions. If the shift is upward, prepared low-pass filters also
-//! change the source.
+//! The source comes from two aligned 11,568-frame buffers. One buffer holds
+//! the delayed raw input. The other buffer holds the continuous output of the
+//! formant inverse analysis. Voice readers read these buffers at fractional
+//! positions. If the shift is upward, prepared low-pass filters also change
+//! both sources.
 //!
-//! Choir renders the lead voice first. Then it makes delayed secondary voices
-//! with drift from the lead history. Harmony renders the lead voice and four
-//! readers with independent controls. It applies formant synthesis after the
-//! voices are mixed.
-//!
-//! A reader jumps by one pitch period to stay in a range behind the writer.
-//! The choir lead uses a crossfade across these jumps. Harmonic modulation
-//! applies to the wet mix. Then the code blends in a delayed dry signal.
+//! Active and shadow 16-reader banks crossfade across mode and choir-delay
+//! switches. Every reader slot uses a crossfade across pitch-period jumps.
+//! Choir and Harmony both write the rendered lead history on every frame.
+//! Harmonic modulation applies to the wet mix. Then the code blends in a
+//! delayed dry signal.
 //!
 //! Audio, reader positions and pitch ratios use Q14. Periods use Q6, harmony
 //! gains use Q12 and the dry mix uses Q8. Some of these units use the same
@@ -214,8 +211,8 @@ pub struct ResynthesisConfig {
     /// Enables a stereo pan for each voice. The default is `false`.
     ///
     /// This value is independent of the buffer layout of the process method.
-    /// A change to this value resets some audio histories and the feedback.
-    /// [`crate::Processor::set_config`] gives the details.
+    /// A change to this value crossfades the mono and panned voice buses over
+    /// 256 frames and does not reset audio histories or feedback.
     pub stereo_output: bool,
     /// The controls for the four harmony voices. The default is MIDI-channel
     /// allocation.
@@ -345,6 +342,185 @@ const CONTROL_DUE: i32 = 100;
 const DRIFT_LIMIT: Q14 = Q14::from_bits(3276);
 /// The step for each frame of the crossfade after a reader jump.
 const FADE_STEP: Q14 = Q14::from_bits(0x333);
+/// The Q14 step for 256-frame bank, formant and stereo crossfades.
+const SWITCH_FADE_STEP: Q14 = Q14::from_bits(64);
+/// Half of `Q14::ONE`, used to keep the louder bank on rapid switches.
+const HALF_FADE: Q14 = Q14::from_bits(8192);
+
+/// Blends `mono` and `panned` stereo buses with `stereo_mix` in Q14.
+#[inline]
+fn blend_stereo_bus(mono: [Q14; 2], panned: [Q14; 2], stereo_mix: Q14) -> [Q14; 2] {
+    if stereo_mix == Q14::ZERO {
+        mono
+    } else if stereo_mix == Q14::ONE {
+        panned
+    } else {
+        let mono_weight = Q14::ONE - stereo_mix;
+        [
+            (mono[0].mul::<14, 28>(mono_weight) + panned[0].mul::<14, 28>(stereo_mix)).rescale(),
+            (mono[1].mul::<14, 28>(mono_weight) + panned[1].mul::<14, 28>(stereo_mix)).rescale(),
+        ]
+    }
+}
+
+/// Blends two stereo Q14 frames with `weight` for `right`.
+#[inline]
+fn blend_frames(left: [Q14; 2], right: [Q14; 2], weight: Q14) -> [Q14; 2] {
+    let inv = Q14::ONE - weight;
+    [
+        (left[0].mul::<14, 28>(inv) + right[0].mul::<14, 28>(weight)).rescale(),
+        (left[1].mul::<14, 28>(inv) + right[1].mul::<14, 28>(weight)).rescale(),
+    ]
+}
+
+/// One preallocated 16-reader bank with per-voice period-jump crossfades.
+#[derive(Clone, Copy, Debug)]
+struct VoiceBank {
+    /// The voice mode that this bank renders.
+    mode: MultiVoiceMode,
+    /// The number of choir voices in this bank, in `1..=16`.
+    choir_voices: u8,
+    /// The formant synthesis slot (`0` or `1`) that this bank owns.
+    slot: usize,
+    /// The configured integer frame offset of each voice. Harmony uses zero.
+    delays: [i32; 16],
+    /// The Q14 fractional reader positions.
+    positions: [Q14; 16],
+    /// The previous Q14 reader positions for crossfades after period jumps.
+    old_positions: [Q14; 16],
+    /// The Q14 weights of the new reader positions, toward `1.0`.
+    fades: [Q14; 16],
+    /// The Q14 left and right gains of the choir voices in this bank.
+    pan: [[Q14; 2]; 16],
+    /// The Q14 pan gains of the harmony voices in this bank.
+    harmony_pan: [[Q14; 2]; HARMONY_VOICES],
+}
+
+impl VoiceBank {
+    /// Creates an initialized 16-reader bank for `slot`.
+    fn new(slot: usize, mode: MultiVoiceMode, choir_voices: u8) -> Self {
+        let initial = position_of(-READER_LAG_FRAMES);
+        Self {
+            mode,
+            choir_voices,
+            slot,
+            delays: [0; 16],
+            positions: [initial; 16],
+            old_positions: [initial; 16],
+            fades: [Q14::ONE; 16],
+            pan: [[Q14::ONE; 2]; 16],
+            harmony_pan: [[Q14::ZERO; 2]; HARMONY_VOICES],
+        }
+    }
+
+    /// Scales the fixed choir frame offsets and puts all 16 readers behind
+    /// `write`.
+    fn configure_delays(
+        &mut self,
+        write: usize,
+        mode: MultiVoiceMode,
+        choir_voices: u8,
+        choir_delay: f32,
+    ) {
+        self.mode = mode;
+        self.choir_voices = choir_voices;
+        let parameter = if mode == MultiVoiceMode::Choir {
+            choir_delay
+        } else {
+            0.0
+        };
+        for (voice, seed) in SEEDS.iter().enumerate() {
+            self.delays[voice] = (*seed as f64 * (parameter as f64 * 0.005)) as i32;
+            let position = position_of(write as i32 - READER_LAG_FRAMES - self.delays[voice]);
+            self.positions[voice] = position;
+            self.old_positions[voice] = position;
+            self.fades[voice] = Q14::ONE;
+        }
+    }
+
+    /// Updates the choir and harmony stereo pan gains of this bank.
+    fn configure_pan(&mut self, choir_voices: u8, choir_spread_percent: f32, harmony_gain: f32) {
+        self.choir_voices = choir_voices;
+        for voice in 0..choir_voices as usize {
+            if choir_voices > 1 {
+                let normalized = (voice as f64 + voice as f64) / (choir_voices as f64 - 1.0) - 1.0;
+                let angle = 0.785398163565
+                    - (choir_spread_percent as f64 * 0.785398163565 * 0.01) * normalized;
+                self.pan[voice] = [Q14::from_f64(angle.cos()), Q14::from_f64(angle.sin())];
+            } else {
+                self.pan[voice] = [Q14::ONE; 2];
+            }
+        }
+        for (voice, fraction) in [0.3333333333333333, 0.6666666666666666, 0.0, 1.0]
+            .into_iter()
+            .enumerate()
+        {
+            let angle: f64 = 1.57079632713 * fraction;
+            let gain = harmony_gain as f64;
+            self.harmony_pan[voice] = [
+                Q14::from_f64(gain * angle.cos()),
+                Q14::from_f64(gain * angle.sin()),
+            ];
+        }
+    }
+
+    /// Moves all 16 reader coordinates back by `HISTORY` when `write` wraps.
+    fn wrap_origin(&mut self) {
+        let shift = position_of(HISTORY as i32);
+        for voice in 0..16 {
+            self.positions[voice] = self.positions[voice] - shift;
+            self.old_positions[voice] = self.old_positions[voice] - shift;
+        }
+    }
+
+    /// Advances one Q14 reader by `ratio` and starts a period crossfade if it
+    /// jumps at a boundary.
+    fn move_reader(&mut self, write: usize, voice: usize, ratio: Q14, period: Q6) -> Q14 {
+        let offset = self.delays[voice];
+        self.old_positions[voice] = self.old_positions[voice] + ratio;
+        let mut position = self.positions[voice] + ratio;
+        let write = write as i32;
+        let upper = position_of(write - 40 - offset);
+        let span = (period.to_bits() >> 6).wrapping_mul(12).wrapping_div(10);
+        let lower = position_of(
+            write
+                .wrapping_sub(span)
+                .wrapping_sub(40)
+                .wrapping_sub(offset),
+        );
+        if position >= upper {
+            self.old_positions[voice] = position;
+            self.fades[voice] = Q14::ZERO;
+            position = position - period.rescale();
+        } else if position <= lower {
+            self.old_positions[voice] = position;
+            self.fades[voice] = Q14::ZERO;
+            position = position + period.rescale();
+        }
+        self.positions[voice] = position;
+        position
+    }
+
+    /// Interpolates `buffer` at `voice` and blends `old_positions` if a jump
+    /// crossfade is active.
+    fn sample_voice(&self, buffer: &[Q14; HISTORY], voice: usize) -> (Q14, i32) {
+        let (mut value, center) = history::interpolation(buffer, self.positions[voice]);
+        let fade = self.fades[voice];
+        if fade < Q14::ONE {
+            let (old, _) = history::interpolation(buffer, self.old_positions[voice]);
+            value = value.mul(fade) + old.mul(Q14::ONE - fade);
+        }
+        (value, center)
+    }
+
+    /// Advances the period-jump crossfade of `voice` by one frame.
+    fn step_fade(&mut self, voice: usize) {
+        let fade = self.fades[voice];
+        if fade < Q14::ONE {
+            self.fades[voice] = (fade + FADE_STEP).min(Q14::ONE);
+        }
+    }
+}
 
 /// Returns the reader position at the start of the history frame `frame`.
 #[inline]
@@ -384,15 +560,15 @@ pub(crate) struct Resynthesis {
     /// The active correction targets and an independent MIDI keyboard for
     /// correction.
     scale: CorrectionTable,
-    /// The delayed source audio after the two prepared shift filters. If
-    /// formants are enabled, the source is inverse-filtered.
+    /// The delayed raw source audio after the two prepared shift filters.
     filtered: Box<[Q14; HISTORY]>,
-    /// The history of the rendered choir lead. All secondary choir voices
-    /// read this history.
+    /// The delayed inverse-filtered LPC residual after its two shift filters.
+    lpc_filtered: Box<[Q14; HISTORY]>,
+    /// The history of the rendered lead voice. Secondary choir voices read
+    /// this history, and every frame writes it.
     lead: Box<[Q14; HISTORY]>,
-    /// The Q6 tracked periods, aligned to the audio. The lead voice can
-    /// replace a delayed entry with its resampled output period. This aligns
-    /// the secondary voices.
+    /// The Q6 tracked periods, aligned to the audio. The lead voice replaces
+    /// the delayed entry with its resampled output period on every frame.
     periods: Box<[Q6; HISTORY]>,
     /// The last usable Q6 tracker periods. The code keeps them through
     /// unvoiced gaps.
@@ -400,28 +576,20 @@ pub(crate) struct Resynthesis {
     /// The Q14 ratios of the correction only, aligned to each recorded input
     /// frame.
     ratios: Box<[Q14; HISTORY]>,
-    /// The fixed memory for the analysis overlap. It gives the source a delay
-    /// of 1,543 frames.
+    /// The fixed memory for the LPC analysis overlap, for a total delay of
+    /// 1,543 frames.
     overlap: [Q14; OVERLAP_FRAMES],
     /// The current slot in the overlap ring.
     overlap_index: usize,
-    /// The configured integer frame offset of each voice. Harmony uses
-    /// offsets of zero.
-    delays: [i32; 16],
-    /// The Q14 fractional reader positions. When the writer wraps, the code
-    /// moves them back by HISTORY.
-    positions: [Q14; 16],
+    /// The active 16-reader voice bank.
+    active: VoiceBank,
+    /// The shadow 16-reader voice bank for mode and choir-delay crossfades.
+    shadow: VoiceBank,
     /// The Q14 random choir drift offsets of the secondary voices.
     drift: [Q14; 16],
     /// The Q14 multipliers, each equal to 1.0 plus the drift. An audio reset
     /// sets them to 1.0, but it keeps the drift state.
     drift_ratio: [Q14; 16],
-    /// The Q14 left and right gains of the choir voices. The code reads them
-    /// only if the stereo pan is enabled.
-    pan: [[Q14; 2]; 16],
-    /// The Q14 pan gains of the harmony voices. They include the configured
-    /// harmony level.
-    harmony_pan: [[Q14; 2]; HARMONY_VOICES],
     /// The last Q14 target ratios from the harmony controller.
     harmony_ratios: [Q14; HARMONY_VOICES],
     /// The last Q12 gain envelopes from the harmony controller. An audio
@@ -434,9 +602,10 @@ pub(crate) struct Resynthesis {
     /// The signed history frame that the formant model used for the last
     /// frame. The audio path sets it, and only the formant envelope reads it.
     formant_position: i32,
-    /// Two cascaded anti-alias filter sections. If the shift is not upward,
-    /// they have coefficients of 1.0 and zero.
+    /// Two cascaded anti-alias filter sections for the raw source.
     post: [Biquad; 2],
+    /// Two cascaded anti-alias filter sections for the LPC source.
+    lpc_post: [Biquad; 2],
     /// The current smoothed Q14 correction ratio. It does not include the
     /// global shift or the voice ratios.
     correction: Q14,
@@ -461,12 +630,12 @@ pub(crate) struct Resynthesis {
     /// The Q8 weight of the delayed raw audio. The wet weight is 1.0 minus
     /// this weight.
     dry_mix: Q8,
-    /// The previous position of the lead reader. The crossfade after a jump
-    /// follows this position.
-    old_position: Q14,
-    /// The Q14 weight of the new lead reader. After a jump, it increases
-    /// toward 1.0.
-    fade: Q14,
+    /// The Q14 crossfade weight toward `active` across mode and delay switches.
+    bank_fade: Q14,
+    /// The Q14 crossfade weight of the formant path, ramped over 256 frames.
+    formant_mix: Q14,
+    /// The Q14 crossfade weight of the panned bus, ramped over 256 frames.
+    stereo_mix: Q14,
     /// The Q6 period that the code selected last for a voice. The modulation
     /// uses it.
     current_output_period: Q6,
@@ -479,9 +648,11 @@ pub(crate) struct Resynthesis {
     /// The Q14 weight of new drift, from the choir detune and the drift
     /// decay.
     drift_amount: Q14,
-    /// The previous Q14 synthesized output for each channel. The glottal
-    /// envelope uses it.
-    previous_output: [Q14; 2],
+    /// The previous Q14 output of mono lead formants for each bank slot.
+    lead_previous_output: [Q14; 2],
+    /// The previous Q14 stereo output of formants for each bank slot and
+    /// channel.
+    previous_output: [[Q14; 2]; 2],
 }
 
 impl Resynthesis {
@@ -515,23 +686,23 @@ impl Resynthesis {
                 scale
             },
             filtered: prepare_history(Q14::ZERO),
+            lpc_filtered: prepare_history(Q14::ZERO),
             lead: prepare_history(Q14::ZERO),
             periods: prepare_history(Q6::ZERO),
             previous_periods: prepare_history(Q6::ZERO),
             ratios: prepare_history(Q14::ONE),
             overlap: [Q14::ZERO; OVERLAP_FRAMES],
             overlap_index: 0,
-            delays: [0; 16],
-            positions: [Q14::ZERO; 16],
+            active: VoiceBank::new(0, config.mode, config.choir_voices),
+            shadow: VoiceBank::new(1, config.mode, config.choir_voices),
             drift: [Q14::ZERO; 16],
             drift_ratio: [Q14::ONE; 16],
-            pan: [[Q14::ONE; 2]; 16],
-            harmony_pan: [[Q14::ZERO; 2]; HARMONY_VOICES],
             harmony_ratios: [Q14::ONE; HARMONY_VOICES],
             harmony_gains: [Q12::ZERO; HARMONY_VOICES],
             voice_ratios: [Q14::ONE; HARMONY_VOICES + 1],
             formant_position: 0,
             post: [Biquad::new(), Biquad::new()],
+            lpc_post: [Biquad::new(), Biquad::new()],
             correction: Q14::ONE,
             correction_decay: Q14::ZERO,
             scale_initialized: false,
@@ -541,13 +712,23 @@ impl Resynthesis {
             modulation: 0,
             modulation_phase: Q14::ZERO,
             dry_mix: Q8::ZERO,
-            old_position: position_of(-READER_LAG_FRAMES),
-            fade: Q14::ONE,
+            bank_fade: Q14::ONE,
+            formant_mix: if config.formant.enabled {
+                Q14::ONE
+            } else {
+                Q14::ZERO
+            },
+            stereo_mix: if config.stereo_output {
+                Q14::ONE
+            } else {
+                Q14::ZERO
+            },
             current_output_period: Q6::ZERO,
             control_counter: CONTROL_DUE,
             drift_decay: Q14::ZERO,
             drift_amount: Q14::ZERO,
-            previous_output: [Q14::ZERO; 2],
+            lead_previous_output: [Q14::ZERO; 2],
+            previous_output: [[Q14::ZERO; 2]; 2],
         };
         result.configure_coefficients();
         result.configure_shift_filters();
@@ -576,65 +757,53 @@ impl Resynthesis {
         let decay = (-std::f64::consts::LN_2 / base).exp();
         self.drift_decay = Q14::from_f64(decay);
         self.drift_amount = Q14::from_f64((1.0 - decay) * 0.008 * self.config.choir_detune as f64);
-        for voice in 0..self.config.choir_voices as usize {
-            if self.config.choir_voices > 1 {
-                let normalized =
-                    (voice as f64 + voice as f64) / (self.config.choir_voices as f64 - 1.0) - 1.0;
-                let angle = 0.785398163565
-                    - (self.config.choir_spread_percent as f64 * 0.785398163565 * 0.01)
-                        * normalized;
-                self.pan[voice] = [Q14::from_f64(angle.cos()), Q14::from_f64(angle.sin())];
-            } else {
-                self.pan[voice] = [Q14::ONE; 2];
-            }
-        }
-        for (voice, fraction) in [0.3333333333333333, 0.6666666666666666, 0.0, 1.0]
-            .into_iter()
-            .enumerate()
-        {
-            let angle: f64 = 1.57079632713 * fraction;
-            let gain = self.config.harmony_gain as f64;
-            self.harmony_pan[voice] = [
-                Q14::from_f64(gain * angle.cos()),
-                Q14::from_f64(gain * angle.sin()),
-            ];
-        }
+        self.active.configure_pan(
+            self.config.choir_voices,
+            self.config.choir_spread_percent,
+            self.config.harmony_gain,
+        );
     }
 
-    /// Prepares two low-pass sections if the global shift is upward. If not,
-    /// sets coefficients of 1.0 and zero.
+    /// Prepares two low-pass sections for both sources if the global shift is
+    /// upward. If not, sets coefficients of 1.0 and zero.
     ///
     /// A change of the coefficients keeps the filter histories. The code
     /// truncates the numerator of the cutoff before it divides by the pitch
     /// ratio.
     fn configure_shift_filters(&mut self) {
-        for filter in &mut self.post {
-            if self.config.pitch_ratio > 1.0 {
-                let numerator = (self.rate.hz() as f64 * 0.49) as i32;
-                let cutoff = numerator as f32 / self.config.pitch_ratio;
-                filter.set_design(Design::low_pass(self.rate.hz(), cutoff, 0.707));
-            } else {
+        if self.config.pitch_ratio > 1.0 {
+            let numerator = (self.rate.hz() as f64 * 0.49) as i32;
+            let cutoff = numerator as f32 / self.config.pitch_ratio;
+            let design = Design::low_pass(self.rate.hz(), cutoff, 0.707);
+            for filter in &mut self.post {
+                filter.set_design(design);
+            }
+            for filter in &mut self.lpc_post {
+                filter.set_design(design);
+            }
+        } else {
+            for filter in &mut self.post {
+                filter.bypass();
+            }
+            for filter in &mut self.lpc_post {
                 filter.bypass();
             }
         }
     }
 
-    /// Scales the fixed choir frame offsets and puts all readers behind the
-    /// writer.
-    ///
-    /// Harmony uses offsets of zero. This function moves the readers. It does
-    /// not clear the audio histories, the drift or the overlap buffer.
+    /// Scales the fixed choir frame offsets of both banks and puts all readers
+    /// behind the writer.
     fn create_delays(&mut self) {
-        let parameter = if self.config.mode == MultiVoiceMode::Choir {
-            self.config.choir_delay
-        } else {
-            0.0
-        };
-        for (voice, seed) in SEEDS.iter().enumerate() {
-            self.delays[voice] = (*seed as f64 * (parameter as f64 * 0.005)) as i32;
-            self.positions[voice] =
-                position_of(self.write as i32 - READER_LAG_FRAMES - self.delays[voice]);
-        }
+        self.active.slot = 0;
+        self.active.configure_delays(
+            self.write,
+            self.config.mode,
+            self.config.choir_voices,
+            self.config.choir_delay,
+        );
+        self.shadow = self.active;
+        self.shadow.slot = 1;
+        self.bank_fade = Q14::ONE;
     }
 
     /// Applies a configuration that passed the full validation before.
@@ -654,19 +823,40 @@ impl Resynthesis {
             self.configure_shift_filters();
         }
         if old.mode != config.mode || old.choir_delay != config.choir_delay {
-            self.create_delays();
-        }
-        if old.choir_voices < config.choir_voices {
+            if self.bank_fade >= HALF_FADE {
+                self.shadow = self.active;
+            }
+            let next_slot = 1 - self.shadow.slot;
+            let preserve_lead =
+                self.shadow.mode == MultiVoiceMode::Choir && config.mode == MultiVoiceMode::Choir;
+            self.active.slot = if preserve_lead {
+                self.shadow.slot
+            } else {
+                self.formant.reset_slot(next_slot);
+                self.lead_previous_output[next_slot] = Q14::ZERO;
+                self.previous_output[next_slot] = [Q14::ZERO; 2];
+                next_slot
+            };
+            self.active.configure_delays(
+                self.write,
+                config.mode,
+                config.choir_voices,
+                config.choir_delay,
+            );
+            if preserve_lead {
+                self.active.positions[0] = self.shadow.positions[0];
+                self.active.old_positions[0] = self.shadow.old_positions[0];
+                self.active.fades[0] = self.shadow.fades[0];
+            }
+            self.bank_fade = Q14::ZERO;
+        } else if old.choir_voices < config.choir_voices {
             for voice in old.choir_voices as usize..config.choir_voices as usize {
-                self.positions[voice] = self.positions[0];
+                self.active.positions[voice] = self.active.positions[0];
+                self.active.old_positions[voice] = self.active.positions[0];
+                self.active.fades[voice] = Q14::ONE;
             }
         }
         self.configure_coefficients();
-        if old.stereo_output != config.stereo_output {
-            // A stereo change resets the audio state. The correction keyboard
-            // keeps its held keys.
-            self.reset_audio();
-        }
     }
 
     /// Releases the correction keys 0..=126 and resets the audio state.
@@ -697,20 +887,34 @@ impl Resynthesis {
         self.formant.reset();
         self.harmony.reset();
         self.filtered.fill(Q14::ZERO);
+        self.lpc_filtered.fill(Q14::ZERO);
         self.lead.fill(Q14::ZERO);
         self.periods.fill(Q6::ZERO);
         self.previous_periods.fill(Q6::ZERO);
         self.ratios.fill(Q14::ONE);
         self.overlap.fill(Q14::ZERO);
         self.overlap_index = 0;
-        self.previous_output = [Q14::ZERO; 2];
+        self.lead_previous_output = [Q14::ZERO; 2];
+        self.previous_output = [[Q14::ZERO; 2]; 2];
         for filter in &mut self.post {
             filter.reset();
         }
+        for filter in &mut self.lpc_post {
+            filter.reset();
+        }
         self.create_delays();
+        self.configure_coefficients();
         self.drift_ratio.fill(Q14::ONE);
-        self.old_position = self.positions[0];
-        self.fade = Q14::ONE;
+        self.formant_mix = if self.config.formant.enabled {
+            Q14::ONE
+        } else {
+            Q14::ZERO
+        };
+        self.stereo_mix = if self.config.stereo_output {
+            Q14::ONE
+        } else {
+            Q14::ZERO
+        };
         self.harmony_ratios.fill(Q14::ONE);
         self.voice_ratios.fill(Q14::ONE);
         self.formant_position = 0;
@@ -935,109 +1139,395 @@ impl Resynthesis {
         }
     }
 
-    /// Advances one Q14 reader by its ratio and keeps it near the writer.
-    ///
-    /// If the reader gets to one of the two limits, it jumps by one Q6 pitch
-    /// period. `offset` is an integer voice delay. `voice` must identify an
-    /// allocated reader slot. If `fade` is `true` and the reader jumps, the
-    /// function saves the old position and starts the crossfade again. Only
-    /// the choir lead sets `fade`.
-    fn move_reader(
+    /// Synthesizes one mono Q14 excitation sample through `slot` and its
+    /// glottal filter.
+    fn synthesize_lead_formant(
         &mut self,
-        voice: usize,
-        ratio: Q14,
-        period: Q6,
-        offset: i32,
-        fade: bool,
+        slot: usize,
+        lpc_sample: Q14,
+        center: i32,
+        is_active: bool,
+        allow_noise: bool,
+        numeric: &mut NumericContext,
     ) -> Q14 {
-        let mut position = self.positions[voice] + ratio;
-        let write = self.write as i32;
-        let upper = position_of(write - 40 - offset);
-        let span = (period.to_bits() >> 6).wrapping_mul(12).wrapping_div(10);
-        let lower = position_of(
-            write
-                .wrapping_sub(span)
-                .wrapping_sub(40)
-                .wrapping_sub(offset),
-        );
-        if position >= upper {
-            if fade {
-                self.old_position = position;
-                self.fade = Q14::ZERO;
-            }
-            position = position - period.rescale();
-        } else if position <= lower {
-            if fade {
-                self.old_position = position;
-                self.fade = Q14::ZERO;
-            }
-            position = position + period.rescale();
+        let formant_position = center - FORMANT_OFFSET_FRAMES;
+        if is_active {
+            self.formant_position = formant_position;
         }
-        self.positions[voice] = position;
-        position
+        let filtered = Q14::from_bits(self.formant.forward(
+            slot,
+            lpc_sample.to_bits(),
+            formant_position,
+            allow_noise,
+            numeric,
+        ));
+        let output = Q14::from_bits(self.formant.model_glottal(
+            filtered.to_bits(),
+            self.lead_previous_output[slot].to_bits(),
+        ));
+        self.lead_previous_output[slot] = output;
+        output
     }
 
-    /// Renders the choir lead before a secondary voice reads its history.
-    ///
-    /// The function does these steps:
-    /// 1. It selects the period and the ratio.
-    /// 2. It moves the reader and applies the crossfade.
-    /// 3. If formants are enabled, it applies them and the glottal envelope.
-    /// 4. It stores the Q14 result in the lead history.
-    ///
-    /// Returns the lead sample and its effective ratio, for the modulation
-    /// state that follows.
-    fn render_lead(&mut self, delayed: usize, numeric: &mut NumericContext) -> (Q14, Q14) {
+    /// Renders the choir lead voice for the selected bank and stores it in
+    /// `self.lead`.
+    fn render_choir_lead(
+        &mut self,
+        is_active: bool,
+        delayed: usize,
+        delayed_period_ratio: (Q6, Q14),
+        allow_noise: bool,
+        numeric: &mut NumericContext,
+    ) -> (Q14, Q14, Q6) {
         let write = self.write;
-        let delay = ring(delayed as i32 - self.delays[0]);
-        let (period, mut ratio) = self.period_for(delay, write);
-        self.current_output_period = period;
+        let (period, mut ratio) = delayed_period_ratio;
         ratio = ratio.mul::<14, 14>(self.drift_ratio[0]).mul(self.shift);
         if period == Q6::ZERO {
             ratio = Q14::ONE;
         }
         if ratio != Q14::ZERO {
-            self.periods[delay] = period.div(ratio);
+            self.periods[delayed] = period.div(ratio);
         }
-        self.old_position = self.old_position + ratio;
-        let position = self.move_reader(0, ratio, period, self.delays[0], true);
-        let (mut value, center) = history::interpolation(&self.filtered, position);
-        if self.fade < Q14::ONE {
-            let (old, _) = history::interpolation(&self.filtered, self.old_position);
-            value = value.mul(self.fade) + old.mul(Q14::ONE - self.fade);
-            self.fade = (self.fade + FADE_STEP).min(Q14::ONE);
-        }
-        if self.config.formant.enabled {
-            self.formant_position = center - FORMANT_OFFSET_FRAMES;
-            value = Q14::from_bits(self.formant.forward(
-                value.to_bits(),
-                self.formant_position,
-                numeric,
-            ));
-            value = Q14::from_bits(
-                self.formant
-                    .model_glottal(value.to_bits(), self.previous_output[0].to_bits()),
-            );
-            self.previous_output[0] = value;
-        }
+        let slot = if is_active {
+            self.active.move_reader(write, 0, ratio, period);
+            self.active.slot
+        } else {
+            self.shadow.move_reader(write, 0, ratio, period);
+            self.shadow.slot
+        };
+        let value = if self.formant_mix == Q14::ZERO {
+            let (raw, _) = if is_active {
+                let sample = self.active.sample_voice(&self.filtered, 0);
+                self.active.step_fade(0);
+                sample
+            } else {
+                let sample = self.shadow.sample_voice(&self.filtered, 0);
+                self.shadow.step_fade(0);
+                sample
+            };
+            raw
+        } else if self.formant_mix == Q14::ONE {
+            let (lpc, center) = if is_active {
+                let sample = self.active.sample_voice(&self.lpc_filtered, 0);
+                self.active.step_fade(0);
+                sample
+            } else {
+                let sample = self.shadow.sample_voice(&self.lpc_filtered, 0);
+                self.shadow.step_fade(0);
+                sample
+            };
+            self.synthesize_lead_formant(slot, lpc, center, is_active, allow_noise, numeric)
+        } else {
+            let ((raw, _), (lpc, center)) = if is_active {
+                let raw = self.active.sample_voice(&self.filtered, 0);
+                let lpc = self.active.sample_voice(&self.lpc_filtered, 0);
+                self.active.step_fade(0);
+                (raw, lpc)
+            } else {
+                let raw = self.shadow.sample_voice(&self.filtered, 0);
+                let lpc = self.shadow.sample_voice(&self.lpc_filtered, 0);
+                self.shadow.step_fade(0);
+                (raw, lpc)
+            };
+            let fmt =
+                self.synthesize_lead_formant(slot, lpc, center, is_active, allow_noise, numeric);
+            let raw_weight = Q14::ONE - self.formant_mix;
+            (raw.mul::<14, 28>(raw_weight) + fmt.mul::<14, 28>(self.formant_mix)).rescale()
+        };
         self.lead[write] = value;
-        (value, ratio)
+        (value, ratio, period)
+    }
+
+    /// Renders the secondary choir voices of the selected bank from `self.lead`
+    /// and mixes them with `lead_value`.
+    fn render_choir_voices(
+        &mut self,
+        is_active: bool,
+        delayed: usize,
+        lead_value: Q14,
+        lead_ratio: Q14,
+        lead_period: Q6,
+    ) -> ([Q14; 2], Q14, Q6) {
+        let write = self.write;
+        let voice_count = if is_active {
+            self.active.choir_voices as usize
+        } else {
+            self.shadow.choir_voices as usize
+        };
+        let lead_pan = if is_active {
+            self.active.pan[0]
+        } else {
+            self.shadow.pan[0]
+        };
+        let mut mono_sum = lead_value;
+        let mut panned_sum: [Q14; 2] = [lead_value.mul(lead_pan[0]), lead_value.mul(lead_pan[1])];
+        let mut final_ratio = lead_ratio;
+        let mut output_period = lead_period;
+        let mut voice = 1;
+        while voice + 4 <= voice_count {
+            let mut values = [Q14::ZERO; 4];
+            for (lane, sample_out) in values.iter_mut().enumerate() {
+                let current_voice = voice + lane;
+                let offset = if is_active {
+                    self.active.delays[current_voice]
+                } else {
+                    self.shadow.delays[current_voice]
+                };
+                let delay = ring(delayed as i32 - offset);
+                let (period, _) = self.period_for(delay, write);
+                output_period = period;
+                let ratio = self.drift_ratio[current_voice];
+                final_ratio = ratio;
+                if is_active {
+                    self.active.move_reader(write, current_voice, ratio, period);
+                    *sample_out = self.active.sample_voice(&self.lead, current_voice).0;
+                    self.active.step_fade(current_voice);
+                } else {
+                    self.shadow.move_reader(write, current_voice, ratio, period);
+                    *sample_out = self.shadow.sample_voice(&self.lead, current_voice).0;
+                    self.shadow.step_fade(current_voice);
+                }
+            }
+            for (lane, value) in values.into_iter().enumerate() {
+                let current_voice = voice + lane;
+                let pan = if is_active {
+                    self.active.pan[current_voice]
+                } else {
+                    self.shadow.pan[current_voice]
+                };
+                mono_sum = mono_sum + value;
+                panned_sum[0] = panned_sum[0] + value.mul(pan[0]);
+                panned_sum[1] = panned_sum[1] + value.mul(pan[1]);
+            }
+            voice += 4;
+        }
+        for current_voice in voice..voice_count {
+            let offset = if is_active {
+                self.active.delays[current_voice]
+            } else {
+                self.shadow.delays[current_voice]
+            };
+            let delay = ring(delayed as i32 - offset);
+            let (period, _) = self.period_for(delay, write);
+            output_period = period;
+            let ratio = self.drift_ratio[current_voice];
+            final_ratio = ratio;
+            let (value, pan) = if is_active {
+                self.active.move_reader(write, current_voice, ratio, period);
+                let value = self.active.sample_voice(&self.lead, current_voice).0;
+                self.active.step_fade(current_voice);
+                (value, self.active.pan[current_voice])
+            } else {
+                self.shadow.move_reader(write, current_voice, ratio, period);
+                let value = self.shadow.sample_voice(&self.lead, current_voice).0;
+                self.shadow.step_fade(current_voice);
+                (value, self.shadow.pan[current_voice])
+            };
+            mono_sum = mono_sum + value;
+            panned_sum[0] = panned_sum[0] + value.mul(pan[0]);
+            panned_sum[1] = panned_sum[1] + value.mul(pan[1]);
+        }
+        let mono_bus = Q14::ONE.mul(mono_sum);
+        let panned_bus = [Q14::ONE.mul(panned_sum[0]), Q14::ONE.mul(panned_sum[1])];
+        (
+            blend_stereo_bus([mono_bus, mono_bus], panned_bus, self.stereo_mix),
+            final_ratio,
+            output_period,
+        )
+    }
+
+    /// Renders a Harmony voice bank and optionally writes `self.lead` for
+    /// seamless switches to Choir.
+    fn render_harmony_bank(
+        &mut self,
+        is_active: bool,
+        delayed: usize,
+        delayed_period_ratio: (Q6, Q14),
+        write_lead: bool,
+        allow_noise: bool,
+        numeric: &mut NumericContext,
+    ) -> ([Q14; 2], Q14, Q6) {
+        let write = self.write;
+        let (period, ratio) = delayed_period_ratio;
+        let mut raw_mono = Q14::ZERO;
+        let mut raw_panned = [Q14::ZERO; 2];
+        let mut lpc_mono = Q14::ZERO;
+        let mut lpc_panned = [Q14::ZERO; 2];
+        let mut raw_lead = Q14::ZERO;
+        let mut lpc_lead = Q14::ZERO;
+        let mut lead_center = 0_i32;
+        let mut lead_ratio = Q14::ONE;
+        let mut final_ratio = Q14::ONE;
+        for voice_slot in 0..5 {
+            let mut current: Q14 = if voice_slot == 0 {
+                ratio
+            } else {
+                self.harmony_ratios[voice_slot - 1].mul(ratio)
+            };
+            current = self.shift.mul(current);
+            if period == Q6::ZERO {
+                current = Q14::ONE;
+            }
+            if voice_slot == 0 {
+                lead_ratio = current;
+            }
+            final_ratio = current;
+            if is_active {
+                self.voice_ratios[voice_slot] = current;
+                self.active.move_reader(write, voice_slot, current, period);
+            } else {
+                self.shadow.move_reader(write, voice_slot, current, period);
+            }
+            let pan = if voice_slot > 0 {
+                if is_active {
+                    self.active.harmony_pan[voice_slot - 1]
+                } else {
+                    self.shadow.harmony_pan[voice_slot - 1]
+                }
+            } else {
+                [Q14::ONE; 2]
+            };
+            if self.formant_mix < Q14::ONE {
+                let (mut value, _) = if is_active {
+                    self.active.sample_voice(&self.filtered, voice_slot)
+                } else {
+                    self.shadow.sample_voice(&self.filtered, voice_slot)
+                };
+                if voice_slot == 0 {
+                    raw_lead = value;
+                } else {
+                    value = value.mul(self.harmony_gains[voice_slot - 1]);
+                }
+                raw_mono = raw_mono + value;
+                if voice_slot > 0 {
+                    raw_panned[0] = raw_panned[0] + value.mul(pan[0]);
+                    raw_panned[1] = raw_panned[1] + value.mul(pan[1]);
+                } else {
+                    raw_panned[0] = raw_panned[0] + value;
+                    raw_panned[1] = raw_panned[1] + value;
+                }
+            }
+            if self.formant_mix > Q14::ZERO {
+                let (mut value, center) = if is_active {
+                    self.active.sample_voice(&self.lpc_filtered, voice_slot)
+                } else {
+                    self.shadow.sample_voice(&self.lpc_filtered, voice_slot)
+                };
+                if voice_slot == 0 {
+                    lpc_lead = value;
+                    lead_center = center;
+                } else {
+                    value = value.mul(self.harmony_gains[voice_slot - 1]);
+                }
+                lpc_mono = lpc_mono + value;
+                if voice_slot > 0 {
+                    lpc_panned[0] = lpc_panned[0] + value.mul(pan[0]);
+                    lpc_panned[1] = lpc_panned[1] + value.mul(pan[1]);
+                } else {
+                    lpc_panned[0] = lpc_panned[0] + value;
+                    lpc_panned[1] = lpc_panned[1] + value;
+                }
+            }
+            if is_active {
+                self.active.step_fade(voice_slot);
+            } else {
+                self.shadow.step_fade(voice_slot);
+            }
+        }
+        let bank_slot = if is_active {
+            self.active.slot
+        } else {
+            self.shadow.slot
+        };
+        let pos0 = if is_active {
+            self.active.positions[0]
+        } else {
+            self.shadow.positions[0]
+        };
+        let raw_bus = if self.formant_mix < Q14::ONE {
+            blend_stereo_bus([raw_mono, raw_mono], raw_panned, self.stereo_mix)
+        } else {
+            [Q14::ZERO; 2]
+        };
+        let fmt_bus = if self.formant_mix > Q14::ZERO {
+            let bus = blend_stereo_bus([lpc_mono, lpc_mono], lpc_panned, self.stereo_mix);
+            let formant_position = (pos0.to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
+            if is_active {
+                self.formant_position = formant_position;
+            }
+            let mut synthesized = self
+                .formant
+                .forward_stereo(
+                    bank_slot,
+                    bus.map(Q14::to_bits),
+                    formant_position,
+                    allow_noise,
+                    numeric,
+                )
+                .map(Q14::from_bits);
+            for (channel, value) in synthesized.iter_mut().enumerate() {
+                *value = Q14::from_bits(self.formant.model_glottal(
+                    value.to_bits(),
+                    self.previous_output[bank_slot][channel].to_bits(),
+                ));
+                self.previous_output[bank_slot][channel] = *value;
+            }
+            synthesized
+        } else {
+            [Q14::ZERO; 2]
+        };
+        if write_lead {
+            if lead_ratio != Q14::ZERO {
+                self.periods[delayed] = period.div(lead_ratio);
+            }
+            let lead_value = if self.formant_mix == Q14::ZERO {
+                raw_lead
+            } else if self.formant_mix == Q14::ONE {
+                self.synthesize_lead_formant(
+                    bank_slot,
+                    lpc_lead,
+                    lead_center,
+                    false,
+                    false,
+                    numeric,
+                )
+            } else {
+                let fmt = self.synthesize_lead_formant(
+                    bank_slot,
+                    lpc_lead,
+                    lead_center,
+                    false,
+                    false,
+                    numeric,
+                );
+                let raw_weight = Q14::ONE - self.formant_mix;
+                (raw_lead.mul::<14, 28>(raw_weight) + fmt.mul::<14, 28>(self.formant_mix)).rescale()
+            };
+            self.lead[write] = lead_value;
+        }
+        let result = if self.formant_mix == Q14::ZERO {
+            raw_bus
+        } else if self.formant_mix == Q14::ONE {
+            fmt_bus
+        } else {
+            blend_frames(raw_bus, fmt_bus, self.formant_mix)
+        };
+        (result, final_ratio, period)
     }
 
     /// Renders one mono PCM input frame into stereo Q14 samples.
     ///
     /// The order of calls follows the module pipeline:
     /// 1. Analysis and control.
-    /// 2. The delayed source.
-    /// 3. The voice readers.
-    /// 4. Formant synthesis.
+    /// 2. The raw and LPC delayed sources.
+    /// 3. The active and shadow voice banks.
+    /// 4. Formant synthesis and bus crossfades.
     /// 5. Modulation.
     /// 6. The dry and wet mix.
     ///
-    /// When the writer wraps, the code changes the coordinates of the active
-    /// readers. Their relative positions do not change. MIDI can make a
-    /// harmony control step occur. The choir control advances only if
-    /// tracking was active before this frame.
+    /// When the writer wraps, the code shifts the coordinates of all reader
+    /// slots in active banks. MIDI can make a harmony control step occur. The
+    /// choir control advances only if tracking was active before this frame.
     pub(crate) fn process_sample(&mut self, input: i16, numeric: &mut NumericContext) -> [Q14; 2] {
         let sample = Q14::from_bits(i32::from(input) >> 1);
         self.write += 1;
@@ -1053,15 +1543,10 @@ impl Resynthesis {
         // to each fractional position. This keeps the distances that the jump
         // detection uses.
         if write == 0 {
-            let voices = if self.config.mode == MultiVoiceMode::Choir {
-                self.config.choir_voices as usize
-            } else {
-                5
-            };
-            for voice in 0..voices {
-                self.positions[voice] = self.positions[voice] - position_of(HISTORY as i32);
+            self.active.wrap_origin();
+            if self.bank_fade < Q14::ONE {
+                self.shadow.wrap_origin();
             }
-            self.old_position = self.old_position - position_of(HISTORY as i32);
         }
         if step.restarted {
             self.correction = Q14::ONE;
@@ -1099,112 +1584,54 @@ impl Resynthesis {
         if self.overlap_index == OVERLAP_FRAMES {
             self.overlap_index = 0;
         }
-        self.overlap[self.overlap_index] = if self.config.formant.enabled {
-            let previous = self.raw[ring(write as i32 - 1)];
-            Q14::from_bits(self.formant.process_analysis(
-                sample.to_bits(),
-                previous.to_bits(),
-                self.periods.as_slice(),
-                write,
-                step.previous_period.to_bits(),
-            ))
-        } else {
-            self.raw[ring(write as i32 - ANALYSIS_FRAMES as i32)]
-        };
-        // The inverse analysis adds a delay of ANALYSIS_FRAMES. Read ahead by
-        // the same number of frames in the overlap ring. Then the total delay
-        // of the source is OVERLAP_FRAMES in the two formant modes.
+        let previous = self.raw[ring(write as i32 - 1)];
+        self.overlap[self.overlap_index] = Q14::from_bits(self.formant.process_analysis(
+            sample.to_bits(),
+            previous.to_bits(),
+            self.periods.as_slice(),
+            write,
+            step.previous_period.to_bits(),
+        ));
         let overlap_read = (self.overlap_index + ANALYSIS_FRAMES) % OVERLAP_FRAMES;
-        let mut filtered = self.overlap[overlap_read];
-        for filter in &mut self.post {
-            filtered = filter.process_sample(filtered);
+        let mut lpc_filtered = self.overlap[overlap_read];
+        for filter in &mut self.lpc_post {
+            lpc_filtered = filter.process_sample(lpc_filtered);
         }
-        self.filtered[write] = filtered;
+        self.lpc_filtered[write] = lpc_filtered;
         let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
         let dry = self.raw[delayed];
-        let mut mix = [Q14::ZERO; 2];
-        let mut final_ratio = Q14::ONE;
-        if self.config.mode == MultiVoiceMode::Choir {
-            let voice_count = self.config.choir_voices as usize;
-            // Secondary voices read the lead history written by voice zero.
-            {
-                let (value, ratio) = self.render_lead(delayed, numeric);
-                final_ratio = ratio;
-                self.voice_ratios[0] = ratio;
-                for (channel, sum) in mix.iter_mut().enumerate() {
-                    *sum = *sum
-                        + if self.config.stereo_output {
-                            value.mul(self.pan[0][channel])
-                        } else {
-                            value
-                        };
-                }
+        let mut raw_filtered = dry;
+        for filter in &mut self.post {
+            raw_filtered = filter.process_sample(raw_filtered);
+        }
+        self.filtered[write] = raw_filtered;
+
+        if self.config.formant.enabled {
+            if self.formant_mix < Q14::ONE {
+                self.formant_mix = (self.formant_mix + SWITCH_FADE_STEP).min(Q14::ONE);
             }
-            {
-                let mut voice = 1;
-                while voice + 4 <= voice_count {
-                    let mut positions = [Q14::ZERO; 4];
-                    // After the lead update, set the reader positions in
-                    // voice order.
-                    for (lane, position) in positions.iter_mut().enumerate() {
-                        let current_voice = voice + lane;
-                        let delay = ring(delayed as i32 - self.delays[current_voice]);
-                        let (period, _) = self.period_for(delay, write);
-                        self.current_output_period = period;
-                        let ratio = self.drift_ratio[current_voice];
-                        final_ratio = ratio;
-                        *position = self.move_reader(
-                            current_voice,
-                            ratio,
-                            period,
-                            self.delays[current_voice],
-                            false,
-                        );
-                    }
-                    let values =
-                        positions.map(|position| history::interpolation(&self.lead, position).0);
-                    // Keep the voice and channel order of each wrapping sum.
-                    for (lane, value) in values.into_iter().enumerate() {
-                        let current_voice = voice + lane;
-                        for (channel, sum) in mix.iter_mut().enumerate() {
-                            *sum = *sum
-                                + if self.config.stereo_output {
-                                    value.mul(self.pan[current_voice][channel])
-                                } else {
-                                    value
-                                };
-                        }
-                    }
-                    voice += 4;
-                }
-                // The zero to three secondary readers that are left use
-                // scalar code.
-                for voice in voice..voice_count {
-                    let delay = ring(delayed as i32 - self.delays[voice]);
-                    let (period, _) = self.period_for(delay, write);
-                    self.current_output_period = period;
-                    let ratio = self.drift_ratio[voice];
-                    final_ratio = ratio;
-                    let position =
-                        self.move_reader(voice, ratio, period, self.delays[voice], false);
-                    let (value, _) = history::interpolation(&self.lead, position);
-                    for (channel, sum) in mix.iter_mut().enumerate() {
-                        *sum = *sum
-                            + if self.config.stereo_output {
-                                value.mul(self.pan[voice][channel])
-                            } else {
-                                value
-                            };
-                    }
-                }
+        } else if self.formant_mix > Q14::ZERO {
+            self.formant_mix = (self.formant_mix - SWITCH_FADE_STEP).max(Q14::ZERO);
+            if self.formant_mix == Q14::ZERO {
+                self.formant.reset_synthesis();
+                self.lead_previous_output = [Q14::ZERO; 2];
+                self.previous_output = [[Q14::ZERO; 2]; 2];
             }
-            // The multiplication by 1.0 keeps the wrap of the product.
-            for sum in &mut mix {
-                *sum = Q14::ONE.mul(*sum);
+        }
+        if self.config.stereo_output {
+            if self.stereo_mix < Q14::ONE {
+                self.stereo_mix = (self.stereo_mix + SWITCH_FADE_STEP).min(Q14::ONE);
             }
-        } else {
-            let (period, ratio) = self.period_for(delayed, write);
-            self.current_output_period = period;
+        } else if self.stereo_mix > Q14::ZERO {
+            self.stereo_mix = (self.stereo_mix - SWITCH_FADE_STEP).max(Q14::ZERO);
+        }
+        if self.bank_fade < Q14::ONE {
+            self.bank_fade = (self.bank_fade + SWITCH_FADE_STEP).min(Q14::ONE);
+        }
+
+        let delayed_period_ratio = self.period_for(delayed, write);
+        if self.config.mode == MultiVoiceMode::Harmony {
+            let (period, ratio) = delayed_period_ratio;
             let counter = self.control_counter;
             self.control_counter += 1;
             if counter == CONTROL_DUE {
@@ -1215,53 +1642,110 @@ impl Resynthesis {
                     } else {
                         period.div(ratio)
                     };
-                    let (ratio, gain) = self.harmony.advance_voice(corrected_period, voice);
-                    self.harmony_ratios[voice] = ratio;
+                    let (voice_ratio, gain) = self.harmony.advance_voice(corrected_period, voice);
+                    self.harmony_ratios[voice] = voice_ratio;
                     self.harmony_gains[voice] = gain;
                 }
             }
-            for slot in 0..5 {
-                let mut current: Q14 = if slot == 0 {
-                    ratio
-                } else {
-                    self.harmony_ratios[slot - 1].mul(ratio)
-                };
-                current = self.shift.mul(current);
-                if period == Q6::ZERO {
-                    current = Q14::ONE;
-                }
-                final_ratio = current;
-                self.voice_ratios[slot] = current;
-                let position = self.move_reader(slot, current, period, 0, false);
-                let (mut value, _) = history::interpolation(&self.filtered, position);
-                if slot > 0 {
-                    value = value.mul(self.harmony_gains[slot - 1]);
-                }
-                for (channel, sum) in mix.iter_mut().enumerate() {
-                    *sum = *sum
-                        + if self.config.stereo_output && slot > 0 {
-                            value.mul(self.harmony_pan[slot - 1][channel])
-                        } else {
-                            value
-                        };
-                }
-            }
-            if self.config.formant.enabled {
-                self.formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
-                mix = self
-                    .formant
-                    .forward_stereo(mix.map(Q14::to_bits), self.formant_position, numeric)
-                    .map(Q14::from_bits);
-                for (channel, value) in mix.iter_mut().enumerate() {
-                    *value =
-                        Q14::from_bits(self.formant.model_glottal(
-                            value.to_bits(),
-                            self.previous_output[channel].to_bits(),
-                        ));
-                    self.previous_output[channel] = *value;
-                }
-            }
         }
+
+        let (mut mix, final_ratio) = if self.bank_fade == Q14::ONE {
+            match self.active.mode {
+                MultiVoiceMode::Choir => {
+                    let (lead_val, lead_ratio, lead_period) =
+                        self.render_choir_lead(true, delayed, delayed_period_ratio, true, numeric);
+                    self.voice_ratios[0] = lead_ratio;
+                    let (bus, ratio, out_period) =
+                        self.render_choir_voices(true, delayed, lead_val, lead_ratio, lead_period);
+                    self.current_output_period = out_period;
+                    (bus, ratio)
+                }
+                MultiVoiceMode::Harmony => {
+                    let (bus, ratio, out_period) = self.render_harmony_bank(
+                        true,
+                        delayed,
+                        delayed_period_ratio,
+                        true,
+                        true,
+                        numeric,
+                    );
+                    self.current_output_period = out_period;
+                    (bus, ratio)
+                }
+            }
+        } else {
+            match (self.shadow.mode, self.active.mode) {
+                (MultiVoiceMode::Choir, MultiVoiceMode::Choir) => {
+                    let (lead_val, lead_ratio, lead_period) =
+                        self.render_choir_lead(true, delayed, delayed_period_ratio, true, numeric);
+                    self.voice_ratios[0] = lead_ratio;
+                    let (shadow_bus, _, _) =
+                        self.render_choir_voices(false, delayed, lead_val, lead_ratio, lead_period);
+                    let (active_bus, ratio, out_period) =
+                        self.render_choir_voices(true, delayed, lead_val, lead_ratio, lead_period);
+                    self.current_output_period = out_period;
+                    (blend_frames(shadow_bus, active_bus, self.bank_fade), ratio)
+                }
+                (MultiVoiceMode::Choir, MultiVoiceMode::Harmony) => {
+                    let (lead_val, lead_ratio, lead_period) = self.render_choir_lead(
+                        false,
+                        delayed,
+                        delayed_period_ratio,
+                        false,
+                        numeric,
+                    );
+                    let (shadow_bus, _, _) =
+                        self.render_choir_voices(false, delayed, lead_val, lead_ratio, lead_period);
+                    let (active_bus, ratio, out_period) = self.render_harmony_bank(
+                        true,
+                        delayed,
+                        delayed_period_ratio,
+                        false,
+                        true,
+                        numeric,
+                    );
+                    self.current_output_period = out_period;
+                    (blend_frames(shadow_bus, active_bus, self.bank_fade), ratio)
+                }
+                (MultiVoiceMode::Harmony, MultiVoiceMode::Choir) => {
+                    let (shadow_bus, _, _) = self.render_harmony_bank(
+                        false,
+                        delayed,
+                        delayed_period_ratio,
+                        false,
+                        false,
+                        numeric,
+                    );
+                    let (lead_val, lead_ratio, lead_period) =
+                        self.render_choir_lead(true, delayed, delayed_period_ratio, true, numeric);
+                    self.voice_ratios[0] = lead_ratio;
+                    let (active_bus, ratio, out_period) =
+                        self.render_choir_voices(true, delayed, lead_val, lead_ratio, lead_period);
+                    self.current_output_period = out_period;
+                    (blend_frames(shadow_bus, active_bus, self.bank_fade), ratio)
+                }
+                (MultiVoiceMode::Harmony, MultiVoiceMode::Harmony) => {
+                    let (shadow_bus, _, _) = self.render_harmony_bank(
+                        false,
+                        delayed,
+                        delayed_period_ratio,
+                        false,
+                        false,
+                        numeric,
+                    );
+                    let (active_bus, ratio, out_period) = self.render_harmony_bank(
+                        true,
+                        delayed,
+                        delayed_period_ratio,
+                        true,
+                        true,
+                        numeric,
+                    );
+                    self.current_output_period = out_period;
+                    (blend_frames(shadow_bus, active_bus, self.bank_fade), ratio)
+                }
+            }
+        };
         if self.modulation != 0 {
             if self.current_output_period != Q6::ZERO {
                 // The phase advances by depth x 4 x ratio / period, in Q14

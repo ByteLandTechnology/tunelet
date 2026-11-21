@@ -12,10 +12,12 @@ const FADE_FRAMES: usize = 200;
 /// Reverse playback of recent stereo audio in repeated loops with fades.
 ///
 /// Alien comes after resynthesis. Its input history and loop phase advance
-/// also when Alien is disabled. Thus, when you enable Alien, it can play
-/// audio that it recorded during bypass. A change of the loop length keeps
-/// the history and clamps the current phase into the new loop. The boundary
-/// fades are 200 frames long at all sample rates.
+/// also when Alien is disabled. If you enable Alien, it starts a new capture
+/// epoch and ramps the wet mix over 200 frames. Thus, audio from bypass does
+/// not play. If you disable Alien, it ramps the wet mix to zero over 200
+/// frames. A change of the loop length clamps the phase into the new loop and
+/// crossfades from the previous cursor over 200 frames. The boundary fade
+/// length is `min(200, loop_frames / 2)`, which is zero at `loop_frames` of 1.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -25,13 +27,12 @@ const FADE_FRAMES: usize = 200;
 )]
 pub struct AlienConfig {
     /// Selects reversed playback instead of the direct input. The default is
-    /// `false`. The recording and the phase continue to advance in both
-    /// states.
+    /// `false`. A change ramps the wet mix over 200 frames. If you enable
+    /// Alien, it starts a new capture epoch.
     pub enabled: bool,
     /// The loop length in frames, 1..=96000. The default is 95,999.
     /// This value is a frame count at the two rates. Thus, its duration in
-    /// seconds changes with the sample rate. A short loop can be fully inside
-    /// the fades.
+    /// seconds changes with the sample rate. At 1, the boundary fade is zero.
     pub loop_frames: u32,
 }
 impl Default for AlienConfig {
@@ -57,8 +58,78 @@ impl AlienConfig {
     }
 }
 
-/// A stereo ring recorder with a reverse reader and an independent loop
-/// phase.
+/// Returns the boundary fade length for `loop_frames`: zero at 1, and at most
+/// 200 frames.
+#[inline]
+fn loop_fade_frames(loop_frames: usize) -> usize {
+    if loop_frames <= 1 {
+        0
+    } else {
+        FADE_FRAMES.min(loop_frames / 2)
+    }
+}
+
+/// One reverse cursor and the count of frames recorded in its capture epoch.
+#[derive(Clone, Copy, Debug)]
+struct ReverseCursor {
+    /// The current frame in the loop, always less than `loop_len`.
+    phase: usize,
+    /// The validated loop length, not more than half of the history capacity.
+    loop_len: usize,
+    /// The number of frames recorded in this epoch before the current frame.
+    captured: usize,
+}
+
+impl ReverseCursor {
+    /// Creates a cursor at phase zero for `loop_len` and `captured` frames.
+    fn new(loop_len: usize, captured: usize) -> Self {
+        Self {
+            phase: 0,
+            loop_len,
+            captured,
+        }
+    }
+
+    /// Reads the reversed stereo sample for this cursor, or zero before its
+    /// capture epoch.
+    fn sample(self, buffer: &[[Q14; 2]], write: usize) -> [Q14; 2] {
+        let offset = self.phase * 2;
+        if offset > self.captured {
+            return [Q14::ZERO; 2];
+        }
+        let read = write + HISTORY_FRAMES - offset;
+        let read = if read >= HISTORY_FRAMES {
+            read - HISTORY_FRAMES
+        } else {
+            read
+        };
+        let mut result = buffer[read];
+        let fade_frames = loop_fade_frames(self.loop_len);
+        let distance = self
+            .phase
+            .min(self.loop_len - self.phase)
+            .min(self.captured - offset);
+        if distance < fade_frames {
+            let gain: Q14 = Fixed::<0>::from_bits(distance as i32)
+                .div(Fixed::<0>::from_bits(fade_frames as i32));
+            result = result.map(|sample| sample.mul::<14, 14>(gain));
+        }
+        result
+    }
+
+    /// Advances the loop phase and the epoch frame count by one frame.
+    fn step(&mut self) {
+        self.phase += 1;
+        if self.phase == self.loop_len {
+            self.phase = 0;
+        }
+        if self.captured < HISTORY_FRAMES {
+            self.captured += 1;
+        }
+    }
+}
+
+/// A stereo ring recorder with paired reverse cursors and wet-mix ramps.
 #[derive(Debug)]
 pub(crate) struct Alien {
     /// The validated controls, which include the selection of the wet output.
@@ -66,80 +137,121 @@ pub(crate) struct Alien {
     /// 192,000 stereo Q14 frames, which are allocated one time at
     /// construction.
     buffer: Vec<[Q14; 2]>,
-    /// The current recording position. The position of the reverse reader
-    /// comes from this cursor.
+    /// The current recording position in the ring buffer.
     read: usize,
-    /// The current frame in the loop. It is always less than `loop_len`.
-    phase: usize,
-    /// The validated loop length. It is not more than half of the history
-    /// capacity.
-    loop_len: usize,
+    /// The active reverse cursor, which telemetry also reports.
+    active: ReverseCursor,
+    /// The previous reverse cursor for crossfades across loop changes.
+    shadow: ReverseCursor,
+    /// The crossfade progress toward `active`, in `0..=FADE_FRAMES`.
+    cursor_fade_frames: usize,
+    /// The wet mix ramp position, in `0..=FADE_FRAMES`.
+    wet_frames: usize,
 }
 impl Alien {
     /// Allocates a silent stereo ring from validated loop settings.
     pub(crate) fn new(config: AlienConfig) -> Self {
+        let cursor = ReverseCursor::new(config.loop_frames as usize, 0);
         Self {
             config,
             buffer: vec![[Q14::default(); 2]; HISTORY_FRAMES],
             read: 0,
-            phase: 0,
-            loop_len: config.loop_frames as usize,
+            active: cursor,
+            shadow: cursor,
+            cursor_fade_frames: FADE_FRAMES,
+            wet_frames: if config.enabled { FADE_FRAMES } else { 0 },
         }
     }
-    /// Applies a validated configuration, keeps the recorded audio and clamps
-    /// the phase into the new loop, which is not empty.
+    /// Applies a validated configuration. If Alien becomes enabled, starts a
+    /// new capture epoch. If the loop length changes, crossfades the cursors.
     pub(crate) fn set_config(&mut self, config: AlienConfig) {
+        let was_enabled = self.config.enabled;
+        let new_loop_len = config.loop_frames as usize;
         self.config = config;
-        self.loop_len = config.loop_frames as usize;
-        self.phase = self.phase.min(self.loop_len - 1);
+        if !was_enabled && config.enabled {
+            if self.wet_frames > 0 && self.cursor_fade_frames >= FADE_FRAMES / 2 {
+                self.shadow = self.active;
+                self.cursor_fade_frames = 0;
+            }
+            self.active = ReverseCursor::new(new_loop_len, 0);
+        } else if new_loop_len != self.active.loop_len {
+            if (was_enabled || self.wet_frames > 0) && self.cursor_fade_frames >= FADE_FRAMES / 2 {
+                self.shadow = self.active;
+                self.cursor_fade_frames = 0;
+            }
+            self.active.loop_len = new_loop_len;
+            self.active.phase = self.active.phase.min(new_loop_len - 1);
+        }
     }
     /// Returns the loop length and the current frame in the loop.
     ///
     /// The frame is always less than the length. The stage state does not
     /// change.
     pub(crate) fn loop_state(&self) -> (usize, usize) {
-        (self.loop_len, self.phase)
+        (self.active.loop_len, self.active.phase)
     }
-    /// Clears the recorded audio and sets both cursors to zero, but keeps the
-    /// configured loop.
+    /// Clears the recorded audio and resets the cursors and ramps, but keeps
+    /// the configured loop.
     pub(crate) fn reset(&mut self) {
         self.buffer.fill([Q14::default(); 2]);
         self.read = 0;
-        self.phase = 0;
+        let cursor = ReverseCursor::new(self.active.loop_len, 0);
+        self.active = cursor;
+        self.shadow = cursor;
+        self.cursor_fade_frames = FADE_FRAMES;
+        self.wet_frames = if self.config.enabled { FADE_FRAMES } else { 0 };
     }
-    /// Records a frame, selects the direct or reverse output, then advances
-    /// both cursors.
-    /// The recording cursor moves forward by one and the reverse offset
+    /// Records a frame, blends the reverse cursors and Q14 wet mix, then
+    /// advances the cursors.
+    ///
+    /// The recording cursor moves forward by one and each reverse offset
     /// increases by two. Thus, the playback moves backward by one frame. The
     /// validated loop limit keeps that subtraction in a single ring wrap.
     pub(crate) fn process_sample(&mut self, input: [Q14; 2]) -> [Q14; 2] {
         self.buffer[self.read] = input;
-        let result = if self.config.enabled {
-            let read = self.read + HISTORY_FRAMES - self.phase * 2;
-            let read = if read >= HISTORY_FRAMES {
-                read - HISTORY_FRAMES
-            } else {
-                read
-            };
-            let distance = self.phase.min(self.loop_len - self.phase);
-            let mut result = self.buffer[read];
-            if distance < FADE_FRAMES {
-                let gain: Q14 = Fixed::<0>::from_bits(distance as i32)
-                    .div(Fixed::<0>::from_bits(FADE_FRAMES as i32));
-                result = result.map(|sample| sample.mul::<14, 14>(gain));
+        if self.config.enabled {
+            if self.wet_frames < FADE_FRAMES {
+                self.wet_frames += 1;
             }
-            result
-        } else {
+        } else if self.wet_frames > 0 {
+            self.wet_frames -= 1;
+        }
+        let result = if self.wet_frames == 0 {
+            self.cursor_fade_frames = FADE_FRAMES;
             input
+        } else {
+            let mut wet = self.active.sample(&self.buffer, self.read);
+            if self.cursor_fade_frames < FADE_FRAMES {
+                self.cursor_fade_frames += 1;
+                if self.cursor_fade_frames < FADE_FRAMES {
+                    let old = self.shadow.sample(&self.buffer, self.read);
+                    let fade: Q14 = Fixed::<0>::from_bits(self.cursor_fade_frames as i32)
+                        .div(Fixed::<0>::from_bits(FADE_FRAMES as i32));
+                    let inv = Q14::ONE - fade;
+                    wet = [
+                        (old[0].mul::<14, 28>(inv) + wet[0].mul::<14, 28>(fade)).rescale(),
+                        (old[1].mul::<14, 28>(inv) + wet[1].mul::<14, 28>(fade)).rescale(),
+                    ];
+                }
+                self.shadow.step();
+            }
+            if self.wet_frames == FADE_FRAMES {
+                wet
+            } else {
+                let mix: Q14 = Fixed::<0>::from_bits(self.wet_frames as i32)
+                    .div(Fixed::<0>::from_bits(FADE_FRAMES as i32));
+                let dry = Q14::ONE - mix;
+                [
+                    (input[0].mul::<14, 28>(dry) + wet[0].mul::<14, 28>(mix)).rescale(),
+                    (input[1].mul::<14, 28>(dry) + wet[1].mul::<14, 28>(mix)).rescale(),
+                ]
+            }
         };
         self.read += 1;
         if self.read == HISTORY_FRAMES {
             self.read = 0;
         }
-        self.phase += 1;
-        if self.phase == self.loop_len {
-            self.phase = 0;
-        }
+        self.active.step();
         result
     }
 }

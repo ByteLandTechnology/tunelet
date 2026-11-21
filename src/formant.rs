@@ -28,13 +28,15 @@ use crate::{Error, SampleRate};
 /// The controls for vocal-tract changes and synthesized aspiration during
 /// resynthesis.
 ///
-/// This stage is disabled by default. If it is enabled, it does these steps:
+/// This stage is disabled by default. The LPC analysis runs continuously on
+/// the input audio. If the stage is enabled, it does these steps:
 /// 1. It estimates an LPC model.
 /// 2. It removes the spectral envelope of the input.
 /// 3. It applies a changed model to the resampled audio.
 ///
-/// If width and stretch are 1, the model dimensions do not change. But the
-/// fixed-point analysis and synthesis path does not give a bit-identical
+/// A change to `enabled` crossfades the dry and formant voice paths over 256
+/// frames. If width and stretch are 1, the model dimensions do not change. But
+/// the fixed-point analysis and synthesis path does not give a bit-identical
 /// copy of the input. Aspiration occurs only if the formant path is enabled.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
@@ -182,12 +184,17 @@ pub(crate) struct Formant {
     /// A counter that increases from a negative value to zero. At zero, the
     /// stage tries to make a model.
     design_counter: i32,
-    /// The separate Q14 feedback histories of the synthesis, for the left and
-    /// right channels. Mono synthesis uses channel zero.
-    history: [[i32; MAX_ORDER]; 2],
-    /// The next slot in the synthesis history. The two channels use the same
-    /// slot.
-    history_index: usize,
+    /// The separate Q14 feedback histories of mono lead synthesis, for the
+    /// active and shadow voice banks.
+    lead_history: [[i32; MAX_ORDER]; 2],
+    /// The next slot in each mono lead synthesis history.
+    lead_history_index: [usize; 2],
+    /// The separate Q14 feedback histories of stereo synthesis, for the active
+    /// and shadow voice banks and the left and right channels.
+    history: [[[i32; MAX_ORDER]; 2]; 2],
+    /// The next slot in each stereo synthesis history. The two channels of a
+    /// bank use the same slot.
+    history_index: [usize; 2],
     /// The two previous normalized autocorrelation vectors for the moving
     /// average.
     correlation_history: [[i32; 111]; 2],
@@ -258,8 +265,10 @@ impl Formant {
             previous: 0,
             blend: 0,
             design_counter: 0,
-            history: [[0; MAX_ORDER]; 2],
-            history_index: 0,
+            lead_history: [[0; MAX_ORDER]; 2],
+            lead_history_index: [0; 2],
+            history: [[[0; MAX_ORDER]; 2]; 2],
+            history_index: [0; 2],
             correlation_history: [[0; 111]; 2],
             correlation_sum: [0; 111],
             smooth_index: 0,
@@ -318,14 +327,29 @@ impl Formant {
         self.input.fill(0_i32);
 
         self.stamps.fill(Stamp::default());
-        self.history = [[0; MAX_ORDER]; 2];
-        self.history_index = 0;
+        self.reset_synthesis();
         self.current = BANKS - 1;
         self.next_filter();
         self.next_filter();
         self.design_counter = 0;
-        self.noise_filter.reset();
         self.smooth_reset = true;
+    }
+    /// Clears all synthesis feedback memories and the aspiration filter.
+    ///
+    /// The analysis input, the stamps and the coefficient banks do not change.
+    pub(crate) fn reset_synthesis(&mut self) {
+        self.lead_history = [[0; MAX_ORDER]; 2];
+        self.lead_history_index = [0; 2];
+        self.history = [[[0; MAX_ORDER]; 2]; 2];
+        self.history_index = [0; 2];
+        self.noise_filter.reset();
+    }
+    /// Clears the mono and stereo synthesis memories of one voice bank slot.
+    pub(crate) fn reset_slot(&mut self, slot: usize) {
+        self.lead_history[slot] = [0; MAX_ORDER];
+        self.lead_history_index[slot] = 0;
+        self.history[slot] = [[0; MAX_ORDER]; 2];
+        self.history_index[slot] = 0;
     }
     /// Starts a new model and a new correlation window when pitch acquisition
     /// locks.
@@ -781,69 +805,78 @@ impl Formant {
     /// Applies the optional aspiration and the stamped synthesis model to one
     /// Q14 excitation, then scales the result by the width.
     ///
-    /// The function uses the feedback history of channel zero. `position` is
-    /// an integer frame of the input history. Resynthesis aligns this frame.
+    /// `slot` selects the feedback history of the voice bank. If `allow_noise`
+    /// is `false`, the random stream and the noise filter do not advance.
+    /// `position` is an integer frame of the input history.
     pub(crate) fn forward(
         &mut self,
+        slot: usize,
         sample: i32,
         position: i32,
+        allow_noise: bool,
         context: &mut NumericContext,
     ) -> i32 {
-        let sample = self.add_noise(sample, context);
+        let sample = if allow_noise {
+            self.add_noise(sample, context)
+        } else {
+            sample
+        };
         let mut coefficients = [0; MAX_ORDER];
         let order = self.coefficients(position, &mut coefficients);
         let mut sum = 0_i32;
-        let mut cursor = self.history_index;
+        let mut cursor = self.lead_history_index[slot];
         for &coefficient in &coefficients[..order] {
             cursor = if cursor == 0 {
                 MAX_ORDER - 1
             } else {
                 cursor - 1
             };
-            sum = sum.wrapping_add(self.history[0][cursor].wrapping_mul(coefficient));
+            sum = sum.wrapping_add(self.lead_history[slot][cursor].wrapping_mul(coefficient));
         }
         let sample = sample.wrapping_add(round_q14(sum));
-        self.history[0][self.history_index] = sample;
-        self.history_index += 1;
-        if self.history_index == MAX_ORDER {
-            self.history_index = 0;
-        }
+        let index = self.lead_history_index[slot];
+        self.lead_history[slot][index] = sample;
+        self.lead_history_index[slot] = if index + 1 == MAX_ORDER { 0 } else { index + 1 };
         round_q14(sample.wrapping_mul(self.width))
     }
     /// Synthesizes two Q14 channels with one stamped model for the two
-    /// channels. Each channel has its own feedback history.
+    /// channels. Each bank slot and channel has its own feedback history.
     ///
-    /// The function applies the aspiration mix one time to the stereo
-    /// midpoint. Then it adds the change of the midpoint to the two channels.
-    /// If aspiration is active, the function reads one random value for each
-    /// frame. The history cursor is the same for the two channels. It
-    /// advances only after the two channels.
+    /// If `allow_noise` is `true`, the function applies the aspiration mix one
+    /// time to the stereo midpoint and adds the change to the two channels.
+    /// Then, if aspiration is active, the function reads one random value for
+    /// each frame. The history cursor advances after the two channels.
     pub(crate) fn forward_stereo(
         &mut self,
+        slot: usize,
         mut samples: [i32; 2],
         position: i32,
+        allow_noise: bool,
         context: &mut NumericContext,
     ) -> [i32; 2] {
-        let mid = samples[0].wrapping_add(samples[1]).wrapping_shr(1);
-        let noise = self.add_noise(mid, context).wrapping_sub(mid);
-        for sample in &mut samples {
-            *sample = sample.wrapping_add(noise);
+        if allow_noise {
+            let mid = samples[0].wrapping_add(samples[1]).wrapping_shr(1);
+            let noise = self.add_noise(mid, context).wrapping_sub(mid);
+            for sample in &mut samples {
+                *sample = sample.wrapping_add(noise);
+            }
         }
         let mut coefficients = [0; MAX_ORDER];
         let order = self.coefficients(position, &mut coefficients);
+        let index = self.history_index[slot];
         for (channel, sample) in samples.iter_mut().enumerate() {
             let mut sum = 0_i32;
             for (i, &coefficient) in coefficients[..order].iter().enumerate() {
                 sum = sum.wrapping_add(
-                    self.history[channel][(self.history_index + MAX_ORDER - i - 1) % MAX_ORDER]
+                    self.history[slot][channel][(index + MAX_ORDER - i - 1) % MAX_ORDER]
                         .wrapping_mul(coefficient),
                 );
             }
             *sample = sample.wrapping_add(round_q14(sum));
-            self.history[channel][self.history_index] = *sample;
+            self.history[slot][channel][index] = *sample;
             *sample = round_q14(sample.wrapping_mul(self.width));
         }
-        self.history_index = (self.history_index + 1) % MAX_ORDER;
+        self.history_index[slot] = (index + 1) % MAX_ORDER;
         samples
     }
 }
