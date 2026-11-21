@@ -57,17 +57,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: "false"
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack,wasm-opt
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
-          package-manager-cache: false
+          cache: "npm"
       - run: cargo doc --locked --no-deps
-      - run: cargo package --locked
+      - run: |
+          rm -rf target/package
+          cargo package --locked
       - run: npm ci
-      - run: npm run build
+      # Check the archive files and loadTunelet() before npm pack.
+      - run: npm run verify:pack
       - run: npm pack --ignore-scripts
       # GitHub Packages accepts only names in the scope of the owner.
       - run: |

@@ -52,9 +52,10 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
   controls, feedback, reset and drain must not allocate memory, acquire
   locks or do I/O. The Wasm binding can also allocate when it converts
   objects, events, feedback and errors.
-- The fixed-point arithmetic uses explicit wrapping and quantization. If
-  you change the operation order, the rounding or a table value, the
-  output samples change. Treat this as a change of behavior.
+- The fixed-point arithmetic uses `i64` products, saturated `i32` bounds
+  and explicit quantization. If you change the operation order, the
+  rounding or a table value, the output samples change. Treat this as a
+  change of behavior.
 - A call that can fail must validate the full block or configuration
   before it changes the state or the output. Keep this rule.
 - The default build has no dependencies. Make each Wasm dependency
@@ -138,7 +139,7 @@ npm run build
   writes `SHA256SUMS.txt` and attests the files. Then the publish jobs
   promote the release in sequence to GitHub Packages, npmjs.org and
   crates.io. To verify the package archives locally, run
-  `cargo package --locked` and `npm pack`.
+  `cargo package --locked`, `npm pack` and `npm run verify:pack`.
 
 ## Prohibited changes
 
