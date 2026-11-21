@@ -146,6 +146,8 @@ pub(crate) struct Reverb {
     /// The largest absolute Q14 wet contribution in the telemetry window. No
     /// audio calculation reads it.
     wet_peak: i32,
+    /// If `true`, the stage changed state since construction or the last reset.
+    dirty: bool,
 }
 
 /// The divisor for a division by two that truncates toward zero, also for
@@ -182,6 +184,7 @@ impl Reverb {
             binaural_offset: layout.binaural_offset,
             scratch: layout.capacity - 1,
             wet_peak: 0,
+            dirty: false,
         };
         result.set_config(config);
         result
@@ -205,9 +208,12 @@ impl Reverb {
     /// Clears the delay buffer, sets the write cursor to zero and resets both
     /// damping filters.
     pub(crate) fn reset(&mut self) {
-        self.delay.reset();
-        self.lpf1.reset();
-        self.lpf2.reset();
+        if self.dirty {
+            self.delay.reset();
+            self.lpf1.reset();
+            self.lpf2.reset();
+            self.dirty = false;
+        }
     }
     /// Returns the largest absolute Q14 wet contribution since the last
     /// clear, as f32.
@@ -224,15 +230,16 @@ impl Reverb {
     /// averages use integer division toward zero. The PCM downmix in the
     /// processor uses a shift.
     pub(crate) fn process_sample(&mut self, frame: [Q14; 2]) -> [Q14; 2] {
+        if !self.config.enabled {
+            return frame;
+        }
+        self.dirty = true;
         let [left, right] = frame;
         let mono =
             Q14::from_bits(((i64::from(left.to_bits()) + i64::from(right.to_bits())) / 2) as i32);
         let t = self.taps;
         let dry = Q14::ONE - self.mix;
         let d = &mut self.delay;
-        if !self.config.enabled {
-            return frame;
-        }
         let mut result = match self.config.mode {
             ReverbMode::Echo => {
                 d.put(mono, t[0]);

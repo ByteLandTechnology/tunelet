@@ -447,6 +447,8 @@ pub(crate) struct Resynthesis {
     correction_decay: Q14,
     /// If `true`, the current correction target and octave are selected.
     scale_initialized: bool,
+    /// The number of frames that the histories hold since the last reset.
+    written: u16,
     /// The index of the active target. It is valid only if the correction
     /// table is initialized and not empty.
     scale_index: usize,
@@ -538,6 +540,7 @@ impl Resynthesis {
             correction: Q14::ONE,
             correction_decay: Q14::ZERO,
             scale_initialized: false,
+            written: 0,
             scale_index: 0,
             octave: 0,
             shift: Q14::ONE,
@@ -554,7 +557,8 @@ impl Resynthesis {
         };
         result.configure_coefficients();
         result.configure_shift_filters();
-        result.reset();
+        result.create_delays();
+        result.old_position = result.positions[0];
         result
     }
 
@@ -697,17 +701,42 @@ impl Resynthesis {
     /// The correction keyboard, the active note table and the random state
     /// that the caller holds do not change here.
     fn reset_audio(&mut self) {
+        let written = usize::from(self.written);
+        self.written = 0;
         self.pitch.reset();
-        self.raw.fill(Q14::ZERO);
+        if written == HISTORY {
+            self.raw.fill(Q14::ZERO);
+            self.filtered.fill(Q14::ZERO);
+            self.lead.fill(Q14::ZERO);
+            self.periods.fill(Q6::ZERO);
+            self.previous_periods.fill(Q6::ZERO);
+            self.ratios.fill(Q14::ONE);
+        } else if written > 0 {
+            let end = written + 1;
+            let lead_start = HISTORY - OVERLAP_FRAMES + 1;
+            self.raw[1..end].fill(Q14::ZERO);
+            self.filtered[1..end].fill(Q14::ZERO);
+            self.lead[1..end].fill(Q14::ZERO);
+            if written < OVERLAP_FRAMES {
+                self.periods[1..end].fill(Q6::ZERO);
+                self.periods[lead_start..lead_start + written].fill(Q6::ZERO);
+            } else if written < HISTORY - OVERLAP_FRAMES {
+                self.periods[..end].fill(Q6::ZERO);
+                self.periods[lead_start..].fill(Q6::ZERO);
+            } else {
+                self.periods.fill(Q6::ZERO);
+            }
+            self.previous_periods[1..end].fill(Q6::ZERO);
+            self.ratios[1..end].fill(Q14::ONE);
+        }
         self.write = 0;
         self.formant.reset();
         self.harmony.reset();
-        self.filtered.fill(Q14::ZERO);
-        self.lead.fill(Q14::ZERO);
-        self.periods.fill(Q6::ZERO);
-        self.previous_periods.fill(Q6::ZERO);
-        self.ratios.fill(Q14::ONE);
-        self.overlap.fill(Q14::ZERO);
+        if written >= OVERLAP_FRAMES {
+            self.overlap.fill(Q14::ZERO);
+        } else if written > 0 {
+            self.overlap[1..written + 1].fill(Q14::ZERO);
+        }
         self.overlap_index = 0;
         self.previous_output = [Q14::ZERO; 2];
         for filter in &mut self.post {
@@ -1082,6 +1111,9 @@ impl Resynthesis {
         if self.write == HISTORY {
             self.write = 0;
         }
+        if usize::from(self.written) < HISTORY {
+            self.written += 1;
+        }
         self.raw[self.write] = sample;
         let was_tracking = !self.pitch.is_detecting();
         let step = self.pitch.process_sample(sample.to_bits());
@@ -1096,8 +1128,8 @@ impl Resynthesis {
             } else {
                 5
             };
-            for voice in 0..voices {
-                self.positions[voice] = self.positions[voice] - position_of(HISTORY as i32);
+            for position in &mut self.positions[..voices] {
+                *position = *position - position_of(HISTORY as i32);
             }
             self.old_position = self.old_position - position_of(HISTORY as i32);
         }
