@@ -8,7 +8,7 @@
  * `defaultConfig`, `initSync` and the configuration, event and feedback types.
  */
 import "./text-codec.js";
-import init, { initSync } from "../pkg/tunelet.js";
+import init from "../pkg/tunelet.js";
 import type { InitInput, InitOutput } from "../pkg/tunelet.js";
 
 export * from "../pkg/tunelet.js";
@@ -183,7 +183,9 @@ async function initialize(
   const input = await source;
 
   if (input instanceof URL && input.protocol === "file:") {
-    return initSync({ module: (await readFileUrl(input)) as unknown as BufferSource });
+    return init({
+      module_or_path: (await readFileUrl(input)) as unknown as BufferSource,
+    });
   }
 
   if (
