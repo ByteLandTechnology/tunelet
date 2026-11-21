@@ -3,17 +3,19 @@
 use crate::config::validate_output_gain;
 use crate::effects::alien::AlienConfig;
 use crate::effects::punch::PunchConfig;
-use crate::effects::reverb::ReverbConfig;
+use crate::effects::reverb::{validate_reverb_mix, ReverbConfig};
 use crate::effects::warm::WarmConfig;
+use crate::formant::validate_formant_shift;
 use crate::midi::MidiEvent;
+use crate::resynthesis::{validate_dry_mix, validate_pitch_ratio, validate_retune_ms};
 use crate::{Error, EventProblem, ProcessorConfig, ResynthesisConfig};
 
 /// A configuration or MIDI control that applies before a frame in the block.
 ///
 /// Give controls to a process call as [`TimedEvent`] values. The call borrows
 /// the slice only for that call. There is no heap allocation and no deferred
-/// queue. A stage event replaces all settings of that stage. To change one
-/// field, start from the current configuration of the processor.
+/// queue. A stage event replaces all settings of that stage. Scalar events
+/// change only their target fields in the active configuration.
 /// Configuration changes have the same effects on state as
 /// [`crate::Processor::set_config`].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -35,6 +37,37 @@ pub enum ControlEvent {
     Alien(AlienConfig),
     /// This event replaces the reverb configuration.
     Reverb(ReverbConfig),
+    /// This event sets the retune half-life in milliseconds, 0..=400.
+    ///
+    /// The target behavior is the same as for
+    /// [`CorrectionConfig::retune_ms`](crate::CorrectionConfig::retune_ms).
+    /// The value must be finite.
+    RetuneMs(f32),
+    /// This event sets the pitch multiplier, 0.25..=4.
+    ///
+    /// The filter and voice behavior is the same as for
+    /// [`ResynthesisConfig::pitch_ratio`]. The value must be finite.
+    PitchRatio(f32),
+    /// This event sets the vocal-tract width and length factors.
+    ///
+    /// The synthesis behavior is the same as for
+    /// [`FormantConfig`](crate::FormantConfig). Both values must be finite.
+    FormantShift {
+        /// The vocal-tract width factor, 0.5..=2.
+        width: f32,
+        /// The vocal-tract length factor, 0.5..=2.
+        stretch: f32,
+    },
+    /// This event sets the dry fraction at the resynthesis stage, 0..=1.
+    ///
+    /// The quantization and the delay are the same as for
+    /// [`ResynthesisConfig::dry_mix`]. The value must be finite.
+    DryMix(f32),
+    /// This event sets the wet fraction of the reverb stage, 0..=1.
+    ///
+    /// The quantization and the dry weight are the same as for
+    /// [`ReverbConfig::mix`]. The value must be finite.
+    ReverbMix(f32),
     /// This event sets the final linear gain, 0..=64.
     ///
     /// The quantization and the mute behavior are the same as for
@@ -80,6 +113,11 @@ impl ControlEvent {
             Self::Warm(config) => config.validate(),
             Self::Alien(config) => config.validate(),
             Self::Reverb(config) => config.validate(),
+            Self::RetuneMs(retune_ms) => validate_retune_ms(retune_ms),
+            Self::PitchRatio(pitch_ratio) => validate_pitch_ratio(pitch_ratio),
+            Self::FormantShift { width, stretch } => validate_formant_shift(width, stretch),
+            Self::DryMix(dry_mix) => validate_dry_mix(dry_mix),
+            Self::ReverbMix(mix) => validate_reverb_mix(mix),
             Self::OutputGain(gain) => validate_output_gain(gain),
             Self::Midi(event) | Self::CorrectionMidi(event) => event.validate(),
             Self::Reset => Ok(()),

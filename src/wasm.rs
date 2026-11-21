@@ -18,8 +18,14 @@
 //!
 //! - Field names use camelCase.
 //! - Enum values are strings.
-//! - Each object must contain all required fields.
-//! - The optional harmony `voices` field defaults to 4.
+//! - `config` and [`default_config`] return complete objects.
+//! - The constructor and `updateConfig` accept `DeepPartial<ProcessorConfig>`.
+//! - Fixed-size arrays replace the full array.
+//!
+//! In the constructor and in `setConfig`, omitted or `undefined` fields use
+//! their defaults. In `updateConfig`, omitted or `undefined` fields keep the
+//! active values from `config`. A `null` field or a wrong field type throws a
+//! JavaScript `Error` before the state changes.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
 //! `{ type, value }`, and the reset control has no `value`. MIDI messages use
@@ -42,12 +48,39 @@
 //! `free()` method.
 
 use crate::{
-    Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
+    AlienConfig, ChordDegree, ChordName, CorrectionConfig, Error, Feedback, FormantConfig,
+    HarmonyConfig, HarmonyScale, HarmonySource, Inversion, MultiVoiceMode, NoteMask, PitchClass,
+    PitchConfig, PrepareConfig, Processor, ProcessorConfig, PunchConfig, ResynthesisConfig,
+    ReverbConfig, ReverbMode, SampleRate, Telemetry, TimedEvent, WarmConfig, HARMONY_VOICES,
 };
-use js_sys::{Float32Array, Int16Array};
-use serde::{Deserialize, Serialize};
+use js_sys::{
+    Array, ArrayBuffer, Boolean, Date, Float32Array, Int16Array, Number, Reflect, RegExp, Symbol,
+};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen(typescript_custom_section)]
+const DEEP_PARTIAL_DECL: &'static str = r#"/**
+ * Makes each object property in `T` optional at all levels.
+ *
+ * Functions and fixed-size arrays or tuples stay complete.
+ */
+export type DeepPartial<T> = T extends (...args: never[]) => unknown
+    ? T
+    : T extends readonly unknown[]
+        ? T
+        : T extends object
+            ? { [K in keyof T]?: DeepPartial<T[K]> }
+            : T;
+"#;
+
+#[wasm_bindgen]
+extern "C" {
+    /// A partial processor configuration object from JavaScript.
+    #[wasm_bindgen(typescript_type = "DeepPartial<ProcessorConfig>")]
+    pub type PartialProcessorConfig;
+}
 
 /// The events for one call that processes audio (`TimedEvent[]` in TypeScript).
 ///
@@ -122,8 +155,9 @@ impl WasmProcessor {
     /// `sample_rate` must be 44100 or 48000. `max_block_frames` must be an
     /// integer in 1..=4294967295. It is a limit for each call, and smaller
     /// blocks and empty blocks are also valid. If you omit `config`, the
-    /// processor uses the default configuration. The constructor validates
-    /// the settings before it allocates the processor or the PCM buffers. In
+    /// processor uses the default configuration. Omitted or `undefined` fields
+    /// in `config` also use their defaults. The constructor validates the
+    /// settings before it allocates the processor or the PCM buffers. In
     /// TypeScript, use `new Tunelet(sampleRate, maxBlockFrames, config)`.
     ///
     /// # Errors
@@ -132,7 +166,7 @@ impl WasmProcessor {
     ///
     /// - The rate is not 44100 or 48000.
     /// - The block limit is not an integer or is out of range.
-    /// - The configuration object is malformed or a field is missing.
+    /// - The configuration object is malformed or a field is `null`.
     /// - The configuration is not valid.
     /// - The reservation of a PCM buffer fails.
     ///
@@ -142,7 +176,7 @@ impl WasmProcessor {
     pub fn new(
         sample_rate: f64,
         max_block_frames: f64,
-        config: Option<Ts<ProcessorConfig>>,
+        config: Option<PartialProcessorConfig>,
     ) -> Result<WasmProcessor, JsError> {
         // Accept JavaScript numbers without the u32 coercion of wasm-bindgen.
         // That coercion silently truncates fractions and wraps large values.
@@ -160,11 +194,11 @@ impl WasmProcessor {
         }
         let max_block_frames = max_block_frames as usize;
         let preparation = PrepareConfig::new(rate, max_block_frames)?;
-        let config = match config {
-            Some(value) => value.to_rust()?,
-            None => ProcessorConfig::default(),
-        };
-        let processor = Processor::new(preparation, config)?;
+        let mut resolved = ProcessorConfig::default();
+        if let Some(patch) = config {
+            merge_processor_config(&mut resolved, &patch)?;
+        }
+        let processor = Processor::new(preparation, resolved)?;
         Ok(Self {
             processor,
             input: pcm_buffer(max_block_frames)?,
@@ -202,8 +236,8 @@ impl WasmProcessor {
 
     /// Returns a copy of the active configuration as a new JavaScript object.
     ///
-    /// A change to the object has no effect until `setConfig` or a timed event
-    /// applies it.
+    /// A change to the object has no effect until `setConfig`, `updateConfig`
+    /// or a timed event applies it.
     ///
     /// # Errors
     ///
@@ -215,16 +249,40 @@ impl WasmProcessor {
     /// Decodes and validates a configuration, then replaces the complete
     /// configuration with it.
     ///
-    /// State retention and drain cancellation follow the native processor.
-    /// The conversion ignores additional properties of the JavaScript object.
+    /// Omitted or `undefined` fields use their defaults. State retention and
+    /// drain cancellation follow the native processor. The conversion ignores
+    /// additional properties of the JavaScript object.
     ///
     /// # Errors
     ///
-    /// The method throws if an object is not valid or a field is missing.
+    /// The method throws if an object is not valid or a field is `null`.
     /// After an error, all processor state and any active drain stay the same.
     #[wasm_bindgen(js_name = setConfig)]
     pub fn set_config(&mut self, config: Ts<ProcessorConfig>) -> Result<(), JsError> {
-        self.processor.set_config(config.to_rust()?)?;
+        let mut next = ProcessorConfig::default();
+        merge_processor_config(&mut next, &config.js_value())?;
+        self.processor.set_config(next)?;
+        Ok(())
+    }
+
+    /// Combines the defined fields of `patch` with the active configuration,
+    /// validates all fields and applies the result.
+    ///
+    /// Omitted or `undefined` fields keep their active values from `config`.
+    /// Fixed-size arrays replace the full array. State retention and drain
+    /// cancellation follow the native processor. The conversion ignores
+    /// additional properties of the JavaScript object.
+    ///
+    /// # Errors
+    ///
+    /// If `patch` is not an object, a field is `null` or a value is not valid,
+    /// this method throws. After an error, all processor state and any active
+    /// drain stay the same.
+    #[wasm_bindgen(js_name = updateConfig)]
+    pub fn update_config(&mut self, patch: PartialProcessorConfig) -> Result<(), JsError> {
+        let mut next = self.processor.config();
+        merge_processor_config(&mut next, &patch)?;
+        self.processor.set_config(next)?;
         Ok(())
     }
 
@@ -532,4 +590,405 @@ pub(crate) fn serialize_frame_count<S: serde::Serializer>(
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_u32(*frames as u32)
+}
+
+/// Converts a JavaScript error from property access to a `JsError`.
+fn js_error(error: JsValue) -> JsError {
+    if let Some(err) = error.dyn_ref::<js_sys::Error>() {
+        JsError::new(&String::from(err.message()))
+    } else if let Some(text) = error.as_string() {
+        JsError::new(&text)
+    } else {
+        JsError::new("failed to read configuration property")
+    }
+}
+
+/// Rejects `null`, primitives, functions, arrays and non-record objects.
+fn ensure_config_object(value: &JsValue) -> Result<(), JsError> {
+    if value.is_null()
+        || !value.is_object()
+        || value.is_function()
+        || Array::is_array(value)
+        || ArrayBuffer::is_view(value)
+        || value.is_instance_of::<ArrayBuffer>()
+        || value.is_instance_of::<Date>()
+        || value.is_instance_of::<RegExp>()
+        || value.is_instance_of::<Number>()
+        || value.is_instance_of::<Boolean>()
+        || Reflect::has(value, &Symbol::iterator()).unwrap_or(true)
+    {
+        return Err(JsError::new("expected a configuration object"));
+    }
+    Ok(())
+}
+
+/// Reads one property and treats an omitted or `undefined` value as `None`.
+fn get_property(object: &JsValue, key: &str) -> Result<Option<JsValue>, JsError> {
+    let value = Reflect::get(object, &JsValue::from_str(key)).map_err(js_error)?;
+    if value.is_undefined() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
+/// If the property is defined, decodes one leaf field.
+fn merge_field<T: DeserializeOwned>(
+    object: &JsValue,
+    key: &str,
+    target: &mut T,
+) -> Result<(), JsError> {
+    if let Some(value) = get_property(object, key)? {
+        *target = tsify::serde_wasm_bindgen::from_value(value)?;
+    }
+    Ok(())
+}
+
+/// If the property is defined, applies `merge` to a nested stage object.
+fn merge_nested(
+    object: &JsValue,
+    key: &str,
+    merge: impl FnOnce(&JsValue) -> Result<(), JsError>,
+) -> Result<(), JsError> {
+    if let Some(value) = get_property(object, key)? {
+        ensure_config_object(&value)?;
+        merge(&value)?;
+    }
+    Ok(())
+}
+
+/// Copies defined fields from a JavaScript patch onto `config`.
+fn merge_processor_config(config: &mut ProcessorConfig, patch: &JsValue) -> Result<(), JsError> {
+    ensure_config_object(patch)?;
+    merge_nested(patch, "punch", |sub| {
+        merge_punch_config(&mut config.punch, sub)
+    })?;
+    merge_nested(patch, "warm", |sub| {
+        merge_warm_config(&mut config.warm, sub)
+    })?;
+    merge_nested(patch, "resynthesis", |sub| {
+        merge_resynthesis_config(&mut config.resynthesis, sub)
+    })?;
+    merge_nested(patch, "alien", |sub| {
+        merge_alien_config(&mut config.alien, sub)
+    })?;
+    merge_nested(patch, "reverb", |sub| {
+        merge_reverb_config(&mut config.reverb, sub)
+    })?;
+    merge_field(patch, "outputGain", &mut config.output_gain)
+}
+
+fn merge_punch_config(config: &mut PunchConfig, patch: &JsValue) -> Result<(), JsError> {
+    merge_field(patch, "enabled", &mut config.enabled)?;
+    merge_field(patch, "gainDb", &mut config.gain_db)?;
+    merge_field(patch, "impact", &mut config.impact)?;
+    merge_field(patch, "ceilingDb", &mut config.ceiling_db)?;
+    merge_field(patch, "attackMs", &mut config.attack_ms)
+}
+
+fn merge_warm_config(config: &mut WarmConfig, patch: &JsValue) -> Result<(), JsError> {
+    merge_field(patch, "enabled", &mut config.enabled)?;
+    merge_field(patch, "driveDb", &mut config.drive_db)
+}
+
+fn merge_alien_config(config: &mut AlienConfig, patch: &JsValue) -> Result<(), JsError> {
+    merge_field(patch, "enabled", &mut config.enabled)?;
+    merge_field(patch, "loopFrames", &mut config.loop_frames)
+}
+
+fn merge_reverb_config(config: &mut ReverbConfig, patch: &JsValue) -> Result<(), JsError> {
+    merge_field(patch, "enabled", &mut config.enabled)?;
+    merge_field(patch, "mode", &mut config.mode)?;
+    merge_field(patch, "mix", &mut config.mix)?;
+    merge_field(patch, "diffusion", &mut config.diffusion)?;
+    merge_field(patch, "decay", &mut config.decay)?;
+    merge_field(patch, "brightnessHz", &mut config.brightness_hz)
+}
+
+fn merge_pitch_config(config: &mut PitchConfig, patch: &JsValue) -> Result<(), JsError> {
+    merge_field(patch, "threshold", &mut config.threshold)?;
+    merge_field(patch, "minFrequencyHz", &mut config.min_frequency_hz)?;
+    merge_field(patch, "maxFrequencyHz", &mut config.max_frequency_hz)
+}
+
+fn merge_correction_config(config: &mut CorrectionConfig, patch: &JsValue) -> Result<(), JsError> {
+    merge_field(patch, "enabled", &mut config.enabled)?;
+    merge_field(patch, "notes", &mut config.notes)?;
+    merge_field(patch, "retuneMs", &mut config.retune_ms)
+}
+
+fn merge_formant_config(config: &mut FormantConfig, patch: &JsValue) -> Result<(), JsError> {
+    merge_field(patch, "enabled", &mut config.enabled)?;
+    merge_field(patch, "width", &mut config.width)?;
+    merge_field(patch, "stretch", &mut config.stretch)?;
+    merge_field(patch, "aspirationMix", &mut config.aspiration_mix)?;
+    merge_field(
+        patch,
+        "aspirationCutoffHz",
+        &mut config.aspiration_cutoff_hz,
+    )
+}
+
+fn merge_harmony_config(config: &mut HarmonyConfig, patch: &JsValue) -> Result<(), JsError> {
+    merge_field(patch, "source", &mut config.source)?;
+    merge_field(patch, "key", &mut config.key)?;
+    merge_field(patch, "scale", &mut config.scale)?;
+    merge_field(patch, "chromaticIntervals", &mut config.chromatic_intervals)?;
+    merge_field(patch, "diatonicIntervals", &mut config.diatonic_intervals)?;
+    merge_field(patch, "chord", &mut config.chord)?;
+    merge_field(patch, "degree", &mut config.degree)?;
+    merge_field(patch, "inversion", &mut config.inversion)?;
+    merge_field(patch, "registerPercent", &mut config.register_percent)?;
+    merge_field(
+        patch,
+        "voicingSpreadPercent",
+        &mut config.voicing_spread_percent,
+    )?;
+    merge_field(patch, "portamentoMs", &mut config.portamento_ms)?;
+    merge_field(patch, "voices", &mut config.voices)
+}
+
+fn merge_resynthesis_config(
+    config: &mut ResynthesisConfig,
+    patch: &JsValue,
+) -> Result<(), JsError> {
+    merge_nested(patch, "pitch", |sub| {
+        merge_pitch_config(&mut config.pitch, sub)
+    })?;
+    merge_nested(patch, "correction", |sub| {
+        merge_correction_config(&mut config.correction, sub)
+    })?;
+    merge_field(patch, "pitchRatio", &mut config.pitch_ratio)?;
+    merge_nested(patch, "formant", |sub| {
+        merge_formant_config(&mut config.formant, sub)
+    })?;
+    merge_field(patch, "mode", &mut config.mode)?;
+    merge_field(patch, "choirVoices", &mut config.choir_voices)?;
+    merge_field(patch, "choirDetune", &mut config.choir_detune)?;
+    merge_field(patch, "choirDelay", &mut config.choir_delay)?;
+    merge_field(
+        patch,
+        "choirSpreadPercent",
+        &mut config.choir_spread_percent,
+    )?;
+    merge_field(patch, "stereoOutput", &mut config.stereo_output)?;
+    merge_nested(patch, "harmony", |sub| {
+        merge_harmony_config(&mut config.harmony, sub)
+    })?;
+    merge_field(patch, "harmonyGain", &mut config.harmony_gain)?;
+    merge_field(patch, "harmonicModulation", &mut config.harmonic_modulation)?;
+    merge_field(patch, "dryMix", &mut config.dry_mix)?;
+    merge_field(patch, "randomSeed", &mut config.random_seed)
+}
+
+// Remote serde definitions keep `serde(default)` out of the `Tsify` derive so
+// `ProcessorConfig` and its stage types stay complete in `pkg/tunelet.d.ts`.
+
+#[derive(Deserialize)]
+#[serde(
+    default = "ProcessorConfig::default",
+    remote = "ProcessorConfig",
+    rename_all = "camelCase"
+)]
+struct ProcessorConfigDef {
+    punch: PunchConfig,
+    warm: WarmConfig,
+    resynthesis: ResynthesisConfig,
+    alien: AlienConfig,
+    reverb: ReverbConfig,
+    output_gain: f32,
+}
+
+impl<'de> Deserialize<'de> for ProcessorConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ProcessorConfigDef::deserialize(deserializer)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    default = "PunchConfig::default",
+    remote = "PunchConfig",
+    rename_all = "camelCase"
+)]
+struct PunchConfigDef {
+    enabled: bool,
+    gain_db: f32,
+    impact: f32,
+    ceiling_db: f32,
+    attack_ms: f32,
+}
+
+impl<'de> Deserialize<'de> for PunchConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        PunchConfigDef::deserialize(deserializer)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    default = "WarmConfig::default",
+    remote = "WarmConfig",
+    rename_all = "camelCase"
+)]
+struct WarmConfigDef {
+    enabled: bool,
+    drive_db: f32,
+}
+
+impl<'de> Deserialize<'de> for WarmConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        WarmConfigDef::deserialize(deserializer)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    default = "AlienConfig::default",
+    remote = "AlienConfig",
+    rename_all = "camelCase"
+)]
+struct AlienConfigDef {
+    enabled: bool,
+    loop_frames: u32,
+}
+
+impl<'de> Deserialize<'de> for AlienConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        AlienConfigDef::deserialize(deserializer)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    default = "ReverbConfig::default",
+    remote = "ReverbConfig",
+    rename_all = "camelCase"
+)]
+struct ReverbConfigDef {
+    enabled: bool,
+    mode: ReverbMode,
+    mix: f32,
+    diffusion: f32,
+    decay: f32,
+    brightness_hz: f32,
+}
+
+impl<'de> Deserialize<'de> for ReverbConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ReverbConfigDef::deserialize(deserializer)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    default = "PitchConfig::default",
+    remote = "PitchConfig",
+    rename_all = "camelCase"
+)]
+struct PitchConfigDef {
+    threshold: f32,
+    min_frequency_hz: f32,
+    max_frequency_hz: f32,
+}
+
+impl<'de> Deserialize<'de> for PitchConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        PitchConfigDef::deserialize(deserializer)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    default = "CorrectionConfig::default",
+    remote = "CorrectionConfig",
+    rename_all = "camelCase"
+)]
+struct CorrectionConfigDef {
+    enabled: bool,
+    notes: NoteMask,
+    retune_ms: f32,
+}
+
+impl<'de> Deserialize<'de> for CorrectionConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        CorrectionConfigDef::deserialize(deserializer)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    default = "FormantConfig::default",
+    remote = "FormantConfig",
+    rename_all = "camelCase"
+)]
+struct FormantConfigDef {
+    enabled: bool,
+    width: f32,
+    stretch: f32,
+    aspiration_mix: f32,
+    aspiration_cutoff_hz: f32,
+}
+
+impl<'de> Deserialize<'de> for FormantConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        FormantConfigDef::deserialize(deserializer)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    default = "HarmonyConfig::default",
+    remote = "HarmonyConfig",
+    rename_all = "camelCase"
+)]
+struct HarmonyConfigDef {
+    source: HarmonySource,
+    key: PitchClass,
+    scale: HarmonyScale,
+    chromatic_intervals: [i8; HARMONY_VOICES],
+    diatonic_intervals: [i8; HARMONY_VOICES],
+    chord: ChordName,
+    degree: ChordDegree,
+    inversion: Inversion,
+    register_percent: f32,
+    voicing_spread_percent: f32,
+    portamento_ms: f32,
+    voices: u8,
+}
+
+impl<'de> Deserialize<'de> for HarmonyConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        HarmonyConfigDef::deserialize(deserializer)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    default = "ResynthesisConfig::default",
+    remote = "ResynthesisConfig",
+    rename_all = "camelCase"
+)]
+struct ResynthesisConfigDef {
+    pitch: PitchConfig,
+    correction: CorrectionConfig,
+    pitch_ratio: f32,
+    formant: FormantConfig,
+    mode: MultiVoiceMode,
+    choir_voices: u8,
+    choir_detune: f32,
+    choir_delay: f32,
+    choir_spread_percent: f32,
+    stereo_output: bool,
+    harmony: HarmonyConfig,
+    harmony_gain: f32,
+    harmonic_modulation: f32,
+    dry_mix: f32,
+    random_seed: u64,
+}
+
+impl<'de> Deserialize<'de> for ResynthesisConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ResynthesisConfigDef::deserialize(deserializer)
+    }
 }

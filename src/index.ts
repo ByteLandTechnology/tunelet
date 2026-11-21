@@ -8,9 +8,10 @@
  * `initSync` and the configuration, event and feedback types.
  */
 import init, { initSync } from "../pkg/tunelet.js";
-import type { InitInput, InitOutput } from "../pkg/tunelet.js";
+import type { DeepPartial, InitInput, InitOutput } from "../pkg/tunelet.js";
 
 export * from "../pkg/tunelet.js";
+export type { DeepPartial };
 
 /** The shared initialization promise, which a failure clears. */
 let initialization: Promise<InitOutput> | undefined;

@@ -46,7 +46,7 @@ pub enum ReverbMode {
 #[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
-    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    derive(serde::Serialize, tsify::Tsify),
     serde(rename_all = "camelCase")
 )]
 pub struct ReverbConfig {
@@ -108,11 +108,18 @@ impl ReverbConfig {
     /// Returns the first [`Error::InvalidConfig`] with its dotted field path
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("reverb.mix", self.mix, 0.0, 1.0)?;
+        validate_reverb_mix(self.mix)?;
         check_range("reverb.diffusion", self.diffusion, 0.0, 1.0)?;
         check_range("reverb.decay", self.decay, 0.0, 1.0)?;
         check_range("reverb.brightness_hz", self.brightness_hz, 80.0, 20000.0)
     }
+}
+
+/// Checks the wet fraction range of the reverb.
+///
+/// `ReverbConfig` and `ControlEvent::ReverbMix` use the same range.
+pub(crate) fn validate_reverb_mix(mix: f32) -> Result<(), Error> {
+    check_range("reverb.mix", mix, 0.0, 1.0)
 }
 
 /// The shared Q14 delay network with two low-pass damping filters that keep

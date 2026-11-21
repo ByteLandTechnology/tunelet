@@ -237,8 +237,10 @@ These rules apply to the offsets:
 - An offset must not be less than the offset before it.
 
 Events with equal offsets execute in slice order. An empty block accepts no
-events. A stage event replaces all settings of that stage. To change one
-field, start from `processor.config()`.
+events. A stage event replaces all settings of that stage. Scalar events
+(`RetuneMs`, `PitchRatio`, `FormantShift`, `DryMix`, `ReverbMix` and
+`OutputGain`) change only their target fields. Between blocks, use
+`processor.update_config` or `processor.set_config`.
 
 Harmony MIDI uses `ControlEvent::Midi`. MIDI for the correction keyboard uses
 `ControlEvent::CorrectionMidi`. For example, this event starts a harmony note
@@ -411,7 +413,7 @@ page that opens the JavaScript.
 | Shared initialization             | `loadTunelet(source?)`                                   |
 | Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
 | In-place mono downmix             | `processMono(audio, events?)`                            |
-| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
+| Configuration                     | `config()`, `setConfig(config)`, `updateConfig(patch)`, `defaultConfig()` |
 | Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
 | Feedback                          | `feedback()`, `takeFeedback()`                           |
 | Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
@@ -436,18 +438,23 @@ audio device.
 
 ### Configuration objects
 
-Configuration objects contain all required fields. They use camelCase names
-and show enums as string literals. To change the configuration, do these steps:
+`config()` and `defaultConfig()` return a complete `ProcessorConfig` object.
+Field names use camelCase, and enums use string literals. The constructor and
+`updateConfig(patch)` accept a `DeepPartial<ProcessorConfig>`:
 
-1. Start from `defaultConfig()` or `config()`.
-2. Edit the necessary fields.
-3. Call `setConfig()`.
+- In `new Tunelet(sampleRate, maxBlockFrames, config?)`, omitted or
+  `undefined` fields use their default values.
+- In `updateConfig(patch)`, omitted or `undefined` fields keep their active
+  values from `config()`.
+- `setConfig(config)` replaces the full configuration, and omitted or
+  `undefined` fields use their default values.
+- Fixed-size arrays (`notes`, `chromaticIntervals` and `diatonicIntervals`)
+  replace the full array.
 
-If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+If a field is `null`, has the wrong type or is out of range, the call throws a
+JavaScript `Error` before the state changes. The conversion ignores extra
+object properties. The generated declarations contain the parameter
+documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
@@ -456,14 +463,19 @@ telemetry use `bigint`. Frame offsets, block lengths and latency use
 ### Events
 
 The optional event argument is a `TimedEvent[]`. Controls use a `type`
-discriminant and a `value` payload. The reset control has no payload. For
-example, this event changes the final gain before the first frame:
+discriminant and a `value` payload. The reset control has no payload. Scalar
+controls (`retuneMs`, `pitchRatio`, `formantShift`, `dryMix`, `reverbMix` and
+`outputGain`) change only their target fields. For example, these events
+change the final gain and the formant shape before the first frame:
 
 ```ts
 { offset: 0, event: { type: "outputGain", value: 0.5 } }
+{ offset: 0, event: { type: "formantShift", value: { width: 1.1, stretch: 0.9 } } }
 ```
 
-A harmony Note On event has this form:
+A stage control (`configure`, `resynthesis`, `punch`, `warm`, `alien` or
+`reverb`) replaces that stage, and omitted fields use the stage defaults. A
+harmony Note On event has this form:
 
 ```ts
 { offset: 0, event: { type: "midi", value: { type: "noteOn", channel: 0, note: 60, velocity: 100 } } }

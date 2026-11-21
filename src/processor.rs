@@ -315,9 +315,9 @@ impl Processor {
     /// Returns a copy of the current settings and does not change state.
     ///
     /// If you edit the copy, nothing changes until
-    /// [`set_config`](Self::set_config) or a configuration event applies it.
-    /// The temporary aspiration mute of a drain does not change the settings
-    /// that this method returns.
+    /// [`set_config`](Self::set_config), [`update_config`](Self::update_config)
+    /// or a configuration event applies it. The temporary aspiration mute of a
+    /// drain does not change the settings that this method returns.
     pub fn config(&self) -> ProcessorConfig {
         self.config
     }
@@ -480,6 +480,26 @@ impl Processor {
         Ok(())
     }
 
+    /// Copies the active configuration, passes it to `update`, validates all
+    /// fields and applies the result.
+    ///
+    /// This method does not allocate memory. State retention, validation of
+    /// disabled stages and drain cancellation are the same as in
+    /// [`set_config`](Self::set_config).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfig`] if a field is not valid. The method
+    /// returns this error before it changes any state, also an active drain.
+    pub fn update_config(
+        &mut self,
+        update: impl FnOnce(&mut ProcessorConfig),
+    ) -> Result<(), Error> {
+        let mut config = self.config;
+        update(&mut config);
+        self.set_config(config)
+    }
+
     /// Applies a configuration that the public setter or the preflight checked.
     fn apply_config(&mut self, config: ProcessorConfig) {
         if self.config.punch != config.punch {
@@ -573,9 +593,9 @@ impl Processor {
 
     /// Applies a validated control immediately before its frame is rendered.
     ///
-    /// A partial configuration event replaces one stage in the active
-    /// configuration. MIDI and reset events act directly. A reset does not
-    /// discard later events in the block.
+    /// Stage and scalar configuration events update the active configuration.
+    /// MIDI and reset events act directly. A reset does not discard later
+    /// events in the block.
     fn apply(&mut self, event: ValidatedEvent) {
         let mut config = self.config;
         match event.into_inner() {
@@ -585,6 +605,14 @@ impl Processor {
             ControlEvent::Warm(value) => config.warm = value,
             ControlEvent::Alien(value) => config.alien = value,
             ControlEvent::Reverb(value) => config.reverb = value,
+            ControlEvent::RetuneMs(value) => config.resynthesis.correction.retune_ms = value,
+            ControlEvent::PitchRatio(value) => config.resynthesis.pitch_ratio = value,
+            ControlEvent::FormantShift { width, stretch } => {
+                config.resynthesis.formant.width = width;
+                config.resynthesis.formant.stretch = stretch;
+            }
+            ControlEvent::DryMix(value) => config.resynthesis.dry_mix = value,
+            ControlEvent::ReverbMix(value) => config.reverb.mix = value,
             ControlEvent::OutputGain(value) => config.output_gain = value,
             ControlEvent::Midi(event) => {
                 self.resynthesis.apply_midi(event);

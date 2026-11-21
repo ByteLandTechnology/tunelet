@@ -257,7 +257,7 @@ pub enum Inversion {
 #[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
-    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    derive(serde::Serialize, tsify::Tsify),
     serde(rename_all = "camelCase")
 )]
 pub struct HarmonyConfig {
@@ -322,18 +322,8 @@ pub struct HarmonyConfig {
     /// other voices release with the usual gain envelope. The chord and MIDI
     /// sources ignore this field. In JavaScript, the field is optional and
     /// a missing value gives the default.
-    #[cfg_attr(
-        all(feature = "wasm", target_arch = "wasm32"),
-        serde(default = "default_voices"),
-        tsify(optional)
-    )]
+    #[cfg_attr(all(feature = "wasm", target_arch = "wasm32"), tsify(optional))]
     pub voices: u8,
-}
-
-/// The default count of interval voices: all of them.
-#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-fn default_voices() -> u8 {
-    HARMONY_VOICES as u8
 }
 
 impl Default for HarmonyConfig {

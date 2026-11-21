@@ -27,7 +27,7 @@ const TWO_OVER_PI: Q14 = Q14::from_bits(10430);
 #[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
-    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    derive(serde::Serialize, tsify::Tsify),
     serde(rename_all = "camelCase")
 )]
 pub struct PunchConfig {

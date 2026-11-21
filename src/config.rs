@@ -126,14 +126,15 @@ impl PrepareConfig {
 /// configuration does active pitch processing. It is not a bypass with zero
 /// latency.
 ///
-/// Change a copy, then apply it with [`crate::Processor::set_config`] or
-/// [`crate::ControlEvent::Configure`]. The validation examines all fields
-/// before a change has an effect. This includes the fields of disabled stages.
+/// Change a copy, then apply it with [`crate::Processor::set_config`],
+/// [`crate::Processor::update_config`] or [`crate::ControlEvent::Configure`].
+/// The validation examines all fields before a change has an effect. This
+/// includes the fields of disabled stages.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
-    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    derive(serde::Serialize, tsify::Tsify),
     serde(rename_all = "camelCase"),
     tsify(large_number_types_as_bigints)
 )]

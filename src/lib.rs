@@ -19,10 +19,10 @@
 //! that are not active.
 //!
 //! A configuration value is a copy. If you change it, the processor does not
-//! change until [`Processor::set_config`] or a configuration event applies it.
-//! You can change settings between blocks, or at a frame offset with a
-//! [`TimedEvent`]. To change the sample rate or the block limit, you
-//! must make a new processor.
+//! change until [`Processor::set_config`], [`Processor::update_config`] or a
+//! configuration event applies it. You can change settings between blocks, or
+//! at a frame offset with a [`TimedEvent`]. To change the sample rate or the
+//! block limit, you must make a new processor.
 //!
 //! # Audio and timed controls
 //!

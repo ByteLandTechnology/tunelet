@@ -83,7 +83,7 @@ pub enum MultiVoiceMode {
 #[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
-    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    derive(serde::Serialize, tsify::Tsify),
     serde(rename_all = "camelCase")
 )]
 pub struct CorrectionConfig {
@@ -130,13 +130,15 @@ impl CorrectionConfig {
     /// Returns [`Error::InvalidConfig`], with the dotted path of the field and
     /// the problem, if `retune_ms` is not valid.
     pub fn validate(self) -> Result<(), Error> {
-        check_range(
-            "resynthesis.correction.retune_ms",
-            self.retune_ms,
-            0.0,
-            400.0,
-        )
+        validate_retune_ms(self.retune_ms)
     }
+}
+
+/// Checks the correction retune half-life range.
+///
+/// `CorrectionConfig` and `ControlEvent::RetuneMs` use the same range.
+pub(crate) fn validate_retune_ms(retune_ms: f32) -> Result<(), Error> {
+    check_range("resynthesis.correction.retune_ms", retune_ms, 0.0, 400.0)
 }
 
 /// The controls for pitch correction, pitch shift, voice arrangement and
@@ -161,7 +163,7 @@ impl CorrectionConfig {
 #[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
-    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    derive(serde::Serialize, tsify::Tsify),
     serde(rename_all = "camelCase"),
     tsify(large_number_types_as_bigints)
 )]
@@ -293,7 +295,7 @@ impl ResynthesisConfig {
         self.correction.validate()?;
         self.formant.validate()?;
         self.harmony.validate()?;
-        check_range("resynthesis.pitch_ratio", self.pitch_ratio, 0.25, 4.0)?;
+        validate_pitch_ratio(self.pitch_ratio)?;
         check_range("resynthesis.choir_detune", self.choir_detune, 10.0, 100.0)?;
         check_range("resynthesis.choir_delay", self.choir_delay, 20.0, 200.0)?;
         let field = "resynthesis.choir_spread_percent";
@@ -301,7 +303,7 @@ impl ResynthesisConfig {
         check_range("resynthesis.harmony_gain", self.harmony_gain, 0.0, 1.0)?;
         let field = "resynthesis.harmonic_modulation";
         check_range(field, self.harmonic_modulation, 0.0, 24.0)?;
-        check_range("resynthesis.dry_mix", self.dry_mix, 0.0, 1.0)?;
+        validate_dry_mix(self.dry_mix)?;
         check_count(
             "resynthesis.choir_voices",
             i64::from(self.choir_voices),
@@ -309,6 +311,20 @@ impl ResynthesisConfig {
             16,
         )
     }
+}
+
+/// Checks the pitch multiplier range.
+///
+/// `ResynthesisConfig` and `ControlEvent::PitchRatio` use the same range.
+pub(crate) fn validate_pitch_ratio(pitch_ratio: f32) -> Result<(), Error> {
+    check_range("resynthesis.pitch_ratio", pitch_ratio, 0.25, 4.0)
+}
+
+/// Checks the dry fraction range at the resynthesis stage.
+///
+/// `ResynthesisConfig` and `ControlEvent::DryMix` use the same range.
+pub(crate) fn validate_dry_mix(dry_mix: f32) -> Result<(), Error> {
+    check_range("resynthesis.dry_mix", dry_mix, 0.0, 1.0)
 }
 
 /// The fixed choir delay offsets in frames, before the scale by

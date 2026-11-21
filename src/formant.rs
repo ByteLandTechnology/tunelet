@@ -40,7 +40,7 @@ use crate::{Error, SampleRate};
 #[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
-    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    derive(serde::Serialize, tsify::Tsify),
     serde(rename_all = "camelCase")
 )]
 pub struct FormantConfig {
@@ -95,13 +95,20 @@ impl FormantConfig {
     /// Returns the first [`Error::InvalidConfig`], with the dotted path of the
     /// field and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("resynthesis.formant.width", self.width, 0.5, 2.0)?;
-        check_range("resynthesis.formant.stretch", self.stretch, 0.5, 2.0)?;
+        validate_formant_shift(self.width, self.stretch)?;
         let field = "resynthesis.formant.aspiration_mix";
         check_range(field, self.aspiration_mix, 0.0, 1.0)?;
         let field = "resynthesis.formant.aspiration_cutoff_hz";
         check_range(field, self.aspiration_cutoff_hz, 500.0, 10000.0)
     }
+}
+
+/// Checks the formant width and stretch ranges.
+///
+/// `FormantConfig` and `ControlEvent::FormantShift` use the same ranges.
+pub(crate) fn validate_formant_shift(width: f32, stretch: f32) -> Result<(), Error> {
+    check_range("resynthesis.formant.width", width, 0.5, 2.0)?;
+    check_range("resynthesis.formant.stretch", stretch, 0.5, 2.0)
 }
 
 /// The number of frames of input history for analysis and synthesis. The
