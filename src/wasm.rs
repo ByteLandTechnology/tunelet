@@ -247,10 +247,13 @@ impl WasmProcessor {
         self.input.len()
     }
 
-    /// The nominal delay in host frames, with the Q14 resampler filter delay
-    /// included at 88.2, 96, 176.4 and 192 kHz.
+    /// The nominal latency in host frames.
     ///
-    /// Other signal paths have different timing.
+    /// The value is 1,593 frames at 44.1 and 48 kHz. With the Q14 filter delay,
+    /// the value is 3,190 frames at 88.2 and 96 kHz, and 6,384 frames at 176.4
+    /// and 192 kHz. At 44.1 and 48 kHz, the dry path has a delay of 1,543
+    /// frames. Resampled voices, choir delays and effects have their own
+    /// timing. Thus, this value does not align all paths.
     #[wasm_bindgen(getter, js_name = latencyFrames)]
     pub fn latency_frames(&self) -> usize {
         self.processor.latency_frames()
@@ -457,8 +460,8 @@ impl WasmProcessor {
     /// Starts a finite tail budget and returns its frame count as a number.
     ///
     /// Call this method one time after the final input block. Another call
-    /// starts the full budget again, but it does not clear the histories. See
-    /// `beginDrain` for completion.
+    /// starts the full budget again, but it does not clear the histories. Refer
+    /// to `drain` for completion.
     #[wasm_bindgen(js_name = beginDrain)]
     pub fn begin_drain(&mut self) -> usize {
         self.processor.begin_drain()
@@ -498,8 +501,9 @@ impl WasmProcessor {
 
     /// Renders a mono tail block and returns its frame count.
     ///
-    /// The method fills the unused output with zeros. The downmix, completion
-    /// and feedback behavior are the same as for `drainMono`.
+    /// The method fills the unused output with zeros. The downmix and the peak
+    /// feedback are the same as for `processMono`. The return values, empty
+    /// arrays and completion are the same as for `drain`.
     ///
     /// # Errors
     ///
