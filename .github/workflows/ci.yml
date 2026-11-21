@@ -1,0 +1,102 @@
+# Continuous integration for the Rust crate and the npm package.
+#
+# Each pull request and each push to main checks the format, the rustdoc,
+# the lints, the native builds and the Wasm package. The ci-gate job gives
+# one status check for branch protection.
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint-doc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-stable-doc
+      - run: cargo fmt --check
+      - run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  rust-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        toolchain:
+          - stable
+        include:
+          - os: ubuntu-latest
+            toolchain: "1.88"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.toolchain }}
+      - run: cargo clippy --locked --lib -- -D warnings
+      - run: cargo build --locked --release
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-stable-wasm32
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build
+      - run: npm pack --dry-run
+
+  ci-gate:
+    needs:
+      - lint-doc
+      - rust-matrix
+      - wasm
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [ "${LINT_DOC}" != "success" ] || [ "${RUST_MATRIX}" != "success" ] || [ "${WASM}" != "success" ]; then
+            echo "Check results: lint-doc=${LINT_DOC}, rust-matrix=${RUST_MATRIX}, wasm=${WASM}" >&2
+            exit 1
+          fi
+        env:
+          LINT_DOC: ${{ needs.lint-doc.result }}
+          RUST_MATRIX: ${{ needs.rust-matrix.result }}
+          WASM: ${{ needs.wasm.result }}

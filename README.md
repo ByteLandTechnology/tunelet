@@ -515,12 +515,15 @@ Rust functions.
 
 ### Rust crate
 
-To build the crate and check the format and the lints, run these commands:
+The minimum Rust version (`rust-version` in `Cargo.toml`) is `1.88`. To
+build the crate and check the format, the lints and the documentation, run
+these commands:
 
 ```sh
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
 ```
 
 Native Rust builds use Cargo and do not need Node.js or npm.
@@ -545,7 +548,8 @@ a Node.js project, install it with this command:
 npm install /path/to/tunelet-<version>.tgz
 ```
 
-To build without an archive, run `npm run build`. The build writes one
+To build without an archive, run `npm run build`. To check the package
+files without an archive, run `npm pack --dry-run`. The build writes one
 `web`-target binding into `pkg/` and the shared entry into `dist/`. Git
 ignores both directories. The archive contains only these items:
 

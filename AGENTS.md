@@ -93,16 +93,27 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
-cargo doc --locked --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
 ```
 
-If you change the Wasm or TypeScript code, also run these commands.
-`npm run build` compiles `src/wasm.rs` and `src/index.ts`:
+`Cargo.toml` sets `rust-version` to `1.88`. If you change the Rust code
+or `Cargo.toml`, verify the crate with that toolchain:
+
+```sh
+rustup toolchain install 1.88 --profile minimal --component clippy
+cargo +1.88 clippy --locked --lib -- -D warnings
+cargo +1.88 build --locked --release
+```
+
+If you change the Wasm code, the TypeScript code or `package.json`, also
+run these commands. `npm run build` compiles `src/wasm.rs` and
+`src/index.ts`. `npm pack --dry-run` checks the package files:
 
 ```sh
 rustup target add wasm32-unknown-unknown
 npm ci
 npm run build
+npm pack --dry-run
 ```
 
 - Make sure that there are no new warnings. This includes broken
