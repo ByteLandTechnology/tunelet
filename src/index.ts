@@ -106,7 +106,7 @@ async function initialize(
     const fs: typeof import("node:fs/promises") = await import(
       /* webpackIgnore: true */ /* @vite-ignore */ moduleName
     );
-    initialized = initSync({ module: await fs.readFile(input) });
+    initialized = await init({ module_or_path: await fs.readFile(input) });
     return initialized;
   }
 

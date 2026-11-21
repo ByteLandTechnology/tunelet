@@ -275,7 +275,7 @@ impl WasmProcessor {
         let frames = input.length() as usize;
         Error::check_length(frames, left.length() as usize)?;
         Error::check_length(frames, right.length() as usize)?;
-        self.check_frames(frames)?;
+        self.processor.check_block(frames)?;
         let events = decode_events(events)?;
         input.copy_to(&mut self.input[..frames]);
         self.processor.process_planar(
@@ -306,7 +306,7 @@ impl WasmProcessor {
         events: Option<Ts<BlockEvents>>,
     ) -> Result<(), JsError> {
         let frames = audio.length() as usize;
-        self.check_frames(frames)?;
+        self.processor.check_block(frames)?;
         let events = decode_events(events)?;
         audio.copy_to(&mut self.input[..frames]);
         self.processor
@@ -342,7 +342,7 @@ impl WasmProcessor {
         let frames = input.length() as usize;
         Error::check_length(frames, left.length() as usize)?;
         Error::check_length(frames, right.length() as usize)?;
-        self.check_frames(frames)?;
+        self.processor.check_block(frames)?;
         let events = decode_events(events)?;
         input.copy_to(&mut self.float_input[..frames]);
         self.processor.process_planar_f32(
@@ -373,7 +373,7 @@ impl WasmProcessor {
         events: Option<Ts<BlockEvents>>,
     ) -> Result<(), JsError> {
         let frames = audio.length() as usize;
-        self.check_frames(frames)?;
+        self.processor.check_block(frames)?;
         let events = decode_events(events)?;
         audio.copy_to(&mut self.float_input[..frames]);
         self.processor
@@ -415,7 +415,7 @@ impl WasmProcessor {
     pub fn drain(&mut self, left: &Int16Array, right: &Int16Array) -> Result<usize, JsError> {
         let frames = left.length() as usize;
         Error::check_length(frames, right.length() as usize)?;
-        self.check_frames(frames)?;
+        self.processor.check_block(frames)?;
         let count = self
             .processor
             .drain_planar(&mut self.left[..frames], &mut self.right[..frames])?;
@@ -436,7 +436,7 @@ impl WasmProcessor {
     #[wasm_bindgen(js_name = drainMono)]
     pub fn drain_mono(&mut self, audio: &Int16Array) -> Result<usize, JsError> {
         let frames = audio.length() as usize;
-        self.check_frames(frames)?;
+        self.processor.check_block(frames)?;
         let count = self.processor.drain_mono(&mut self.input[..frames])?;
         audio.copy_from(&self.input[..frames]);
         Ok(count)
@@ -461,7 +461,7 @@ impl WasmProcessor {
     ) -> Result<usize, JsError> {
         let frames = left.length() as usize;
         Error::check_length(frames, right.length() as usize)?;
-        self.check_frames(frames)?;
+        self.processor.check_block(frames)?;
         let count = self.processor.drain_planar_f32(
             &mut self.float_left[..frames],
             &mut self.float_right[..frames],
@@ -483,7 +483,7 @@ impl WasmProcessor {
     #[wasm_bindgen(js_name = drainMonoFloat32)]
     pub fn drain_mono_float32(&mut self, audio: &Float32Array) -> Result<usize, JsError> {
         let frames = audio.length() as usize;
-        self.check_frames(frames)?;
+        self.processor.check_block(frames)?;
         let count = self
             .processor
             .drain_mono_f32(&mut self.float_input[..frames])?;
@@ -714,18 +714,6 @@ impl WasmProcessor {
     /// new instance, construct a new `Tunelet`.
     pub fn reset(&mut self) {
         self.processor.reset();
-    }
-}
-
-impl WasmProcessor {
-    /// Checks the block limit before a method uses a prefix of the buffers.
-    fn check_frames(&self, frames: usize) -> Result<(), Error> {
-        let max = self.input.len();
-        if frames > max {
-            Err(Error::BlockTooLarge { frames, max })
-        } else {
-            Ok(())
-        }
     }
 }
 
