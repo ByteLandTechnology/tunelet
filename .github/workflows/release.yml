@@ -13,11 +13,11 @@
 # npm and on crates.io must name this file (release.yml). Those two jobs do
 # not use stored tokens.
 #
-# The publish-github job packs @bytelandtechnology/tunelet one time and writes
-# a SHA-256 checksum file. It attests the archive, publishes it to GitHub
-# Packages and uploads the archive and the checksum to the GitHub release. It
-# uses the GITHUB_TOKEN of the workflow. GitHub links the package to this
-# repository through the repository field.
+# The publish-github job checks and packs @bytelandtechnology/tunelet and
+# writes a SHA-256 checksum file. It attests the archive, publishes it to
+# GitHub Packages and uploads the archive and the checksum to the GitHub
+# release. It uses the GITHUB_TOKEN of the workflow. GitHub links the package
+# to this repository through the repository field.
 name: Release
 
 on:
@@ -58,20 +58,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: "false"
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
+          tool: wasm-pack,wasm-opt
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
-          package-manager-cache: false
+          cache: "npm"
       - run: cargo publish --dry-run --locked
       - run: cargo doc --locked --no-deps
       - run: npm ci
-      - run: npm run build
-      - run: npm pack --dry-run
+      - run: npm run verify:pack
       - run: npm pkg set name=@bytelandtechnology/tunelet
-      - run: npm pack --dry-run
+      - run: npm run verify:pack
 
   publish-npm:
     needs: [release-please, verify-release]
@@ -87,19 +89,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: "false"
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
+          tool: wasm-pack,wasm-opt
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
-          package-manager-cache: false
+          cache: "npm"
       # Trusted publishing needs npm 11.5.1 or later.
       - run: npm install --global npm@latest
       - run: npm ci
-      # The prepack script builds the Wasm bindings and the TypeScript entry.
-      - run: npm publish
+      # Check the archive files and loadTunelet() before npm publish.
+      - run: npm run verify:pack
+      # Publish the built files without a second prepack build.
+      - run: npm publish --ignore-scripts
 
   publish-github:
     needs: [release-please, verify-release]
@@ -119,29 +126,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: "false"
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
+          tool: wasm-pack,wasm-opt
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
           registry-url: "https://npm.pkg.github.com"
           scope: "@bytelandtechnology"
-          package-manager-cache: false
+          cache: "npm"
       - run: npm ci
       # GitHub Packages accepts only names in the scope of the owner.
       - run: npm pkg set name=@bytelandtechnology/tunelet
-      # The prepack script builds the Wasm bindings and the TypeScript entry.
+      # Check the archive files and loadTunelet() before npm publish.
+      - run: npm run verify:pack
+      # Pack the built files without a second prepack build.
       - id: pack
         run: |
-          output=$(npm pack)
+          output=$(npm pack --ignore-scripts)
           archive=${output##*$'\n'}
           sha256sum "$archive" > "${archive}.sha256"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
       - uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ steps.pack.outputs.archive }}
-      - run: npm publish "./$PACKAGE_ARCHIVE"
+      - run: npm publish --ignore-scripts "./$PACKAGE_ARCHIVE"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PACKAGE_ARCHIVE: ${{ steps.pack.outputs.archive }}

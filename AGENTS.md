@@ -52,9 +52,10 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
   controls, feedback, reset and drain must not allocate memory, acquire
   locks or do I/O. The Wasm binding can also allocate when it converts
   objects, events, feedback and errors.
-- The fixed-point arithmetic uses explicit wrapping and quantization. If
-  you change the operation order, the rounding or a table value, the
-  output samples change. Treat this as a change of behavior.
+- The fixed-point arithmetic uses `i64` products, saturated `i32` bounds
+  and explicit quantization. If you change the operation order, the
+  rounding or a table value, the output samples change. Treat this as a
+  change of behavior.
 - A call that can fail must validate the full block or configuration
   before it changes the state or the output. Keep this rule.
 - The default build has no dependencies. Make each Wasm dependency
@@ -136,16 +137,15 @@ npm run build
   rename `.github/workflows/release.yml`, because the trusted publishers
   on npm and crates.io require that path. Before the publish jobs start,
   `verify-release` checks the crate and both npm scopes. To check a
-  release locally, run these dry-run commands:
+  release locally, run these commands:
 
   ```sh
   cargo publish --dry-run --locked
   cargo doc --locked --no-deps
   npm ci
-  npm run build
-  npm pack --dry-run
+  npm run verify:pack
   npm pkg set name=@bytelandtechnology/tunelet
-  npm pack --dry-run
+  npm run verify:pack
   npm pkg set name=tunelet
   ```
 
