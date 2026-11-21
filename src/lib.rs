@@ -1,10 +1,11 @@
 //! A crate for vocal pitch correction, choir, harmony, formant control and effects.
 //!
-//! [`Processor`] changes mono signed 16-bit PCM into the same number of stereo
-//! or mono frames. The sample rate is 44.1 kHz or 48 kHz. The signal chain is
-//! Punch → Warm → pitch tracking and resynthesis → Alien → reverb → output
-//! gain. The default configuration enables chromatic pitch correction and one
-//! choir voice. The optional effects and the formant stage are disabled.
+//! [`Processor`] changes mono signed 16-bit PCM or 32-bit float audio into the
+//! same number of stereo or mono frames. The sample rate is 44.1 kHz or
+//! 48 kHz. The signal chain is Punch → Warm → pitch tracking and resynthesis
+//! → Alien → reverb → output gain. The default configuration enables chromatic
+//! pitch correction and one choir voice. The optional effects and the formant
+//! stage are disabled.
 //!
 //! # Preparing and configuring
 //!
@@ -26,15 +27,21 @@
 //!
 //! # Audio and timed controls
 //!
-//! There are three process methods:
+//! There are three output layouts for `i16` and `f32` audio:
 //!
-//! - [`Processor::process`] writes `[left, right]` frames.
-//! - [`Processor::process_planar`] writes separate channels.
-//! - [`Processor::process_mono_in_place`] replaces the input with the stereo
+//! - [`Processor::process`] and [`Processor::process_f32`] write `[left, right]`
+//!   frames.
+//! - [`Processor::process_planar`] and [`Processor::process_planar_f32`] write
+//!   separate channels.
+//! - [`Processor::process_mono_in_place`] and
+//!   [`Processor::process_mono_in_place_f32`] replace the input with the stereo
 //!   downmix.
 //!
 //! These layouts do not depend on [`ResynthesisConfig::stereo_output`], which
-//! controls voice panning. The output is clipped to -32767..=32767.
+//! controls voice panning. `f32` inputs map `NaN` to zero, clamp to
+//! `-1.0..=1.0` and quantize into the fixed-point chain. The PCM output is
+//! clipped to `-32767..=32767`, and `f32` output scales each rendered `i16`
+//! sample by `1.0 / 32768.0`.
 //!
 //! An event applies before its selected frame. Offsets must be in the current
 //! block and must not decrease. Events with equal offsets execute in slice
@@ -92,9 +99,9 @@
 //!
 //! To export JavaScript bindings and generated TypeScript definitions, enable
 //! the optional `wasm` feature for `wasm32-unknown-unknown`. The binding owns
-//! PCM buffers that it uses again. Configuration conversion, event conversion,
-//! feedback objects and errors cause more allocation at the JavaScript
-//! boundary.
+//! `i16` and `f32` audio buffers that it uses again. Configuration conversion,
+//! event conversion, feedback objects and errors cause more allocation at the
+//! JavaScript boundary.
 //! Refer to the README for how to build the shared package for browsers and
 //! Node.js.
 
