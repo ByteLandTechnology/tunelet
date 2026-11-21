@@ -86,6 +86,9 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 - `src/wasm.rs`: the wasm-bindgen and tsify bindings (`wasm` feature).
 - `src/index.ts`: the `loadTunelet` entry point. See also `package.json`
   and `tsconfig.json`.
+- `rust-toolchain.toml`: the version of the Rust toolchain, the
+  components (`clippy`, `rustfmt`) and the `wasm32-unknown-unknown`
+  target.
 
 ## Build and verify
 
@@ -96,14 +99,26 @@ cargo clippy --locked --lib -- -D warnings
 cargo doc --locked --no-deps
 ```
 
+`rust-toolchain.toml` pins Rust `1.99.1`, `clippy`, `rustfmt` and the
+`wasm32-unknown-unknown` target.
+
 If you change the Wasm or TypeScript code, also run these commands.
 `npm run build` compiles `src/wasm.rs` and `src/index.ts`:
 
 ```sh
-rustup target add wasm32-unknown-unknown
 npm ci
 npm run build
 ```
+
+If you change the manifests or the release workflow, also check the
+packages locally:
+
+```sh
+cargo package --locked
+npm pack
+```
+
+Remove the `.tgz` archive after `npm pack`.
 
 - Make sure that there are no new warnings. This includes broken
   rustdoc links.
@@ -129,9 +144,17 @@ npm run build
 - Releases: release-please sets the versions and writes `CHANGELOG.md`.
   Do not change the version in `Cargo.toml`, `Cargo.lock`,
   `package.json`, `package-lock.json` or `.release-please-manifest.json`
-  by hand. The commit types and the `!` mark set the next version. The
-  release workflow is `.github/workflows/release.yml`. It publishes to
-  npm and crates.io through trusted publishing, so do not rename it.
+  by hand. The commit types and the `!` mark set the next version. In
+  `.github/workflows/release.yml`, `build-release` builds the archives
+  without write permissions. The OIDC trusted publishers on `npmjs.org`
+  and `crates.io` use that file name. Do not rename `release.yml`.
+- Release environments: `publish-npm`, `publish-github` and
+  `publish-crate` run in the `npm`, `github-packages` and `crates-io`
+  GitHub Environments. `publish-npm` and `publish-github` verify the
+  SHA-256 digests and publish the `.tgz` archives with
+  `--ignore-scripts`. Before a release, maintainers must create those
+  three environments in GitHub and configure the `npm` and `crates-io`
+  environments on `npmjs.org` and `crates.io`.
 
 ## Prohibited changes
 
