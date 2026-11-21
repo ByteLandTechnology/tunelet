@@ -833,17 +833,18 @@ pub struct Telemetry {
     /// The number of valid entries in [`voice_ratios`](Self::voice_ratios)
     /// and [`voice_gains`](Self::voice_gains).
     ///
-    /// The value is 5 in Harmony mode. In Choir mode, it is
+    /// In Harmony mode, the value is 1 plus the number of active harmony
+    /// voices, in 1..=5. In Choir mode, it is
     /// [`crate::ResynthesisConfig::choir_voices`], in 1..=16.
     pub voice_count: u8,
     /// The pitch ratio of each voice on the last frame, where 1 is the input
     /// pitch.
     ///
-    /// Entry zero is the lead voice. In Harmony mode, entries 1 to 4 are the
-    /// harmony voices. In Choir mode, the entries after the lead are the
-    /// secondary voices. Each ratio includes the correction, the configured
-    /// pitch shift and the ratio of the voice. The entries after
-    /// [`voice_count`](Self::voice_count) are zero.
+    /// Entry zero is the lead voice. In Harmony mode, the entries after the
+    /// lead are the active harmony voices. In Choir mode, the entries after
+    /// the lead are the secondary voices. Each ratio includes the correction,
+    /// the configured pitch shift and the ratio of the voice. The entries
+    /// after [`voice_count`](Self::voice_count) are zero.
     pub voice_ratios: [f32; 16],
     /// The linear gain of each voice, in the order of
     /// [`voice_ratios`](Self::voice_ratios).

@@ -223,11 +223,10 @@ pub struct ResynthesisConfig {
     /// Validation applies to these controls, and they can receive MIDI, also
     /// while Choir is selected.
     pub harmony: HarmonyConfig,
-    /// The pan gain of the harmony voices, 0..=1. The default is 0.5.
+    /// The linear gain of the harmony voices, 0..=1. The default is 0.5.
     ///
-    /// The code applies this gain only if `stereo_output` is `true`. The
-    /// harmony path without pan does not use this control. It does not scale
-    /// the lead voice.
+    /// This gain scales the four harmony voices for stereo and mono output.
+    /// It does not scale the lead voice.
     pub harmony_gain: f32,
     /// The modulation depth, 0..=24, without a unit. The default is 0 (off).
     ///
@@ -422,6 +421,8 @@ pub(crate) struct Resynthesis {
     /// The Q14 pan gains of the harmony voices. They include the configured
     /// harmony level.
     harmony_pan: [[Q14; 2]; HARMONY_VOICES],
+    /// The Q14 level of the harmony voices without stereo pan.
+    harmony_level: Q14,
     /// The last Q14 target ratios from the harmony controller.
     harmony_ratios: [Q14; HARMONY_VOICES],
     /// The last Q12 gain envelopes from the harmony controller. An audio
@@ -527,6 +528,7 @@ impl Resynthesis {
             drift_ratio: [Q14::ONE; 16],
             pan: [[Q14::ONE; 2]; 16],
             harmony_pan: [[Q14::ZERO; 2]; HARMONY_VOICES],
+            harmony_level: Q14::ZERO,
             harmony_ratios: [Q14::ONE; HARMONY_VOICES],
             harmony_gains: [Q12::ZERO; HARMONY_VOICES],
             voice_ratios: [Q14::ONE; HARMONY_VOICES + 1],
@@ -556,12 +558,10 @@ impl Resynthesis {
     }
 
     /// Quantizes the controls and calculates the decay coefficients and the
-    /// voice pan gains again.
+    /// voice gains again.
     ///
     /// The coefficients are the correction decay, the drift decay and the
     /// drift amount. The histories and the controller phase do not change.
-    /// The harmony level is part of the stereo pan gains. Thus, the path
-    /// without pan never applies that control.
     fn configure_coefficients(&mut self) {
         self.shift = Q14::from_f64(self.config.pitch_ratio as f64);
         self.modulation = (self.config.harmonic_modulation as f64 / 8.0 * 16.0) as i32;
@@ -588,12 +588,13 @@ impl Resynthesis {
                 self.pan[voice] = [Q14::ONE; 2];
             }
         }
+        let gain = self.config.harmony_gain as f64;
+        self.harmony_level = Q14::from_f64(gain);
         for (voice, fraction) in [0.3333333333333333, 0.6666666666666666, 0.0, 1.0]
             .into_iter()
             .enumerate()
         {
             let angle: f64 = 1.57079632713 * fraction;
-            let gain = self.config.harmony_gain as f64;
             self.harmony_pan[voice] = [
                 Q14::from_f64(gain * angle.cos()),
                 Q14::from_f64(gain * angle.sin()),
@@ -816,14 +817,15 @@ impl Resynthesis {
     pub(crate) fn is_tracking(&self) -> bool {
         !self.pitch.is_detecting()
     }
-    /// Writes the effective ratio and the linear gain of each voice from the
-    /// last frame, and returns the number of voices.
+    /// Writes the effective ratio and the linear gain of each active voice
+    /// from the last frame, and returns the number of voices.
     ///
-    /// Slot zero is the lead. In Harmony mode, slots 1 to 4 are the harmony
-    /// voices, and the gain is the envelope of the harmony controller. In
-    /// Choir mode, the slots after the lead are the secondary voices with a
-    /// gain of 1. Each ratio includes the correction, the global shift and
-    /// the ratio of the voice. The entries after the count do not change.
+    /// Slot zero is the lead. In Harmony mode, the slots after the lead hold
+    /// the active harmony voices, and the gain is the envelope of the harmony
+    /// controller. In Choir mode, the slots after the lead are the secondary
+    /// voices with a gain of 1. Each ratio includes the correction, the
+    /// global shift and the ratio of the voice. The entries after the count
+    /// do not change.
     pub(crate) fn voices(&self, ratios: &mut [f32; 16], gains: &mut [f32; 16]) -> u8 {
         let lead = (self.voice_ratios[0].to_bits() as f64 / 16384.0) as f32;
         ratios[0] = lead;
@@ -837,12 +839,16 @@ impl Resynthesis {
             }
             count as u8
         } else {
+            let mut count = 1;
             for voice in 0..HARMONY_VOICES {
-                ratios[voice + 1] =
-                    (self.voice_ratios[voice + 1].to_bits() as f64 / 16384.0) as f32;
-                gains[voice + 1] = (self.harmony_gains[voice].to_bits() as f64 / 4096.0) as f32;
+                if self.harmony_gains[voice] > Q12::ZERO {
+                    ratios[count] =
+                        (self.voice_ratios[voice + 1].to_bits() as f64 / 16384.0) as f32;
+                    gains[count] = (self.harmony_gains[voice].to_bits() as f64 / 4096.0) as f32;
+                    count += 1;
+                }
             }
-            (HARMONY_VOICES + 1) as u8
+            count as u8
         }
     }
     /// Returns the wrapping count of formant model designs.
@@ -1264,6 +1270,9 @@ impl Resynthesis {
                 let (mut value, _) = history::interpolation(&self.filtered, position);
                 if slot > 0 {
                     value = value.mul(self.harmony_gains[slot - 1]);
+                    if !self.config.stereo_output {
+                        value = value.mul(self.harmony_level);
+                    }
                 }
                 for (channel, sum) in mix.iter_mut().enumerate() {
                     *sum = *sum

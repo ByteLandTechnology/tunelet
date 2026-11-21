@@ -189,10 +189,9 @@ with `resynthesis.harmony.source`:
 | `MidiOmni`      | MIDI notes from all channels, on the first free voice  |
 | `MidiChannels`  | MIDI channel `n` for voice `n` (channels 0–3), default |
 
-`resynthesis.harmony.voices` sets the number of interval voices, in `0..=4`.
-The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
-voices. The other voices release with the usual gain envelope. The chord
-and MIDI sources ignore this field.
+`resynthesis.harmony.voices` sets the maximum number of active harmony
+voices, in `0..=4`. The default is 4. All harmony sources limit the active
+voices to this count. Voices above the count release with the gain envelope.
 
 ## Process audio
 
@@ -297,7 +296,7 @@ These calls read the state of the processor. They do not change the audio.
 
 The telemetry includes these items:
 
-- The pitch ratio and the gain of each voice.
+- The active voice count, and the pitch ratio and the gain of each voice.
 - The peaks of the input, of the two output channels and of the reverb wet
   signal.
 - The pitch clarity, which is a confidence score from 0 to 1.

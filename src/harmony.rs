@@ -239,7 +239,7 @@ pub enum Inversion {
 /// - A tonic major chord in root position.
 /// - A register of 50%.
 /// - A closed voicing and zero portamento.
-/// - Four voices for the interval sources.
+/// - A maximum of four active voices.
 ///
 /// These settings configure all sources. Only the fields for the selected
 /// source change the target notes. Validation always checks all fields.
@@ -315,13 +315,12 @@ pub struct HarmonyConfig {
     /// a glide. In the interval sources, if the input moves more than one
     /// semitone bin, each voice starts at its new target without a glide.
     pub portamento_ms: f32,
-    /// The number of voices that sound in the interval sources, 0..=4.
+    /// The maximum number of harmony voices that sound, 0..=4.
     ///
-    /// The default is 4. [`HarmonySource::FixedInterval`] and
-    /// [`HarmonySource::SmartInterval`] use the first `voices` voices. The
-    /// other voices release with the usual gain envelope. The chord and MIDI
-    /// sources ignore this field. In JavaScript, the field is optional and
-    /// a missing value gives the default.
+    /// The default is 4. All harmony sources limit the active voices to this
+    /// count. Voices above the count release with the gain envelope. In
+    /// JavaScript, the field is optional and a missing value gives the
+    /// default.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(default = "default_voices"),
@@ -330,7 +329,7 @@ pub struct HarmonyConfig {
     pub voices: u8,
 }
 
-/// The default count of interval voices: all of them.
+/// The default count of harmony voices: all of them.
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 fn default_voices() -> u8 {
     HARMONY_VOICES as u8
@@ -858,7 +857,10 @@ impl HarmonyState {
     /// portamento.
     fn select_target(&mut self, period: Q6, voice: usize) -> Q12 {
         match self.config.source {
-            HarmonySource::FixedInterval | HarmonySource::SmartInterval
+            HarmonySource::FixedInterval
+            | HarmonySource::SmartInterval
+            | HarmonySource::MidiOmni
+            | HarmonySource::MidiChannels
                 if voice >= self.config.voices as usize =>
             {
                 // A voice after the configured count releases. A zero target
@@ -917,6 +919,7 @@ impl HarmonyState {
             self.midi_period,
             self.midi_gain,
         );
+        let count = count.min(usize::from(self.config.voices));
         if count == 0 {
             self.chord_period.fill(Q6::ZERO);
             return;
