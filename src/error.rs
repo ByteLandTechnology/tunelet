@@ -131,6 +131,18 @@ impl Error {
             Err(Self::BufferLength { expected, actual })
         }
     }
+
+    /// Returns an error if `frames` is more than `max`.
+    ///
+    /// Zero frames are valid. The process calls and the drain calls check this
+    /// block limit before they decode events or change state.
+    pub(crate) fn check_block(frames: usize, max: usize) -> Result<(), Self> {
+        if frames <= max {
+            Ok(())
+        } else {
+            Err(Self::BlockTooLarge { frames, max })
+        }
+    }
 }
 
 /// Checks that a control is finite and in `min..=max`.

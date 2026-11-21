@@ -556,19 +556,8 @@ impl Processor {
         input: &[i16],
         events: &'a [TimedEvent],
     ) -> Result<ValidatedEvents<'a>, Error> {
-        self.check_block(input.len())?;
+        Error::check_block(input.len(), self.preparation.max_block_frames.get())?;
         ValidatedEvents::new(events, input.len())
-    }
-
-    /// Enforces the prepared block limit for each call.
-    ///
-    /// Zero frames are valid.
-    fn check_block(&self, frames: usize) -> Result<(), Error> {
-        let max = self.preparation.max_block_frames.get();
-        if frames > max {
-            return Err(Error::BlockTooLarge { frames, max });
-        }
-        Ok(())
     }
 
     /// Applies a validated control immediately before its frame is rendered.
@@ -670,7 +659,7 @@ impl Processor {
         frames: usize,
         mut write: impl FnMut(usize, [i16; 2]),
     ) -> Result<usize, Error> {
-        self.check_block(frames)?;
+        Error::check_block(frames, self.preparation.max_block_frames.get())?;
         let count = self.drain_remaining.unwrap_or(0).min(frames);
         let configured = self.config.resynthesis;
         if configured.formant.aspiration_mix != 0.0 {

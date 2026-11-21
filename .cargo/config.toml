@@ -1,0 +1,25 @@
+[alias]
+clippy-wasm = [
+    "clippy",
+    "--locked",
+    "--lib",
+    "--target",
+    "wasm32-unknown-unknown",
+    "--features",
+    "wasm",
+    "--",
+    "-D",
+    "warnings",
+]
+doc-wasm = [
+    "doc",
+    "--locked",
+    "--no-deps",
+    "--target",
+    "wasm32-unknown-unknown",
+    "--features",
+    "wasm",
+]
+
+[build]
+rustdocflags = ["-D", "warnings"]

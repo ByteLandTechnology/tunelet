@@ -523,7 +523,15 @@ cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 ```
 
-Native Rust builds use Cargo and do not need Node.js or npm.
+Native Rust builds use Cargo and do not need Node.js or npm. To check the
+`wasm` feature for `wasm32-unknown-unknown` with Cargo only, run these
+commands:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo clippy-wasm
+cargo doc-wasm
+```
 
 ### npm package
 
@@ -537,9 +545,10 @@ npm ci
 npm pack
 ```
 
-`npm pack` builds the Wasm bindings and the TypeScript entry point. Then it
-creates `tunelet-<version>.tgz`. To use this archive in a browser project or
-a Node.js project, install it with this command:
+`npm pack` runs `cargo clippy-wasm` and `cargo doc-wasm` first. Then it
+builds the Wasm bindings and the TypeScript entry point. Next, it creates
+`tunelet-<version>.tgz`. To use this archive in a browser project or a
+Node.js project, install it with this command:
 
 ```sh
 npm install /path/to/tunelet-<version>.tgz
