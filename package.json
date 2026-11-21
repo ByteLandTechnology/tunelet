@@ -31,10 +31,13 @@
     "build": "npm run build:wasm && npm run build:ts",
     "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-opt --features wasm --locked",
     "build:ts": "tsc",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "prepare": "lefthook install || true"
   },
   "devDependencies": {
+    "@commitlint/cli": "21.2.4",
     "@types/node": "^22.20.5",
+    "lefthook": "2.2.2",
     "typescript": "^7.0.2"
   }
 }

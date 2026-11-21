@@ -86,6 +86,8 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 - `src/wasm.rs`: the wasm-bindgen and tsify bindings (`wasm` feature).
 - `src/index.ts`: the `loadTunelet` entry point. See also `package.json`
   and `tsconfig.json`.
+- `lefthook.yml`, `commitlint.config.mjs`: the local Git hooks and the
+  rules for commit messages.
 
 ## Build and verify
 
@@ -148,6 +150,20 @@ npm run build
   before you make it simpler.
 
 ## Commit guidance
+
+Run `npm ci` to install the local `pre-commit` and `commit-msg` Git
+hooks through `lefthook`. Automatic hook installation requires Node.js
+and `npm ci` to run `lefthook` and `@commitlint/cli`. If you use Cargo
+without Node.js, run the commands in "Build and verify" before each
+commit.
+
+On each commit, `lefthook` (`lefthook.yml`) runs `cargo fmt --check`,
+`cargo clippy`, `cargo doc` and `tsc --noEmit` in parallel for changed
+files. If `src/index.ts`, `src/wasm.rs` or `tsconfig.json` changes, run
+`npm run build` before you commit. If `pkg/` is absent, `tsc --noEmit`
+fails. In the `commit-msg` hook, `@commitlint/cli`
+(`commitlint.config.mjs`) checks the commit message against the rules
+below.
 
 - Before you commit a code change, run the commands in "Build and verify".
 - Put one topic in each commit.

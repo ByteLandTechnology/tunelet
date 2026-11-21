@@ -1,0 +1,37 @@
+# Local Git hooks for pre-commit checks and commit messages.
+# Run `npm ci` to install these hooks into `.git/hooks/`.
+
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      glob:
+        - "*.rs"
+        - "Cargo.toml"
+        - "Cargo.lock"
+      run: cargo fmt --check
+    clippy:
+      glob:
+        - "*.rs"
+        - "Cargo.toml"
+        - "Cargo.lock"
+      run: cargo clippy --locked --lib -- -D warnings
+    doc:
+      glob:
+        - "*.rs"
+        - "Cargo.toml"
+        - "Cargo.lock"
+      env:
+        RUSTDOCFLAGS: -D warnings
+      run: cargo doc --locked --no-deps
+    tsc:
+      glob:
+        - "src/index.ts"
+        - "src/wasm.rs"
+        - "tsconfig.json"
+      run: ./node_modules/.bin/tsc --noEmit
+
+commit-msg:
+  commands:
+    commitlint:
+      run: ./node_modules/.bin/commitlint --edit {1}
