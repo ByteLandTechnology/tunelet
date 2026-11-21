@@ -8,6 +8,7 @@
 pub(crate) mod fixed;
 pub(crate) mod rng;
 mod tables;
+use fixed::Q14;
 use rng::RandomStream;
 use tables::{SINC, TAN};
 
@@ -68,12 +69,12 @@ pub(crate) fn coefficient_to_exp_value(min: f32, max: f32, start: f32, position:
 /// Returns the value of a three-point parabola at a Q14 fractional offset
 /// from the center sample.
 ///
-/// The table words, the sums and the intermediate products wrap.
+/// The input words, the sums and the intermediate products wrap at 32 bits.
 #[inline]
-fn quadratic(y0: i32, y1: i32, y2: i32, fraction: i32) -> i32 {
-    let a = (y0.wrapping_add(y2) >> 1).wrapping_sub(y1);
-    let b = y2.wrapping_sub(y0) >> 1;
-    mul_shift(mul_shift(a, fraction, 14).wrapping_add(b), fraction, 14).wrapping_add(y1)
+pub(crate) fn quadratic(y0: Q14, y1: Q14, y2: Q14, fraction: Q14) -> Q14 {
+    let curvature = ((y0 + y2) >> 1) - y1;
+    let slope = (y2 - y0) >> 1;
+    y1 + (curvature.mul::<14, 14>(fraction) + slope).mul(fraction)
 }
 
 /// Interpolates the table of sinc coefficients at a Q14 phase position.
@@ -84,9 +85,15 @@ fn quadratic(y0: i32, y1: i32, y2: i32, fraction: i32) -> i32 {
 pub(crate) fn fast_sinc(input: i32) -> i32 {
     let scaled = (input >> 1).wrapping_mul(256);
     let index = (scaled.wrapping_add(8192) >> 14).clamp(1, 254);
-    let fraction = scaled.wrapping_sub(index.wrapping_shl(14));
+    let fraction = Q14::from_bits(scaled.wrapping_sub(index.wrapping_shl(14)));
     let i = index as usize;
-    quadratic(SINC[i - 1], SINC[i], SINC[i + 1], fraction)
+    quadratic(
+        Q14::from_bits(SINC[i - 1]),
+        Q14::from_bits(SINC[i]),
+        Q14::from_bits(SINC[i + 1]),
+        fraction,
+    )
+    .to_bits()
 }
 
 /// An arctangent approximation that keeps the last index into the tangent
