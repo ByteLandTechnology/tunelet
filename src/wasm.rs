@@ -19,7 +19,13 @@
 //! - Field names use camelCase.
 //! - Enum values are strings.
 //! - Each object must contain all required fields.
+//! - The optional `resynthesis.leadGain` field defaults to 1.
 //! - The optional harmony `voices` field defaults to 4.
+//! - The optional harmony `voiceGains` field defaults to `[1, 1, 1, 1]`.
+//! - The optional harmony `voicePans` field defaults to
+//!   `[-0.33333334, 0.33333334, -1, 1]`.
+//! - The optional harmony `voiceMutes` field defaults to
+//!   `[false, false, false, false]`.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
 //! `{ type, value }`, and the reset control has no `value`. MIDI messages use

@@ -194,6 +194,19 @@ The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
 voices. The other voices release with the usual gain envelope. The chord
 and MIDI sources ignore this field.
 
+These fields mix the lead voice and the four harmony voices in `Harmony` mode:
+
+- `resynthesis.lead_gain` scales the lead voice, in `0..=1` (default `1`).
+- `resynthesis.harmony_gain` scales all four harmony voices in mono and stereo
+  output, in `0..=1` (default `0.5`).
+- `resynthesis.harmony.voice_gains` scales each harmony voice, in `0..=1`
+  (default `[1, 1, 1, 1]`).
+- If `stereo_output` is `true`, `resynthesis.harmony.voice_pans` sets the
+  constant-power stereo pan of each harmony voice, in `-1..=1` (default
+  `[-0.33333334, 0.33333334, -1, 1]`).
+- `resynthesis.harmony.voice_mutes` mutes individual harmony voices in mono and
+  stereo output (default `[false, false, false, false]`).
+
 ## Process audio
 
 To prepare a processor, do these steps:
@@ -297,7 +310,9 @@ These calls read the state of the processor. They do not change the audio.
 
 The telemetry includes these items:
 
-- The pitch ratio and the gain of each voice.
+- The pitch ratio and the controller gain of each voice. In `Harmony` mode,
+  `voice_gains` in telemetry reports the controller envelope and does not
+  include `lead_gain`, `harmony_gain` or the harmony mix controls.
 - The peaks of the input, of the two output channels and of the reverb wet
   signal.
 - The pitch clarity, which is a confidence score from 0 to 1.
@@ -444,10 +459,18 @@ and show enums as string literals. To change the configuration, do these steps:
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+JavaScript `Error`. These optional fields use their defaults if they are
+absent:
+
+- `resynthesis.leadGain` defaults to `1`.
+- `resynthesis.harmony.voices` defaults to `4`.
+- `resynthesis.harmony.voiceGains` defaults to `[1, 1, 1, 1]`.
+- `resynthesis.harmony.voicePans` defaults to
+  `[-0.33333334, 0.33333334, -1, 1]`.
+- `resynthesis.harmony.voiceMutes` defaults to `[false, false, false, false]`.
+
+The conversion ignores extra object properties. The generated declarations
+contain the parameter documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use

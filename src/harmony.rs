@@ -18,6 +18,11 @@ use chords::SCALE_TONES;
 /// same count.
 pub const HARMONY_VOICES: usize = 4;
 
+/// The default linear gain of each harmony voice: unity.
+pub(crate) const DEFAULT_VOICE_GAINS: [f32; HARMONY_VOICES] = [1.0; HARMONY_VOICES];
+/// The default stereo pan position of each harmony voice, in -1.0..=1.0.
+pub(crate) const DEFAULT_VOICE_PANS: [f32; HARMONY_VOICES] = [-0.33333334, 0.33333334, -1.0, 1.0];
+
 /// The Q12 step that increases the gain envelope of a voice toward a higher
 /// target gain (attack).
 ///
@@ -240,6 +245,7 @@ pub enum Inversion {
 /// - A register of 50%.
 /// - A closed voicing and zero portamento.
 /// - Four voices for the interval sources.
+/// - Unity voice gains, default stereo pans and no voice mutes.
 ///
 /// These settings configure all sources. Only the fields for the selected
 /// source change the target notes. Validation always checks all fields.
@@ -328,12 +334,63 @@ pub struct HarmonyConfig {
         tsify(optional)
     )]
     pub voices: u8,
+    /// Four linear gains for the harmony voices, each in 0..=1.
+    ///
+    /// The default is `[1.0, 1.0, 1.0, 1.0]`. Each value scales one harmony
+    /// voice in mono and stereo output.
+    /// [`crate::ResynthesisConfig::harmony_gain`] also scales all four voices.
+    /// In JavaScript, the field is optional and an absent value gives the
+    /// default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "default_voice_gains"),
+        tsify(optional, type = "[number, number, number, number]")
+    )]
+    pub voice_gains: [f32; HARMONY_VOICES],
+    /// Four stereo pan positions for the harmony voices, each in -1..=1.
+    ///
+    /// A value of -1 puts the voice on the left channel. A value of 0 puts
+    /// the voice in the center, and 1 puts it on the right channel. The
+    /// default is `[-0.33333334, 0.33333334, -1.0, 1.0]`. If
+    /// [`crate::ResynthesisConfig::stereo_output`] is `true`, resynthesis uses
+    /// these positions for a constant-power stereo pan. In JavaScript, the
+    /// field is optional and an absent value gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "default_voice_pans"),
+        tsify(optional, type = "[number, number, number, number]")
+    )]
+    pub voice_pans: [f32; HARMONY_VOICES],
+    /// Four mutes for the harmony voices. The default is all `false`.
+    ///
+    /// If an entry is `true`, that harmony voice has zero output gain in mono
+    /// and stereo output. Its reader and gain envelope continue to advance.
+    /// In JavaScript, the field is optional and an absent value gives the
+    /// default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default),
+        tsify(optional, type = "[boolean, boolean, boolean, boolean]")
+    )]
+    pub voice_mutes: [bool; HARMONY_VOICES],
 }
 
 /// The default count of interval voices: all of them.
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 fn default_voices() -> u8 {
     HARMONY_VOICES as u8
+}
+
+/// The default linear gains of the four harmony voices.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn default_voice_gains() -> [f32; HARMONY_VOICES] {
+    DEFAULT_VOICE_GAINS
+}
+
+/// The default stereo pan positions of the four harmony voices.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn default_voice_pans() -> [f32; HARMONY_VOICES] {
+    DEFAULT_VOICE_PANS
 }
 
 impl Default for HarmonyConfig {
@@ -351,6 +408,9 @@ impl Default for HarmonyConfig {
             voicing_spread_percent: 0.0,
             portamento_ms: 0.0,
             voices: HARMONY_VOICES as u8,
+            voice_gains: DEFAULT_VOICE_GAINS,
+            voice_pans: DEFAULT_VOICE_PANS,
+            voice_mutes: [false; HARMONY_VOICES],
         }
     }
 }
@@ -359,10 +419,10 @@ impl HarmonyConfig {
     /// Validates all fields, which includes the fields that the selected
     /// source does not use.
     ///
-    /// Each element of the two interval arrays must be in its documented
-    /// inclusive range. The floating-point controls must be finite and in
-    /// their documented inclusive ranges. Validation does not clamp values.
-    /// It does not change the processor state.
+    /// Each element of the interval, gain and pan arrays must be in its
+    /// documented inclusive range. The floating-point controls must be finite
+    /// and in their documented inclusive ranges. Validation does not clamp
+    /// values. It does not change the processor state.
     ///
     /// # Errors
     ///
@@ -389,7 +449,14 @@ impl HarmonyConfig {
             self.portamento_ms,
             0.0,
             10_000.0,
-        )
+        )?;
+        for gain in self.voice_gains {
+            check_range("resynthesis.harmony.voice_gains", gain, 0.0, 1.0)?;
+        }
+        for pan in self.voice_pans {
+            check_range("resynthesis.harmony.voice_pans", pan, -1.0, 1.0)?;
+        }
+        Ok(())
     }
 }
 
@@ -539,7 +606,15 @@ impl HarmonyState {
         if old.portamento_ms != config.portamento_ms {
             self.prepare_portamento();
         }
-        if old != config {
+        if old.source != config.source
+            || old.key != config.key
+            || old.scale != config.scale
+            || old.chord != config.chord
+            || old.degree != config.degree
+            || old.inversion != config.inversion
+            || old.register_percent != config.register_percent
+            || old.voicing_spread_percent != config.voicing_spread_percent
+        {
             self.setup_chord();
         }
     }
