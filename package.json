@@ -29,10 +29,11 @@
   "sideEffects": false,
   "scripts": {
     "build": "npm run build:wasm && npm run build:ts",
-    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-opt --features wasm --locked",
+    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node --input-type=module -e \"import fs from 'node:fs'; fs.rmSync('pkg/.gitignore', { force: true })\"",
     "build:ts": "tsc",
     "prepack": "npm run build",
-    "prepare": "lefthook install || true"
+    "prepare": "lefthook install || true",
+    "verify:pack": "node scripts/verify-pack.mjs"
   },
   "devDependencies": {
     "@commitlint/cli": "21.2.4",
