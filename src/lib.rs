@@ -1,10 +1,13 @@
 //! A crate for vocal pitch correction, choir, harmony, formant control and effects.
 //!
-//! [`Processor`] changes mono signed 16-bit PCM into the same number of stereo
-//! or mono frames. The sample rate is 44.1 kHz or 48 kHz. The signal chain is
-//! Punch → Warm → pitch tracking and resynthesis → Alien → reverb → output
-//! gain. The default configuration enables chromatic pitch correction and one
-//! choir voice. The optional effects and the formant stage are disabled.
+//! [`Processor`] changes mono 16-bit PCM or normalized `f32` audio into the
+//! same number of stereo or mono frames. The sample rate is 44.1, 48, 88.2,
+//! 96, 176.4 or 192 kHz. At 88.2, 96, 176.4 and 192 kHz, fixed-point Q14
+//! biquad filters resample between the host rate and the 44.1 or 48 kHz base
+//! rate. The signal chain is Punch → Warm → pitch tracking and resynthesis →
+//! Alien → reverb → output gain. The default configuration enables chromatic
+//! pitch correction and one choir voice. The optional effects and the formant
+//! stage are disabled.
 //!
 //! # Preparing and configuring
 //!
@@ -26,15 +29,19 @@
 //!
 //! # Audio and timed controls
 //!
-//! There are three process methods:
+//! There are three 16-bit PCM process methods and three `f32` process methods:
 //!
-//! - [`Processor::process`] writes `[left, right]` frames.
-//! - [`Processor::process_planar`] writes separate channels.
-//! - [`Processor::process_mono_in_place`] replaces the input with the stereo
+//! - [`Processor::process`] and [`Processor::process_f32`] write `[left, right]`
+//!   frames.
+//! - [`Processor::process_planar`] and [`Processor::process_planar_f32`] write
+//!   separate channels.
+//! - [`Processor::process_mono_in_place`] and
+//!   [`Processor::process_mono_in_place_f32`] replace the input with the stereo
 //!   downmix.
 //!
 //! These layouts do not depend on [`ResynthesisConfig::stereo_output`], which
-//! controls voice panning. The output is clipped to -32767..=32767.
+//! controls voice panning. PCM output is clipped to -32767..=32767, and `f32`
+//! output is scaled by 1/32768.
 //!
 //! An event applies before its selected frame. Offsets must be in the current
 //! block and must not decrease. Events with equal offsets execute in slice
@@ -42,8 +49,9 @@
 //! or its state. Thus, an invalid last event also rejects the full call. An
 //! empty block accepts no events.
 //!
-//! [`ControlEvent::Midi`] controls harmony. [`ControlEvent::CorrectionMidi`]
-//! selects the correction pitch classes independently. The processor does not
+//! [`ControlEvent::Midi`] and [`Processor::apply_midi`] control harmony.
+//! [`ControlEvent::CorrectionMidi`] and [`Processor::apply_correction_midi`]
+//! select the correction pitch classes independently. The processor does not
 //! keep MIDI controls in a queue after the current call.
 //!
 //! # Feedback, latency and lifecycle
@@ -52,9 +60,10 @@
 //! accumulated stereo peak and the frame count.
 //! [`Processor::take_feedback`] also clears the peak window. The pitch
 //! reporting bounds change only the reports. They do not change the detection
-//! or the audio signal. [`Processor::latency_frames`] gives a nominal
-//! resynthesis delay. Voice delays, pitch changes and effects have their own
-//! timing.
+//! or the audio signal. [`Processor::latency_frames`] gives the nominal
+//! resynthesis delay in host frames, with the Q14 resampler filter delay
+//! included at 88.2, 96, 176.4 and 192 kHz. Voice delays, pitch changes and
+//! effects have their own timing.
 //!
 //! [`Processor::telemetry`] gives data for meters and displays: the ratio and
 //! the gain of each voice, the input and output peaks, the pitch clarity and
@@ -92,9 +101,11 @@
 //!
 //! To export JavaScript bindings and generated TypeScript definitions, enable
 //! the optional `wasm` feature for `wasm32-unknown-unknown`. The binding owns
-//! PCM buffers that it uses again. Configuration conversion, event conversion,
-//! feedback objects and errors cause more allocation at the JavaScript
-//! boundary.
+//! reusable 16-bit PCM and `f32` buffers, and exposes typed-array methods for
+//! MIDI controls, feedback and telemetry without heap allocation. Object
+//! conversion and errors cause allocation at the JavaScript boundary. The npm
+//! package also provides `createTuneletNode`, `TuneletWorkletNode` and the
+//! `tunelet/worklet` runtime for Web Audio.
 //! Refer to the README for how to build the shared package for browsers and
 //! Node.js.
 
@@ -115,6 +126,7 @@ mod midi;
 mod numeric;
 mod pitch;
 mod processor;
+mod resample;
 mod resynthesis;
 mod scale;
 

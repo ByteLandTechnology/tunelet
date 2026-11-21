@@ -769,6 +769,11 @@ impl Formant {
         };
         for (k, (input, output)) in input.iter_mut().zip(output.iter_mut()).enumerate() {
             let omega = step * k as f64;
+            if omega > std::f64::consts::PI {
+                *input = 0.0;
+                *output = 0.0;
+                continue;
+            }
             let (sine, cosine) = omega.sin_cos();
             let emphasis = ((1.0 - glottal * cosine).powi(2) + (glottal * sine).powi(2))
                 .sqrt()

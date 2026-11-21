@@ -7,8 +7,9 @@ use crate::effects::warm::Warm;
 use crate::events::{ValidatedEvent, ValidatedEvents};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
+use crate::resample::Resampler;
 use crate::resynthesis::{self, Resynthesis};
-use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
+use crate::{ControlEvent, Error, MidiEvent, PrepareConfig, ProcessorConfig, TimedEvent};
 
 /// A prepared vocal processor with state, mono input and stereo synthesis.
 ///
@@ -45,6 +46,8 @@ pub struct Processor {
     ///
     /// In bypass, their histories do not change.
     reverb: Reverb,
+    /// The fixed-point 2x or 4x rate converter, or `None` at 44.1 and 48 kHz.
+    resampler: Option<Box<Resampler>>,
     /// The random sequence of this instance and the cached arctangent position.
     numeric: NumericContext,
     /// The largest absolute clipped stereo PCM sample in the feedback window.
@@ -102,7 +105,7 @@ impl Processor {
     /// not zero and that the sample rate is supported.
     pub fn new(preparation: PrepareConfig, config: ProcessorConfig) -> Result<Self, Error> {
         config.validate()?;
-        let rate = preparation.sample_rate;
+        let rate = preparation.sample_rate.base_rate();
         // Drive uses the default gain until the first 100-frame peak window.
         let mut punch = Punch::new(rate, PunchConfig::default());
         punch.set_config(config.punch);
@@ -114,6 +117,7 @@ impl Processor {
             resynthesis: Box::new(Resynthesis::new(rate, config.resynthesis)),
             alien: Alien::new(config.alien),
             reverb: Reverb::new(rate, config.reverb),
+            resampler: Resampler::new(preparation.sample_rate),
             numeric: NumericContext::new(config.resynthesis.random_seed as u32),
             peak: 0,
             input_peak: 0,
@@ -211,6 +215,85 @@ impl Processor {
         Ok(())
     }
 
+    /// Processes mono `f32` audio into `[left, right]` stereo frames.
+    ///
+    /// Input samples in `-1.0..=1.0` map to rounded, clamped 16-bit PCM. The
+    /// method scales output samples by `1.0 / 32768.0` into
+    /// `-32767.0 / 32768.0..=32767.0 / 32768.0`. Block limits, event timing and
+    /// drain cancellation are the same as for [`process`](Self::process).
+    ///
+    /// # Errors
+    ///
+    /// The call checks [`Error::BufferLength`] first and
+    /// [`Error::BlockTooLarge`] second. Then it checks [`Error::InvalidEvent`]
+    /// before the state or the output changes.
+    pub fn process_f32(
+        &mut self,
+        input: &[f32],
+        output: &mut [[f32; 2]],
+        events: &[TimedEvent],
+    ) -> Result<(), Error> {
+        Error::check_length(input.len(), output.len())?;
+        self.process_into_f32(input, events, |index, frame| output[index] = frame)
+    }
+
+    /// Processes mono `f32` audio into separate left and right output slices.
+    ///
+    /// The three slices must have equal frame counts. Input quantization,
+    /// output scaling, event order and drain cancellation are the same as for
+    /// [`process_f32`](Self::process_f32).
+    ///
+    /// # Errors
+    ///
+    /// The call checks [`Error::BufferLength`] for the left channel, then for
+    /// the right channel. Next, it checks [`Error::BlockTooLarge`], then
+    /// [`Error::InvalidEvent`] before the output buffers or the state change.
+    pub fn process_planar_f32(
+        &mut self,
+        input: &[f32],
+        left: &mut [f32],
+        right: &mut [f32],
+        events: &[TimedEvent],
+    ) -> Result<(), Error> {
+        Error::check_length(input.len(), left.len())?;
+        Error::check_length(input.len(), right.len())?;
+        self.process_into_f32(input, events, |index, frame| {
+            left[index] = frame[0];
+            right[index] = frame[1];
+        })
+    }
+
+    /// Replaces mono `f32` audio with the stereo downmix.
+    ///
+    /// Input conversion, stereo peak measurement, downmix rounding, event
+    /// order and drain cancellation are the same as for
+    /// [`process_mono_in_place`](Self::process_mono_in_place) and
+    /// [`process_f32`](Self::process_f32).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BlockTooLarge`] for a slice that is too large. Returns
+    /// [`Error::InvalidEvent`] for the first invalid event before the audio
+    /// slice or the processor state changes.
+    pub fn process_mono_in_place_f32(
+        &mut self,
+        audio: &mut [f32],
+        events: &[TimedEvent],
+    ) -> Result<(), Error> {
+        self.check_block(audio.len())?;
+        let mut events = ValidatedEvents::new(events, audio.len())?;
+        self.drain_remaining = None;
+        for (index, sample) in audio.iter_mut().enumerate() {
+            while let Some(event) = events.next_at(index) {
+                self.apply(event);
+            }
+            let output = self.next(pcm_from_f32(*sample));
+            let mono = ((i32::from(output[0]) + i32::from(output[1])) >> 1) as i16;
+            *sample = pcm_to_f32(mono);
+        }
+        Ok(())
+    }
+
     /// Starts a tail with the current [`tail_frames`](Self::tail_frames)
     /// budget and returns that budget.
     ///
@@ -291,20 +374,85 @@ impl Processor {
         Ok(count)
     }
 
-    /// Returns the finite tail budget for the current configuration.
+    /// Renders the next stereo tail frames as `f32` and returns their count.
+    ///
+    /// Output scaling, zero fill and completion follow [`drain`](Self::drain).
+    ///
+    /// # Errors
+    ///
+    /// If the output is larger than the prepared block limit, the method
+    /// returns [`Error::BlockTooLarge`] and does not change state or output.
+    pub fn drain_f32(&mut self, output: &mut [[f32; 2]]) -> Result<usize, Error> {
+        let count = self.drain_into(output.len(), |index, frame| {
+            output[index] = frame.map(pcm_to_f32);
+        })?;
+        output[count..].fill([0.0; 2]);
+        Ok(count)
+    }
+
+    /// Renders the tail into separate `f32` output channels of equal size.
+    ///
+    /// Output scaling, zero fill and completion follow
+    /// [`drain_planar`](Self::drain_planar).
+    ///
+    /// # Errors
+    ///
+    /// The method checks [`Error::BufferLength`] before
+    /// [`Error::BlockTooLarge`]. If either error occurs, the two channels and
+    /// the drain state do not change.
+    pub fn drain_planar_f32(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+    ) -> Result<usize, Error> {
+        Error::check_length(left.len(), right.len())?;
+        let count = self.drain_into(left.len(), |index, frame| {
+            left[index] = pcm_to_f32(frame[0]);
+            right[index] = pcm_to_f32(frame[1]);
+        })?;
+        left[count..].fill(0.0);
+        right[count..].fill(0.0);
+        Ok(count)
+    }
+
+    /// Renders the tail as mono `f32` audio and returns the number of rendered
+    /// frames.
+    ///
+    /// Downmix rounding, zero fill and completion follow
+    /// [`drain_mono`](Self::drain_mono).
+    ///
+    /// # Errors
+    ///
+    /// If the output is larger than the prepared block limit, the method
+    /// returns [`Error::BlockTooLarge`] before it changes output or state.
+    pub fn drain_mono_f32(&mut self, output: &mut [f32]) -> Result<usize, Error> {
+        let count = self.drain_into(output.len(), |index, frame| {
+            let mono = ((i32::from(frame[0]) + i32::from(frame[1])) >> 1) as i16;
+            output[index] = pcm_to_f32(mono);
+        })?;
+        output[count..].fill(0.0);
+        Ok(count)
+    }
+
+    /// Returns the finite tail budget for the current configuration, in host
+    /// frames.
     ///
     /// This value is a configured limit. It is not the number of drain frames
-    /// that are left, and it is not a measured decay time. It can include
-    /// silence. It can also stop filter output that continues for a long
-    /// time.
+    /// that are left, and it is not a measured decay time. At 88.2, 96, 176.4
+    /// and 192 kHz, the budget scales to host frames and adds the Q14 filter
+    /// tail. It can include silence, and it can stop filter output that
+    /// continues for a long time.
     pub fn tail_frames(&self) -> usize {
-        self.resynthesis
+        let rate = self.preparation.sample_rate;
+        let base_tail = self
+            .resynthesis
             .tail_frames()
             .saturating_add(alien::tail_frames(self.config.alien))
-            .saturating_add(reverb::tail_frames(
-                self.preparation.sample_rate,
-                self.config.reverb,
-            ))
+            .saturating_add(reverb::tail_frames(rate.base_rate(), self.config.reverb));
+        let filter_tail = self.resampler.as_deref().map_or(0, Resampler::tail_frames);
+        base_tail
+            .saturating_mul(rate.factor())
+            .saturating_add(filter_tail)
     }
 
     /// Returns the fixed sample rate and block limit.
@@ -322,13 +470,17 @@ impl Processor {
         self.config
     }
 
-    /// Returns the nominal resynthesis latency: 1,593 frames at both rates.
+    /// Returns the nominal latency in host frames.
     ///
-    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
-    /// and effects have their own timing. Thus, this value does not align all
-    /// paths.
+    /// The value is 1,593 frames at 44.1 and 48 kHz. With the Q14 filter delay,
+    /// the value is 3,190 frames at 88.2 and 96 kHz, and 6,384 frames at 176.4
+    /// and 192 kHz. At 44.1 and 48 kHz, the dry path has a delay of 1,543
+    /// frames. Resampled voices, choir delays and effects have their own
+    /// timing. Thus, this value does not align all paths.
     pub fn latency_frames(&self) -> usize {
-        resynthesis::LATENCY_FRAMES
+        let factor = self.preparation.sample_rate.factor();
+        let filter_delay = self.resampler.as_deref().map_or(0, Resampler::delay_frames);
+        resynthesis::LATENCY_FRAMES * factor + filter_delay
     }
 
     /// Returns the pitch, stereo peak and frame count, and does not clear them.
@@ -336,9 +488,10 @@ impl Processor {
     /// To start a new peak window, use [`take_feedback`](Self::take_feedback).
     pub fn feedback(&self) -> Feedback {
         let estimate = self.resynthesis.estimate();
+        let factor = self.preparation.sample_rate.factor() as f32;
         Feedback {
             resample_ratio: self.last_resample_ratio,
-            period_samples: estimate.period_samples,
+            period_samples: estimate.period_samples * factor,
             frequency_hz: estimate.frequency_hz,
             target_midi_note: self.resynthesis.target_note(),
             voiced: estimate.voiced,
@@ -480,6 +633,41 @@ impl Processor {
         Ok(())
     }
 
+    /// Validates and applies one harmony MIDI control immediately.
+    ///
+    /// Channel numbers are in `0..=15`, and note and velocity numbers are in
+    /// `0..=127`. A successful call cancels an active drain and does not
+    /// allocate memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidMidi`] before the state or any active drain
+    /// changes.
+    pub fn apply_midi(&mut self, event: MidiEvent) -> Result<(), Error> {
+        event.validate()?;
+        self.drain_remaining = None;
+        self.resynthesis.apply_midi(event);
+        Ok(())
+    }
+
+    /// Validates and applies one MIDI control for the correction keyboard
+    /// immediately.
+    ///
+    /// Channel numbers are in `0..=15`, and note and velocity numbers are in
+    /// `0..=127`. A successful call cancels an active drain and does not
+    /// allocate memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidMidi`] before the state or any active drain
+    /// changes.
+    pub fn apply_correction_midi(&mut self, event: MidiEvent) -> Result<(), Error> {
+        event.validate()?;
+        self.drain_remaining = None;
+        self.resynthesis.apply_correction_midi(event);
+        Ok(())
+    }
+
     /// Applies a configuration that the public setter or the preflight checked.
     fn apply_config(&mut self, config: ProcessorConfig) {
         if self.config.punch != config.punch {
@@ -495,6 +683,9 @@ impl Processor {
             // Resynthesis resets its histories if its stereo setting changes.
             self.alien.reset();
             self.reverb.reset();
+            if let Some(resampler) = &mut self.resampler {
+                resampler.reset_output();
+            }
             self.peak = 0;
             self.clear_telemetry_peaks();
             self.last_resample_ratio = 0.0;
@@ -541,6 +732,9 @@ impl Processor {
         self.resynthesis.reset();
         self.alien.reset();
         self.reverb.reset();
+        if let Some(resampler) = &mut self.resampler {
+            resampler.reset();
+        }
         self.peak = 0;
         self.clear_telemetry_peaks();
         self.frames = 0;
@@ -602,30 +796,71 @@ impl Processor {
         self.apply_config(config);
     }
 
+    /// Renders one base-rate sample through the core stages.
+    #[allow(clippy::too_many_arguments)]
+    fn core_sample(
+        mut input: i16,
+        config: &ProcessorConfig,
+        punch: &mut Punch,
+        warm: &mut Warm,
+        resynthesis: &mut Resynthesis,
+        alien: &mut Alien,
+        reverb: &mut Reverb,
+        numeric: &mut NumericContext,
+        last_resample_ratio: &mut f32,
+    ) -> [i16; 2] {
+        if config.punch.enabled {
+            input = punch.process_sample(input, numeric);
+        }
+        if config.warm.enabled {
+            input = warm.process_sample(input);
+        }
+        let voice = resynthesis.process_sample(input, numeric);
+        *last_resample_ratio = resynthesis.resample_ratio();
+        let alien = alien.process_sample(voice);
+        let reverb = reverb.process_sample(alien);
+        let gain = (config.output_gain as f64 * 256.0) as i32;
+        reverb.map(|sample| {
+            (sample.to_bits().wrapping_mul(gain) >> 8)
+                .wrapping_shl(1)
+                .clamp(-32767, 32767) as i16
+        })
+    }
+
     /// Renders one frame through the full chain and updates stereo feedback.
     ///
     /// Resynthesis produces Q14 audio. Output gain is Q8. The multiplication
     /// wraps before the shift. PCM conversion clips to the symmetric 16-bit
     /// range. This order and the peak measurement before the downmix are part
     /// of the output.
-    fn next(&mut self, mut input: i16) -> [i16; 2] {
+    fn next(&mut self, input: i16) -> [i16; 2] {
         self.input_peak = self.input_peak.max((input as i32).abs());
-        if self.config.punch.enabled {
-            input = self.punch.process_sample(input, &mut self.numeric);
-        }
-        if self.config.warm.enabled {
-            input = self.warm.process_sample(input);
-        }
-        let voice = self.resynthesis.process_sample(input, &mut self.numeric);
-        self.last_resample_ratio = self.resynthesis.resample_ratio();
-        let alien = self.alien.process_sample(voice);
-        let reverb = self.reverb.process_sample(alien);
-        let gain = (self.config.output_gain as f64 * 256.0) as i32;
-        let result = reverb.map(|sample| {
-            (sample.to_bits().wrapping_mul(gain) >> 8)
-                .wrapping_shl(1)
-                .clamp(-32767, 32767) as i16
-        });
+        let result = match self.resampler.as_mut() {
+            None => Self::core_sample(
+                input,
+                &self.config,
+                &mut self.punch,
+                &mut self.warm,
+                &mut self.resynthesis,
+                &mut self.alien,
+                &mut self.reverb,
+                &mut self.numeric,
+                &mut self.last_resample_ratio,
+            ),
+            Some(resampler) => resampler.process_sample(input, |decimated| {
+                Self::core_sample(
+                    decimated,
+                    &self.config,
+                    &mut self.punch,
+                    &mut self.warm,
+                    &mut self.resynthesis,
+                    &mut self.alien,
+                    &mut self.reverb,
+                    &mut self.numeric,
+                    &mut self.last_resample_ratio,
+                )
+            }),
+        };
         self.peak = self
             .peak
             .max((result[0] as i32).abs())
@@ -654,6 +889,26 @@ impl Processor {
                 self.apply(event);
             }
             write(index, self.next(*sample));
+        }
+        Ok(())
+    }
+
+    /// Checks a `f32` block, applies all controls at each offset and writes
+    /// each rendered stereo `f32` frame.
+    fn process_into_f32(
+        &mut self,
+        input: &[f32],
+        events: &[TimedEvent],
+        mut write: impl FnMut(usize, [f32; 2]),
+    ) -> Result<(), Error> {
+        self.check_block(input.len())?;
+        let mut events = ValidatedEvents::new(events, input.len())?;
+        self.drain_remaining = None;
+        for (index, sample) in input.iter().enumerate() {
+            while let Some(event) = events.next_at(index) {
+                self.apply(event);
+            }
+            write(index, self.next(pcm_from_f32(*sample)).map(pcm_to_f32));
         }
         Ok(())
     }
@@ -694,6 +949,18 @@ impl Processor {
         }
         Ok(count)
     }
+}
+
+/// Converts a normalized `f32` sample to rounded, clamped 16-bit PCM.
+#[inline]
+fn pcm_from_f32(sample: f32) -> i16 {
+    (sample * 32_768.0).round().clamp(-32_768.0, 32_767.0) as i16
+}
+
+/// Scales a 16-bit PCM sample into normalized `f32` audio.
+#[inline]
+fn pcm_to_f32(sample: i16) -> f32 {
+    f32::from(sample) / 32_768.0
 }
 
 /// A snapshot of the pitch analysis and the output level that you can copy.

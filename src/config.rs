@@ -11,10 +11,12 @@ use std::num::NonZeroUsize;
 
 /// The sample rate of the input and the output.
 ///
-/// The default is 44.1 kHz. The prepared delay and filter layouts support only
-/// the listed rates. To convert an integer device rate, use
-/// [`SampleRate::try_from`]. The rate of a processor is fixed at construction.
-/// To change the rate, you must make a new processor.
+/// The default is 44.1 kHz. The processor runs its core stages directly at
+/// 44.1 kHz and 48 kHz. At 88.2, 96, 176.4 and 192 kHz, fixed-point Q14 biquad
+/// filters resample between the host rate and the 44.1 kHz or 48 kHz base
+/// rate. To convert an integer device rate, use [`SampleRate::try_from`]. The
+/// rate of a processor is fixed at construction. To change the rate, you must
+/// make a new processor.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SampleRate {
@@ -23,6 +25,14 @@ pub enum SampleRate {
     Hz44100,
     /// 48 kHz.
     Hz48000,
+    /// 88.2 kHz (2x 44.1 kHz).
+    Hz88200,
+    /// 96 kHz (2x 48 kHz).
+    Hz96000,
+    /// 176.4 kHz (4x 44.1 kHz).
+    Hz176400,
+    /// 192 kHz (4x 48 kHz).
+    Hz192000,
 }
 
 impl SampleRate {
@@ -31,12 +41,33 @@ impl SampleRate {
         match self {
             Self::Hz44100 => 44_100,
             Self::Hz48000 => 48_000,
+            Self::Hz88200 => 88_200,
+            Self::Hz96000 => 96_000,
+            Self::Hz176400 => 176_400,
+            Self::Hz192000 => 192_000,
         }
     }
 
     /// Returns the rate in hertz, as `f32`.
     pub fn hz(self) -> f32 {
         self.as_u32() as f32
+    }
+
+    /// Returns the 44.1 kHz or 48 kHz base rate of the core stages.
+    pub(crate) const fn base_rate(self) -> Self {
+        match self {
+            Self::Hz44100 | Self::Hz88200 | Self::Hz176400 => Self::Hz44100,
+            Self::Hz48000 | Self::Hz96000 | Self::Hz192000 => Self::Hz48000,
+        }
+    }
+
+    /// Returns the integer ratio between this rate and its base rate.
+    pub(crate) const fn factor(self) -> usize {
+        match self {
+            Self::Hz44100 | Self::Hz48000 => 1,
+            Self::Hz88200 | Self::Hz96000 => 2,
+            Self::Hz176400 | Self::Hz192000 => 4,
+        }
     }
 }
 
@@ -48,12 +79,16 @@ impl TryFrom<u32> for SampleRate {
     /// # Errors
     ///
     /// Returns [`Error::UnsupportedSampleRate`] with `hz`, unless the value is
-    /// exactly 44,100 or 48,000. The function does not resample and does not
-    /// select the nearest rate.
+    /// 44,100, 48,000, 88,200, 96,000, 176,400 or 192,000. The function does
+    /// not select the nearest rate.
     fn try_from(hz: u32) -> Result<Self, Self::Error> {
         match hz {
             44_100 => Ok(Self::Hz44100),
             48_000 => Ok(Self::Hz48000),
+            88_200 => Ok(Self::Hz88200),
+            96_000 => Ok(Self::Hz96000),
+            176_400 => Ok(Self::Hz176400),
+            192_000 => Ok(Self::Hz192000),
             _ => Err(Error::UnsupportedSampleRate { hz }),
         }
     }
