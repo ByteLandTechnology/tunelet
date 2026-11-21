@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.1](https://github.com/ByteLandTechnology/tunelet/compare/v0.3.0...v0.3.1) (2026-11-21)
+
+
+### Performance Improvements
+
+* **npm:** initialize Wasm asynchronously from Node.js files ([68c01c2](https://github.com/ByteLandTechnology/tunelet/commit/68c01c2da17203f56ebb22caa5c550ac66cfc3d1))
+* **pitch:** vectorize cross sums and compute shifts ([eefb67f](https://github.com/ByteLandTechnology/tunelet/commit/eefb67f3ac59de7f83e3450d3c4e6b6df9c27682))
+* **resynthesis:** skip silent voice interpolation in harmony ([e56df2b](https://github.com/ByteLandTechnology/tunelet/commit/e56df2b011470354bcfab8eae21ce4fb4fb43a3a))
+
 ## [0.3.0](https://github.com/ByteLandTechnology/tunelet/compare/v0.2.0...v0.3.0) (2026-11-21)
 
 

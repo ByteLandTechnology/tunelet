@@ -99,14 +99,18 @@ cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 cargo doc --locked --no-deps
+rustup target add wasm32-unknown-unknown
+cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
 ```
 
 If you change the Wasm or TypeScript code, also run these commands.
+`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
 `npm run build` compiles `src/wasm.rs` and the TypeScript modules in `src/`:
 
 ```sh
-rustup target add wasm32-unknown-unknown
 npm ci
+npm run check:wasm
 npm run build
 ```
 
