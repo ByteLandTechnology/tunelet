@@ -1,0 +1,105 @@
+#!/bin/sh
+# Check the commit message format and rules from AGENTS.md.
+set -eu
+
+if [ "$#" -lt 1 ] || [ ! -f "$1" ]; then
+    printf '%s\n' 'commit-msg: give a valid commit message file.' >&2
+    exit 1
+fi
+
+awk '
+function fail(line_no, rule) {
+    printf "commit-msg: line %d: %s\n", line_no, rule
+    errors++
+}
+
+{
+    sub(/\r$/, "")
+    if (after_scissors) {
+        next
+    }
+    if ($0 ~ /^# -+ >8 -+$/) {
+        comments_at_end = 1
+        after_scissors = 1
+        next
+    }
+    if ($0 ~ /^#/) {
+        comments_at_end = 1
+        next
+    }
+    comments_at_end = 0
+    count++
+    lines[count] = $0
+    lineno[count] = NR
+}
+
+END {
+    if (comments_at_end && count >= 1 && lines[count] == "") {
+        if (count == 1 || lines[count - 1] != "") {
+            count--
+        }
+    }
+
+    if (count == 0) {
+        fail(1, "write a non-empty commit message.")
+        exit 1
+    }
+
+    header_re = "^(build|chore|ci|deps|docs|feat|fix|perf|refactor|revert|style|test)(\\([a-z0-9][a-z0-9._/-]*\\))?!?: [^ \t](.*[^ \t])?$"
+
+    for (i = 1; i <= count; i++) {
+        line = lines[i]
+        ln = lineno[i]
+        low = tolower(line)
+        bad_meta = 0
+
+        if (length(line) > 72) {
+            fail(ln, "keep each line at or below 72 columns (found " length(line) ").")
+        }
+
+        if (index(line, "\\n") > 0) {
+            fail(ln, "do not use literal \\n text; write a multi-line message in a file.")
+        }
+
+        if (low ~ /(^|[^a-z])(co-authored-by|assisted-by)([^a-z]|$)/) {
+            fail(ln, "do not add Co-Authored-By or Assisted-by trailers.")
+            bad_meta = 1
+        }
+
+        if (low ~ /https?:\/\// || low ~ /(^|[^a-z])session([ \t]+(link|url|id))?[ \t]*:/) {
+            fail(ln, "do not add session links or URLs.")
+            bad_meta = 1
+        }
+
+        if (i == 1) {
+            if (line !~ header_re) {
+                fail(ln, "use a Conventional Commits header: type(scope): summary or type: summary.")
+            }
+        } else if (i == 2) {
+            if (line ~ /^[ \t]*$/ && count == 2) {
+                fail(ln, "remove extra blank lines.")
+            } else if (line ~ /^[ \t]+$/) {
+                fail(ln, "remove spaces from the blank line after the header.")
+            } else if (line != "") {
+                fail(ln, "put one blank line between the header and the body.")
+            }
+        } else {
+            if (line ~ /^[ \t]*$/) {
+                fail(ln, "remove extra blank lines.")
+            } else if (!bad_meta) {
+                if (line !~ /^- [^ \t]/) {
+                    fail(ln, "start each body line with \"- \" and do not continue lines.")
+                } else if (line ~ /[ \t]$/) {
+                    fail(ln, "end each \"- \" bullet with a period and no spaces after it.")
+                } else if (line !~ /^- [^ \t.].*\.$/) {
+                    fail(ln, "end each \"- \" bullet with a period.")
+                }
+            }
+        }
+    }
+
+    if (errors > 0) {
+        exit 1
+    }
+}
+' "$1" >&2

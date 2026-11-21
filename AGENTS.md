@@ -149,6 +149,9 @@ npm run build
 
 ## Commit guidance
 
+- Enable the Git hooks in `.githooks/`. `npm ci` sets `core.hooksPath`
+  automatically. If you use only Cargo, run
+  `git config core.hooksPath .githooks`.
 - Before you commit a code change, run the commands in "Build and verify".
 - Put one topic in each commit.
 - Do not push. The user pushes the commits.
