@@ -29,12 +29,13 @@
   "sideEffects": false,
   "scripts": {
     "build": "npm run build:wasm && npm run build:ts",
-    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-opt --features wasm --locked",
+    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node --input-type=module -e \"import fs from 'node:fs'; fs.rmSync('pkg/.gitignore', { force: true })\"",
     "build:ts": "tsc",
     "lint": "biome lint .",
     "format:check": "biome format .",
     "typecheck": "tsc --noEmit",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "verify:pack": "node scripts/verify-pack.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.8",

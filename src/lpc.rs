@@ -23,7 +23,8 @@ use crate::numeric::mul14;
 ///
 /// If the function fails, the coefficients, `parcor` and `scratch` keep the
 /// values that it wrote before the failure. This internal function does
-/// not restore them. In all of the recurrence, products wrap before the shift.
+/// not restore them. The inner sums and shifts wrap at 32 bits. The
+/// `mul14` steps use `i64` products and clamp to `i32`.
 pub(crate) fn durbin(
     correlation: &[i32],
     coefficients: &mut [i32],
