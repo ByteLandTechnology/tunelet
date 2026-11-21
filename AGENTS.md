@@ -112,15 +112,18 @@ cargo +1.88 build --locked --release
 If you change the Wasm code, the TypeScript code or `package.json`, also
 run these commands. `npm run check:wasm` runs Clippy and rustdoc for
 `wasm32-unknown-unknown`. `npm run build` compiles `src/wasm.rs` and
-`src/index.ts`. `npm pack --dry-run` checks the package files:
+`src/index.ts`. `npm run verify:pack` runs `npm run build` and checks the
+archives. `npm pack --dry-run` checks the package files:
 
 ```sh
 npm ci
-npm run check:wasm
-npm run build
+RUSTDOCFLAGS="-D warnings" npm run check:wasm
+npm run verify:pack
 npm pack --dry-run
 ```
 
+- `.github/workflows/ci.yml` runs these checks on each pull request and each
+  push to `main`.
 - Make sure that there are no new warnings. This includes broken
   rustdoc links.
 - The crate has no tests (`test = false`). Do not add tests or test
