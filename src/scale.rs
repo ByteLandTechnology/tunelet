@@ -187,7 +187,7 @@ impl CorrectionTable {
     /// active scale.
     ///
     /// The new periods apply from the next `set_notes` call.
-    pub(crate) fn set_sample_rate(&mut self, rate: SampleRate) {
+    fn set_sample_rate(&mut self, rate: SampleRate) {
         let frequency = ((-9.0 * std::f64::consts::LN_2 / 12.0).exp() * 440.0) as f32;
         let mut base = rate.hz() / frequency;
         while base < 10820.625 {
