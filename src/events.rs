@@ -139,7 +139,8 @@ pub enum ParameterControl {
     /// Sets the interval harmony voice count (`resynthesis.harmony.voices`),
     /// 0..=4.
     HarmonyVoices(u8),
-    /// Sets the stereo harmony pan gain (`resynthesis.harmony_gain`), 0..=1.
+    /// Sets the linear gain of the four harmony voices
+    /// (`resynthesis.harmony_gain`), 0..=1.
     HarmonyGain(f32),
     /// Sets the harmonic modulation depth (`resynthesis.harmonic_modulation`),
     /// 0..=24.
