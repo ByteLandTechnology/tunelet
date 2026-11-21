@@ -98,16 +98,20 @@ cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 cargo doc --locked --no-deps
+cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
 ```
 
 `rust-toolchain.toml` pins Rust `1.99.1`, `clippy`, `rustfmt` and the
 `wasm32-unknown-unknown` target.
 
 If you change the Wasm or TypeScript code, also run these commands.
+`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
 `npm run build` compiles `src/wasm.rs` and `src/index.ts`:
 
 ```sh
 npm ci
+npm run check:wasm
 npm run build
 ```
 
