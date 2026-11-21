@@ -129,9 +129,27 @@ npm run build
 - Releases: release-please sets the versions and writes `CHANGELOG.md`.
   Do not change the version in `Cargo.toml`, `Cargo.lock`,
   `package.json`, `package-lock.json` or `.release-please-manifest.json`
-  by hand. The commit types and the `!` mark set the next version. The
-  release workflow is `.github/workflows/release.yml`. It publishes to
-  npm and crates.io through trusted publishing, so do not rename it.
+  by hand. The commit types and the `!` mark set the next version.
+
+  The release workflow `.github/workflows/release.yml` publishes to npm,
+  crates.io and GitHub Packages (`@bytelandtechnology/tunelet`). Do not
+  rename `.github/workflows/release.yml`, because the trusted publishers
+  on npm and crates.io require that path. Before the publish jobs start,
+  `verify-release` checks the crate and both npm scopes. To check a
+  release locally, run these dry-run commands:
+
+  ```sh
+  cargo publish --dry-run --locked
+  cargo doc --locked --no-deps
+  npm ci
+  npm run build
+  npm pack --dry-run
+  npm pkg set name=@bytelandtechnology/tunelet
+  npm pack --dry-run
+  npm pkg set name=tunelet
+  ```
+
+  The last command restores the unscoped name in `package.json`.
 
 ## Prohibited changes
 

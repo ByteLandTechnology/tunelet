@@ -1,22 +1,33 @@
-# Release management with release-please, and trusted publishing to npm and
-# crates.io.
+# Release management with release-please, and publication to npm, crates.io
+# and GitHub Packages.
 #
+# Concurrency puts runs on main in a queue and does not cancel an active run.
 # Each push to main updates the release pull request. When you merge the
 # release pull request, release-please makes the tag and the GitHub release.
-# Then two jobs publish the release through OIDC: publish-npm publishes the
-# npm package, and publish-crate publishes the crate to crates.io. The
-# trusted publishers on npm and on crates.io must name this file
-# (release.yml). The jobs do not use stored tokens.
+# Then verify-release checks the crate and both npm scopes with read
+# permission. If verify-release succeeds, three jobs publish the release in
+# parallel.
 #
-# The publish-github job also publishes the npm package to GitHub Packages
-# as @bytelandtechnology/tunelet. It uses the GITHUB_TOKEN of the workflow.
-# GitHub links the package to this repository through the repository field.
+# Two jobs publish through OIDC: publish-npm publishes the npm package, and
+# publish-crate publishes the crate to crates.io. The trusted publishers on
+# npm and on crates.io must name this file (release.yml). Those two jobs do
+# not use stored tokens.
+#
+# The publish-github job packs @bytelandtechnology/tunelet one time and writes
+# a SHA-256 checksum file. It attests the archive, publishes it to GitHub
+# Packages and uploads the archive and the checksum to the GitHub release. It
+# uses the GITHUB_TOKEN of the workflow. GitHub links the package to this
+# repository through the repository field.
 name: Release
 
 on:
   push:
     branches:
       - main
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions: {}
 
@@ -34,8 +45,36 @@ jobs:
       - id: release
         uses: googleapis/release-please-action@v5
 
-  publish-npm:
+  verify-release:
     needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - run: cargo publish --dry-run --locked
+      - run: cargo doc --locked --no-deps
+      - run: npm ci
+      - run: npm run build
+      - run: npm pack --dry-run
+      - run: npm pkg set name=@bytelandtechnology/tunelet
+      - run: npm pack --dry-run
+
+  publish-npm:
+    needs: [release-please, verify-release]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
@@ -63,12 +102,16 @@ jobs:
       - run: npm publish
 
   publish-github:
-    needs: release-please
+    needs: [release-please, verify-release]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
+      id-token: write
+      attestations: write
+    env:
+      TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -89,12 +132,26 @@ jobs:
       # GitHub Packages accepts only names in the scope of the owner.
       - run: npm pkg set name=@bytelandtechnology/tunelet
       # The prepack script builds the Wasm bindings and the TypeScript entry.
-      - run: npm publish
+      - id: pack
+        run: |
+          output=$(npm pack)
+          archive=${output##*$'\n'}
+          sha256sum "$archive" > "${archive}.sha256"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ steps.pack.outputs.archive }}
+      - run: npm publish "./$PACKAGE_ARCHIVE"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_ARCHIVE: ${{ steps.pack.outputs.archive }}
+      - run: gh release upload "$TAG_NAME" "./$PACKAGE_ARCHIVE" "./${PACKAGE_ARCHIVE}.sha256"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_ARCHIVE: ${{ steps.pack.outputs.archive }}
 
   publish-crate:
-    needs: release-please
+    needs: [release-please, verify-release]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
