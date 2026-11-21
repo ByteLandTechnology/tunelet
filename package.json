@@ -29,10 +29,11 @@
   "sideEffects": false,
   "scripts": {
     "build": "npm run build:wasm && npm run build:ts",
-    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-opt --features wasm --locked",
+    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node --input-type=module -e \"import fs from 'node:fs'; fs.rmSync('pkg/.gitignore', { force: true })\"",
     "build:ts": "tsc",
     "prepack": "npm run build",
-    "prepare": "git config core.hooksPath .githooks || true"
+    "prepare": "git config core.hooksPath .githooks || true",
+    "verify:pack": "node scripts/verify-pack.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
