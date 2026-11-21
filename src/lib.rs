@@ -130,10 +130,11 @@ pub use error::{ConfigProblem, Error, EventProblem};
 pub use events::{ControlEvent, TimedEvent};
 pub use formant::FormantConfig;
 pub use harmony::{
-    ChordDegree, ChordName, HarmonyConfig, HarmonyScale, HarmonySource, Inversion, HARMONY_VOICES,
+    ChordDegree, ChordName, HarmonyConfig, HarmonyScale, HarmonySource, Inversion, MidiChannelMap,
+    HARMONY_VOICES,
 };
 pub use midi::MidiEvent;
 pub use pitch::PitchConfig;
 pub use processor::{Feedback, Processor, Telemetry};
 pub use resynthesis::{CorrectionConfig, MultiVoiceMode, ResynthesisConfig};
-pub use scale::{CorrectionScale, NoteMask, PitchClass};
+pub use scale::{CorrectionMidiMode, CorrectionScale, NoteMask, PitchClass};

@@ -40,19 +40,21 @@ pub enum ControlEvent {
     /// The quantization and the mute behavior are the same as for
     /// [`ProcessorConfig::output_gain`]. The value must be finite.
     OutputGain(f32),
-    /// This event sends a note control to the harmony source that
-    /// [`crate::HarmonyConfig`] selects.
+    /// This event sends a note control to the MIDI keybed of
+    /// [`crate::HarmonyConfig`].
     ///
-    /// MIDI-channel mode uses channels 0..=3. Omni mode and MIDI-chord mode
-    /// combine channels.
+    /// The keybed records all 16 channels. MIDI-channel mode maps channels
+    /// with [`crate::HarmonyConfig::midi_channel_map`]. Omni mode and
+    /// MIDI-chord mode combine all channels.
     Midi(MidiEvent),
     /// This event changes the correction keyboard independently of harmony MIDI.
     ///
-    /// The held notes 0..=126 become pitch classes. Channels and nonzero
-    /// velocities do not change the selected classes. Key 127 is stored, but
-    /// the classes do not include it. Each event replaces the active
-    /// correction table. If a later change sets new configured notes, or
-    /// enables or disables correction, the configured mask loads again.
+    /// The held notes 0..=127 become pitch classes. Channels and nonzero
+    /// velocities do not change the selected classes. In
+    /// [`crate::CorrectionMidiMode::Momentary`], when all keys release, the
+    /// configured [`crate::CorrectionConfig::notes`] load again. In
+    /// [`crate::CorrectionMidiMode::Latch`], the chord stays active until
+    /// [`MidiEvent::AllNotesOff`], a reset or a scale change.
     CorrectionMidi(MidiEvent),
     /// This event resets immediately before the event frame, with the semantics of
     /// [`crate::Processor::reset`].
