@@ -200,6 +200,8 @@ pub(crate) struct Formant {
     /// If `true`, the next call to `smooth` clears the state of the
     /// correlation average.
     smooth_reset: bool,
+    /// If `true`, the next model design sets `blend` to 1.0 immediately.
+    snap_blend: bool,
     /// The Q14 first-order coefficient for pre-emphasis and de-emphasis.
     glottal: i32,
     /// The Q14 width control. The stage also uses it as the output gain of
@@ -265,6 +267,7 @@ impl Formant {
             smooth_index: 0,
             smooth_filled: 0,
             smooth_reset: true,
+            snap_blend: false,
             glottal: (0.5_f64.powf(1.0 / d2) * 16384.0) as i32,
             width: 16384,
             width_squared: 16384,
@@ -326,6 +329,44 @@ impl Formant {
         self.design_counter = 0;
         self.noise_filter.reset();
         self.smooth_reset = true;
+        self.snap_blend = false;
+    }
+    /// Prepares the stage when the formant stage becomes active and backfills
+    /// at least 491 pre-emphasized samples from `raw`.
+    pub(crate) fn prepare_enable(
+        &mut self,
+        raw: &[Q14; HISTORY_FRAMES],
+        write: usize,
+        output_period_q6: i32,
+    ) {
+        let period = output_period_q6.wrapping_shr(6).max(0) as usize;
+        let extra = (period / 10).max(1);
+        let count = (ANALYSIS_FRAMES + ORDER)
+            .max(2 * period + extra + 2)
+            .min(HISTORY_FRAMES - 1);
+        for offset in (1..=count).rev() {
+            let index = (write + HISTORY_FRAMES - offset) % HISTORY_FRAMES;
+            let previous = if index == 0 {
+                HISTORY_FRAMES - 1
+            } else {
+                index - 1
+            };
+            self.input[index] = self.remove_glottal(raw[index].to_bits(), raw[previous].to_bits());
+        }
+        self.history = [[0; MAX_ORDER]; 2];
+        self.history_index = 0;
+        self.orders = [0; BANKS];
+        self.current = BANKS - 1;
+        self.next_filter();
+        self.next_filter();
+        self.design_counter = 0;
+        self.noise_filter.reset();
+        self.smooth_reset = true;
+        self.snap_blend = true;
+    }
+    /// Copies the synthesis feedback history from channel zero to channel one.
+    pub(crate) fn copy_channel_zero(&mut self) {
+        self.history[1] = self.history[0];
     }
     /// Starts a new model and a new correlation window when pitch acquisition
     /// locks.
@@ -616,7 +657,10 @@ impl Formant {
                 self.smooth_reset = true;
             }
         }
-        if self.blend < 16384 {
+        if self.snap_blend {
+            self.blend = 16384;
+            self.snap_blend = false;
+        } else if self.blend < 16384 {
             self.blend = (self.blend + 1638).min(16384);
         }
         self.stamps[position] = Stamp {
@@ -664,7 +708,7 @@ impl Formant {
     /// random stream and the noise filter then do not advance. If not, the
     /// function reads one random value.
     fn add_noise(&mut self, sample: i32, context: &mut NumericContext) -> i32 {
-        if self.config.aspiration_mix <= 0.01 {
+        if !self.config.enabled || self.config.aspiration_mix <= 0.01 {
             return sample;
         }
         let random = context.random.next_u31() >> 17;

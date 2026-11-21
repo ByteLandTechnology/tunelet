@@ -16,8 +16,9 @@
 //! voices are mixed.
 //!
 //! A reader jumps by one pitch period to stay in a range behind the writer.
-//! The choir lead uses a crossfade across these jumps. Harmonic modulation
-//! applies to the wet mix. Then the code blends in a delayed dry signal.
+//! All active Choir and Harmony voices use a crossfade across these jumps.
+//! Harmonic modulation applies to the wet mix. Then the code adds a delayed
+//! dry signal.
 //!
 //! Audio, reader positions and pitch ratios use Q14. Periods use Q6, harmony
 //! gains use Q12 and the dry mix uses Q8. Some of these units use the same
@@ -214,8 +215,9 @@ pub struct ResynthesisConfig {
     /// Enables a stereo pan for each voice. The default is `false`.
     ///
     /// This value is independent of the buffer layout of the process method.
-    /// A change to this value resets some audio histories and the feedback.
-    /// [`crate::Processor::set_config`] gives the details.
+    /// A change to this value ramps the voice pan weights over 256 frames and
+    /// keeps the audio histories. [`crate::Processor::set_config`] gives the
+    /// details.
     pub stereo_output: bool,
     /// The controls for the four harmony voices. The default is MIDI-channel
     /// allocation.
@@ -345,6 +347,24 @@ const CONTROL_DUE: i32 = 100;
 const DRIFT_LIMIT: Q14 = Q14::from_bits(3276);
 /// The step for each frame of the crossfade after a reader jump.
 const FADE_STEP: Q14 = Q14::from_bits(0x333);
+/// The step for each frame of a 256-frame stage ramp (`16384 / 256`).
+const STAGE_RAMP_STEP: Q14 = Q14::from_bits(64);
+
+/// Returns the stereo pair for one voice sample and its Q14 pan weights.
+#[inline]
+fn apply_pan(value: Q14, pan: [Q14; 2], stereo_fade: Q14) -> [Q14; 2] {
+    if stereo_fade == Q14::ZERO {
+        [value, value]
+    } else if stereo_fade == Q14::ONE {
+        [value.mul(pan[0]), value.mul(pan[1])]
+    } else {
+        let mono = Q14::ONE - stereo_fade;
+        [
+            value.mul(mono + pan[0].mul(stereo_fade)),
+            value.mul(mono + pan[1].mul(stereo_fade)),
+        ]
+    }
+}
 
 /// Returns the reader position at the start of the history frame `frame`.
 #[inline]
@@ -461,12 +481,29 @@ pub(crate) struct Resynthesis {
     /// The Q8 weight of the delayed raw audio. The wet weight is 1.0 minus
     /// this weight.
     dry_mix: Q8,
-    /// The previous position of the lead reader. The crossfade after a jump
-    /// follows this position.
-    old_position: Q14,
-    /// The Q14 weight of the new lead reader. After a jump, it increases
-    /// toward 1.0.
-    fade: Q14,
+    /// The previous positions of the voice readers, for crossfades after
+    /// period wraps or delay changes.
+    old_positions: [Q14; 16],
+    /// The Q14 weights of the new voice readers. After a jump, each weight
+    /// increases toward 1.0.
+    fades: [Q14; 16],
+    /// The number of recent contiguous frames in `lead` that `render_lead`
+    /// wrote.
+    lead_valid: usize,
+    /// The state of `formant.enabled` from the previous frame.
+    was_formant_enabled: bool,
+    /// The frames that are left before a formant switch reaches `filtered`.
+    overlap_pending: u16,
+    /// `true` if `overlap` holds both raw and formant-analyzed frames.
+    overlap_mixed: bool,
+    /// `true` if the frames that enter `filtered` come from formant analysis.
+    filtered_lpc: bool,
+    /// The number of recent contiguous frames in `filtered` of `filtered_lpc`.
+    filtered_valid: u16,
+    /// The Q14 crossfade weight of LPC synthesis, in 0..=1.
+    formant_fade: Q14,
+    /// The Q14 ramp weight of the stereo pan, in 0..=1.
+    stereo_fade: Q14,
     /// The Q6 period that the code selected last for a voice. The modulation
     /// uses it.
     current_output_period: Q6,
@@ -541,8 +578,24 @@ impl Resynthesis {
             modulation: 0,
             modulation_phase: Q14::ZERO,
             dry_mix: Q8::ZERO,
-            old_position: position_of(-READER_LAG_FRAMES),
-            fade: Q14::ONE,
+            old_positions: [position_of(-READER_LAG_FRAMES); 16],
+            fades: [Q14::ONE; 16],
+            lead_valid: HISTORY,
+            was_formant_enabled: config.formant.enabled,
+            overlap_pending: 0,
+            overlap_mixed: false,
+            filtered_lpc: config.formant.enabled,
+            filtered_valid: HISTORY as u16,
+            formant_fade: if config.formant.enabled {
+                Q14::ONE
+            } else {
+                Q14::ZERO
+            },
+            stereo_fade: if config.stereo_output {
+                Q14::ONE
+            } else {
+                Q14::ZERO
+            },
             current_output_period: Q6::ZERO,
             control_counter: CONTROL_DUE,
             drift_decay: Q14::ZERO,
@@ -640,6 +693,11 @@ impl Resynthesis {
     /// Applies a configuration that passed the full validation before.
     pub(crate) fn apply_config(&mut self, config: ResynthesisConfig) {
         let old = self.config;
+        let old_active = if old.mode == MultiVoiceMode::Choir {
+            old.choir_voices as usize
+        } else {
+            HARMONY_VOICES + 1
+        };
         self.config = config;
         self.pitch.set_config(config.pitch);
         self.formant.set_config(config.formant);
@@ -654,19 +712,31 @@ impl Resynthesis {
             self.configure_shift_filters();
         }
         if old.mode != config.mode || old.choir_delay != config.choir_delay {
+            for voice in 0..old_active {
+                self.old_positions[voice] = self.positions[voice];
+                self.fades[voice] = Q14::ZERO;
+            }
             self.create_delays();
-        }
-        if old.choir_voices < config.choir_voices {
+            for voice in old_active..16 {
+                self.old_positions[voice] = self.positions[voice];
+                self.fades[voice] = Q14::ONE;
+            }
+        } else if old.choir_voices < config.choir_voices {
             for voice in old.choir_voices as usize..config.choir_voices as usize {
-                self.positions[voice] = self.positions[0];
+                let position =
+                    position_of(self.write as i32 - READER_LAG_FRAMES - self.delays[voice]);
+                self.positions[voice] = position;
+                self.old_positions[voice] = position;
+                self.fades[voice] = Q14::ONE;
             }
         }
-        self.configure_coefficients();
-        if old.stereo_output != config.stereo_output {
-            // A stereo change resets the audio state. The correction keyboard
-            // keeps its held keys.
-            self.reset_audio();
+        if (old.mode == MultiVoiceMode::Choir && config.mode == MultiVoiceMode::Harmony)
+            || (!old.stereo_output && config.stereo_output && self.stereo_fade == Q14::ZERO)
+        {
+            self.formant.copy_channel_zero();
+            self.previous_output[1] = self.previous_output[0];
         }
+        self.configure_coefficients();
     }
 
     /// Releases the correction keys 0..=126 and resets the audio state.
@@ -709,8 +779,28 @@ impl Resynthesis {
         }
         self.create_delays();
         self.drift_ratio.fill(Q14::ONE);
-        self.old_position = self.positions[0];
-        self.fade = Q14::ONE;
+        self.old_positions = self.positions;
+        self.fades.fill(Q14::ONE);
+        self.lead_valid = if self.config.mode == MultiVoiceMode::Choir {
+            HISTORY
+        } else {
+            0
+        };
+        self.was_formant_enabled = self.config.formant.enabled;
+        self.overlap_pending = 0;
+        self.overlap_mixed = false;
+        self.filtered_lpc = self.config.formant.enabled;
+        self.filtered_valid = HISTORY as u16;
+        self.formant_fade = if self.config.formant.enabled {
+            Q14::ONE
+        } else {
+            Q14::ZERO
+        };
+        self.stereo_fade = if self.config.stereo_output {
+            Q14::ONE
+        } else {
+            Q14::ZERO
+        };
         self.harmony_ratios.fill(Q14::ONE);
         self.voice_ratios.fill(Q14::ONE);
         self.formant_position = 0;
@@ -938,18 +1028,8 @@ impl Resynthesis {
     /// Advances one Q14 reader by its ratio and keeps it near the writer.
     ///
     /// If the reader gets to one of the two limits, it jumps by one Q6 pitch
-    /// period. `offset` is an integer voice delay. `voice` must identify an
-    /// allocated reader slot. If `fade` is `true` and the reader jumps, the
-    /// function saves the old position and starts the crossfade again. Only
-    /// the choir lead sets `fade`.
-    fn move_reader(
-        &mut self,
-        voice: usize,
-        ratio: Q14,
-        period: Q6,
-        offset: i32,
-        fade: bool,
-    ) -> Q14 {
+    /// period, saves the old position and starts the crossfade of that voice.
+    fn move_reader(&mut self, voice: usize, ratio: Q14, period: Q6, offset: i32) -> Q14 {
         let mut position = self.positions[voice] + ratio;
         let write = self.write as i32;
         let upper = position_of(write - 40 - offset);
@@ -961,15 +1041,15 @@ impl Resynthesis {
                 .wrapping_sub(offset),
         );
         if position >= upper {
-            if fade {
-                self.old_position = position;
-                self.fade = Q14::ZERO;
+            if period != Q6::ZERO || self.old_positions[voice] == position {
+                self.old_positions[voice] = position;
+                self.fades[voice] = Q14::ZERO;
             }
             position = position - period.rescale();
         } else if position <= lower {
-            if fade {
-                self.old_position = position;
-                self.fade = Q14::ZERO;
+            if period != Q6::ZERO || self.old_positions[voice] == position {
+                self.old_positions[voice] = position;
+                self.fades[voice] = Q14::ZERO;
             }
             position = position + period.rescale();
         }
@@ -977,12 +1057,48 @@ impl Resynthesis {
         position
     }
 
+    /// Returns `true` if all taps at and after `min_center` in `filtered` match
+    /// `want_lpc`.
+    #[inline]
+    fn filtered_ready_for(&self, min_center: i32, want_lpc: bool) -> bool {
+        if self.filtered_lpc != want_lpc {
+            return false;
+        }
+        if self.filtered_valid as usize >= HISTORY {
+            return true;
+        }
+        let needed = self.write as i32 - min_center + 2;
+        needed <= i32::from(self.filtered_valid)
+    }
+
+    /// Reads a sample from `lead` and outputs zero until fresh frames from
+    /// `render_lead` arrive.
+    #[inline]
+    fn read_lead(&self, position: Q14) -> Q14 {
+        if self.lead_valid >= HISTORY {
+            return history::interpolation(&self.lead, position).0;
+        }
+        let (sample, center) = history::interpolation(&self.lead, position);
+        if center > self.write as i32 {
+            return Q14::ZERO;
+        }
+        let margin = self.lead_valid as i32 - (self.write as i32 - center + 2);
+        if margin < 0 {
+            Q14::ZERO
+        } else if margin < 20 {
+            let gain = Q14::from_bits(((margin + 1) * FADE_STEP.to_bits()).min(Q14::ONE.to_bits()));
+            sample.mul(gain)
+        } else {
+            sample
+        }
+    }
+
     /// Renders the choir lead before a secondary voice reads its history.
     ///
     /// The function does these steps:
     /// 1. It selects the period and the ratio.
     /// 2. It moves the reader and applies the crossfade.
-    /// 3. If formants are enabled, it applies them and the glottal envelope.
+    /// 3. If formants are active or in transition, it applies or blends them.
     /// 4. It stores the Q14 result in the lead history.
     ///
     /// Returns the lead sample and its effective ratio, for the modulation
@@ -999,15 +1115,26 @@ impl Resynthesis {
         if ratio != Q14::ZERO {
             self.periods[delay] = period.div(ratio);
         }
-        self.old_position = self.old_position + ratio;
-        let position = self.move_reader(0, ratio, period, self.delays[0], true);
-        let (mut value, center) = history::interpolation(&self.filtered, position);
-        if self.fade < Q14::ONE {
-            let (old, _) = history::interpolation(&self.filtered, self.old_position);
-            value = value.mul(self.fade) + old.mul(Q14::ONE - self.fade);
-            self.fade = (self.fade + FADE_STEP).min(Q14::ONE);
+        self.old_positions[0] = self.old_positions[0] + ratio;
+        let position = self.move_reader(0, ratio, period, self.delays[0]);
+        let reader_fade = self.fades[0];
+        if reader_fade < Q14::ONE {
+            self.fades[0] = (reader_fade + FADE_STEP).min(Q14::ONE);
         }
-        if self.config.formant.enabled {
+        let (mut value, center) = history::interpolation(&self.filtered, position);
+        let mut min_center = center;
+        if reader_fade < Q14::ONE {
+            let (old, old_center) = history::interpolation(&self.filtered, self.old_positions[0]);
+            value = value.mul(reader_fade) + old.mul(Q14::ONE - reader_fade);
+            min_center = min_center.min(old_center);
+        }
+        let steady_off = !self.config.formant.enabled
+            && self.formant_fade == Q14::ZERO
+            && self.filtered_ready_for(min_center, false);
+        let steady_on = self.config.formant.enabled
+            && self.formant_fade == Q14::ONE
+            && self.filtered_ready_for(min_center, true);
+        if steady_on {
             self.formant_position = center - FORMANT_OFFSET_FRAMES;
             value = Q14::from_bits(self.formant.forward(
                 value.to_bits(),
@@ -1019,8 +1146,46 @@ impl Resynthesis {
                     .model_glottal(value.to_bits(), self.previous_output[0].to_bits()),
             );
             self.previous_output[0] = value;
+        } else if !steady_off {
+            let raw_shift = position_of(OVERLAP_FRAMES as i32);
+            let (mut raw_value, _) = history::interpolation(&self.raw, position - raw_shift);
+            if reader_fade < Q14::ONE {
+                let (old_raw, _) =
+                    history::interpolation(&self.raw, self.old_positions[0] - raw_shift);
+                raw_value = raw_value.mul(reader_fade) + old_raw.mul(Q14::ONE - reader_fade);
+            }
+            let lpc_ready = self.filtered_ready_for(min_center, true);
+            if self.config.formant.enabled {
+                if lpc_ready {
+                    self.formant_fade = (self.formant_fade + STAGE_RAMP_STEP).min(Q14::ONE);
+                } else {
+                    self.formant_fade = Q14::ZERO;
+                }
+            } else if lpc_ready && self.formant_fade > Q14::ZERO {
+                self.formant_fade = (self.formant_fade - STAGE_RAMP_STEP).max(Q14::ZERO);
+            } else {
+                self.formant_fade = Q14::ZERO;
+            }
+            if lpc_ready && self.formant_fade > Q14::ZERO {
+                self.formant_position = center - FORMANT_OFFSET_FRAMES;
+                let mut lpc_value = Q14::from_bits(self.formant.forward(
+                    value.to_bits(),
+                    self.formant_position,
+                    numeric,
+                ));
+                lpc_value = Q14::from_bits(
+                    self.formant
+                        .model_glottal(lpc_value.to_bits(), self.previous_output[0].to_bits()),
+                );
+                self.previous_output[0] = lpc_value;
+                value =
+                    raw_value.mul(Q14::ONE - self.formant_fade) + lpc_value.mul(self.formant_fade);
+            } else {
+                value = raw_value;
+            }
         }
         self.lead[write] = value;
+        self.lead_valid = (self.lead_valid + 1).min(HISTORY);
         (value, ratio)
     }
 
@@ -1058,10 +1223,11 @@ impl Resynthesis {
             } else {
                 5
             };
+            let shift = position_of(HISTORY as i32);
             for voice in 0..voices {
-                self.positions[voice] = self.positions[voice] - position_of(HISTORY as i32);
+                self.positions[voice] = self.positions[voice] - shift;
+                self.old_positions[voice] = self.old_positions[voice] - shift;
             }
-            self.old_position = self.old_position - position_of(HISTORY as i32);
         }
         if step.restarted {
             self.correction = Q14::ONE;
@@ -1099,6 +1265,27 @@ impl Resynthesis {
         if self.overlap_index == OVERLAP_FRAMES {
             self.overlap_index = 0;
         }
+        let mut pending_finished = false;
+        if self.overlap_pending > 0 {
+            self.overlap_pending -= 1;
+            if self.overlap_pending == 0 {
+                pending_finished = true;
+            }
+        }
+        if self.config.formant.enabled != self.was_formant_enabled {
+            self.was_formant_enabled = self.config.formant.enabled;
+            if self.overlap_pending > 0 || pending_finished {
+                self.overlap_mixed = true;
+                self.filtered_valid = 0;
+            }
+            pending_finished = false;
+            self.overlap_pending = (OVERLAP_FRAMES - ANALYSIS_FRAMES) as u16;
+            if self.config.formant.enabled {
+                self.formant
+                    .prepare_enable(&self.raw, write, step.previous_period.to_bits());
+                self.previous_output = [Q14::ZERO; 2];
+            }
+        }
         self.overlap[self.overlap_index] = if self.config.formant.enabled {
             let previous = self.raw[ring(write as i32 - 1)];
             Q14::from_bits(self.formant.process_analysis(
@@ -1120,6 +1307,23 @@ impl Resynthesis {
             filtered = filter.process_sample(filtered);
         }
         self.filtered[write] = filtered;
+        if pending_finished {
+            self.overlap_mixed = false;
+            if self.filtered_lpc != self.config.formant.enabled {
+                self.filtered_lpc = self.config.formant.enabled;
+                self.filtered_valid = 1;
+            } else {
+                self.filtered_valid = self.filtered_valid.saturating_add(1).min(HISTORY as u16);
+            }
+        } else if !self.overlap_mixed {
+            self.filtered_valid = self.filtered_valid.saturating_add(1).min(HISTORY as u16);
+        }
+        if self.config.stereo_output && self.stereo_fade < Q14::ONE {
+            self.stereo_fade = (self.stereo_fade + STAGE_RAMP_STEP).min(Q14::ONE);
+        } else if !self.config.stereo_output && self.stereo_fade > Q14::ZERO {
+            self.stereo_fade = (self.stereo_fade - STAGE_RAMP_STEP).max(Q14::ZERO);
+        }
+        let stereo_fade = self.stereo_fade;
         let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
         let dry = self.raw[delayed];
         let mut mix = [Q14::ZERO; 2];
@@ -1131,13 +1335,9 @@ impl Resynthesis {
                 let (value, ratio) = self.render_lead(delayed, numeric);
                 final_ratio = ratio;
                 self.voice_ratios[0] = ratio;
+                let panned = apply_pan(value, self.pan[0], stereo_fade);
                 for (channel, sum) in mix.iter_mut().enumerate() {
-                    *sum = *sum
-                        + if self.config.stereo_output {
-                            value.mul(self.pan[0][channel])
-                        } else {
-                            value
-                        };
+                    *sum = *sum + panned[channel];
                 }
             }
             {
@@ -1153,26 +1353,33 @@ impl Resynthesis {
                         self.current_output_period = period;
                         let ratio = self.drift_ratio[current_voice];
                         final_ratio = ratio;
+                        self.old_positions[current_voice] =
+                            self.old_positions[current_voice] + ratio;
                         *position = self.move_reader(
                             current_voice,
                             ratio,
                             period,
                             self.delays[current_voice],
-                            false,
                         );
                     }
-                    let values =
-                        positions.map(|position| history::interpolation(&self.lead, position).0);
+                    let mut values = [Q14::ZERO; 4];
+                    for (lane, value) in values.iter_mut().enumerate() {
+                        let current_voice = voice + lane;
+                        let mut sample = self.read_lead(positions[lane]);
+                        let fade = self.fades[current_voice];
+                        if fade < Q14::ONE {
+                            let old = self.read_lead(self.old_positions[current_voice]);
+                            sample = sample.mul(fade) + old.mul(Q14::ONE - fade);
+                            self.fades[current_voice] = (fade + FADE_STEP).min(Q14::ONE);
+                        }
+                        *value = sample;
+                    }
                     // Keep the voice and channel order of each wrapping sum.
                     for (lane, value) in values.into_iter().enumerate() {
                         let current_voice = voice + lane;
+                        let panned = apply_pan(value, self.pan[current_voice], stereo_fade);
                         for (channel, sum) in mix.iter_mut().enumerate() {
-                            *sum = *sum
-                                + if self.config.stereo_output {
-                                    value.mul(self.pan[current_voice][channel])
-                                } else {
-                                    value
-                                };
+                            *sum = *sum + panned[channel];
                         }
                     }
                     voice += 4;
@@ -1185,16 +1392,18 @@ impl Resynthesis {
                     self.current_output_period = period;
                     let ratio = self.drift_ratio[voice];
                     final_ratio = ratio;
-                    let position =
-                        self.move_reader(voice, ratio, period, self.delays[voice], false);
-                    let (value, _) = history::interpolation(&self.lead, position);
+                    self.old_positions[voice] = self.old_positions[voice] + ratio;
+                    let position = self.move_reader(voice, ratio, period, self.delays[voice]);
+                    let mut value = self.read_lead(position);
+                    let fade = self.fades[voice];
+                    if fade < Q14::ONE {
+                        let old = self.read_lead(self.old_positions[voice]);
+                        value = value.mul(fade) + old.mul(Q14::ONE - fade);
+                        self.fades[voice] = (fade + FADE_STEP).min(Q14::ONE);
+                    }
+                    let panned = apply_pan(value, self.pan[voice], stereo_fade);
                     for (channel, sum) in mix.iter_mut().enumerate() {
-                        *sum = *sum
-                            + if self.config.stereo_output {
-                                value.mul(self.pan[voice][channel])
-                            } else {
-                                value
-                            };
+                        *sum = *sum + panned[channel];
                     }
                 }
             }
@@ -1203,6 +1412,7 @@ impl Resynthesis {
                 *sum = Q14::ONE.mul(*sum);
             }
         } else {
+            self.lead_valid = 0;
             let (period, ratio) = self.period_for(delayed, write);
             self.current_output_period = period;
             let counter = self.control_counter;
@@ -1220,6 +1430,9 @@ impl Resynthesis {
                     self.harmony_gains[voice] = gain;
                 }
             }
+            let mut slot_positions = [Q14::ZERO; 5];
+            let mut slot_fades = [Q14::ONE; 5];
+            let mut min_center = i32::MAX;
             for slot in 0..5 {
                 let mut current: Q14 = if slot == 0 {
                     ratio
@@ -1232,21 +1445,41 @@ impl Resynthesis {
                 }
                 final_ratio = current;
                 self.voice_ratios[slot] = current;
-                let position = self.move_reader(slot, current, period, 0, false);
-                let (mut value, _) = history::interpolation(&self.filtered, position);
+                self.old_positions[slot] = self.old_positions[slot] + current;
+                let position = self.move_reader(slot, current, period, 0);
+                let fade = self.fades[slot];
+                if fade < Q14::ONE {
+                    self.fades[slot] = (fade + FADE_STEP).min(Q14::ONE);
+                }
+                slot_positions[slot] = position;
+                slot_fades[slot] = fade;
+                let (mut value, center) = history::interpolation(&self.filtered, position);
+                min_center = min_center.min(center);
+                if fade < Q14::ONE {
+                    let (old, old_center) =
+                        history::interpolation(&self.filtered, self.old_positions[slot]);
+                    value = value.mul(fade) + old.mul(Q14::ONE - fade);
+                    min_center = min_center.min(old_center);
+                }
                 if slot > 0 {
                     value = value.mul(self.harmony_gains[slot - 1]);
                 }
+                let panned = if slot > 0 {
+                    apply_pan(value, self.harmony_pan[slot - 1], stereo_fade)
+                } else {
+                    [value, value]
+                };
                 for (channel, sum) in mix.iter_mut().enumerate() {
-                    *sum = *sum
-                        + if self.config.stereo_output && slot > 0 {
-                            value.mul(self.harmony_pan[slot - 1][channel])
-                        } else {
-                            value
-                        };
+                    *sum = *sum + panned[channel];
                 }
             }
-            if self.config.formant.enabled {
+            let steady_off = !self.config.formant.enabled
+                && self.formant_fade == Q14::ZERO
+                && self.filtered_ready_for(min_center, false);
+            let steady_on = self.config.formant.enabled
+                && self.formant_fade == Q14::ONE
+                && self.filtered_ready_for(min_center, true);
+            if steady_on {
                 self.formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
                 mix = self
                     .formant
@@ -1259,6 +1492,61 @@ impl Resynthesis {
                             self.previous_output[channel].to_bits(),
                         ));
                     self.previous_output[channel] = *value;
+                }
+            } else if !steady_off {
+                let raw_shift = position_of(OVERLAP_FRAMES as i32);
+                let mut raw_mix = [Q14::ZERO; 2];
+                for slot in 0..5 {
+                    let (mut value, _) =
+                        history::interpolation(&self.raw, slot_positions[slot] - raw_shift);
+                    let fade = slot_fades[slot];
+                    if fade < Q14::ONE {
+                        let (old, _) =
+                            history::interpolation(&self.raw, self.old_positions[slot] - raw_shift);
+                        value = value.mul(fade) + old.mul(Q14::ONE - fade);
+                    }
+                    if slot > 0 {
+                        value = value.mul(self.harmony_gains[slot - 1]);
+                    }
+                    let panned = if slot > 0 {
+                        apply_pan(value, self.harmony_pan[slot - 1], stereo_fade)
+                    } else {
+                        [value, value]
+                    };
+                    for (channel, sum) in raw_mix.iter_mut().enumerate() {
+                        *sum = *sum + panned[channel];
+                    }
+                }
+                let lpc_ready = self.filtered_ready_for(min_center, true);
+                if self.config.formant.enabled {
+                    if lpc_ready {
+                        self.formant_fade = (self.formant_fade + STAGE_RAMP_STEP).min(Q14::ONE);
+                    } else {
+                        self.formant_fade = Q14::ZERO;
+                    }
+                } else if lpc_ready && self.formant_fade > Q14::ZERO {
+                    self.formant_fade = (self.formant_fade - STAGE_RAMP_STEP).max(Q14::ZERO);
+                } else {
+                    self.formant_fade = Q14::ZERO;
+                }
+                if lpc_ready && self.formant_fade > Q14::ZERO {
+                    self.formant_position =
+                        (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
+                    let mut lpc_mix = self
+                        .formant
+                        .forward_stereo(mix.map(Q14::to_bits), self.formant_position, numeric)
+                        .map(Q14::from_bits);
+                    for (channel, value) in lpc_mix.iter_mut().enumerate() {
+                        *value = Q14::from_bits(self.formant.model_glottal(
+                            value.to_bits(),
+                            self.previous_output[channel].to_bits(),
+                        ));
+                        self.previous_output[channel] = *value;
+                        mix[channel] = raw_mix[channel].mul(Q14::ONE - self.formant_fade)
+                            + (*value).mul(self.formant_fade);
+                    }
+                } else {
+                    mix = raw_mix;
                 }
             }
         }
