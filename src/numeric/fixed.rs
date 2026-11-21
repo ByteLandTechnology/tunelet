@@ -73,6 +73,15 @@ impl<const F: u32> Fixed<F> {
         Fixed(self.0.wrapping_mul(rhs.0).wrapping_shr(F + B - R))
     }
 
+    /// Calculates `(self * rhs) >> (F + B - R)` in `i64` and clamps the result
+    /// to `i32`.
+    #[inline]
+    pub(crate) fn mul_wide<const B: u32, const R: u32>(self, rhs: Fixed<B>) -> Fixed<R> {
+        const { assert!(F + B >= R, "product cannot gain fraction bits") };
+        let product = (i64::from(self.0) * i64::from(rhs.0)).wrapping_shr(F + B - R);
+        Fixed(product.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+    }
+
     /// Returns `(self << (R + B - F)) / rhs`, the quotient in format `R`.
     ///
     /// The caller must supply a divisor that is not zero. The wrapping
@@ -123,6 +132,12 @@ impl<const F: u32> Fixed<F> {
     #[inline]
     pub(crate) fn abs(self) -> Self {
         Self(self.0.wrapping_abs())
+    }
+
+    /// Adds `rhs` and saturates at the `i32` limits.
+    #[inline]
+    pub(crate) fn saturating_add(self, rhs: Self) -> Self {
+        Self(self.0.saturating_add(rhs.0))
     }
 }
 

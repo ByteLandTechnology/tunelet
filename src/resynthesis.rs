@@ -189,9 +189,9 @@ pub struct ResynthesisConfig {
     /// default is 1.
     ///
     /// The other voices read the delayed lead history with random pitch
-    /// drift. The code adds the voices and does not divide the sum by the
-    /// number of voices. Thus, more voices can increase the output level and
-    /// the clipping. Harmony does not use this value.
+    /// drift. The stage scales each choir voice by `1 / sqrt(choir_voices)`
+    /// for equal power. Then it clamps the choir mix in Q14 to approximately
+    /// 8x full scale. Harmony does not use this value.
     pub choir_voices: u8,
     /// The drift control for secondary voices, 10..=100, without a unit. The
     /// default is 50.
@@ -345,6 +345,8 @@ const CONTROL_DUE: i32 = 100;
 const DRIFT_LIMIT: Q14 = Q14::from_bits(3276);
 /// The step for each frame of the crossfade after a reader jump.
 const FADE_STEP: Q14 = Q14::from_bits(0x333);
+/// The largest Q14 magnitude of the choir mix, approximately 8.0.
+const CHOIR_MIX_LIMIT: Q14 = Q14::from_bits(131_071);
 
 /// Returns the reader position at the start of the history frame `frame`.
 #[inline]
@@ -416,6 +418,8 @@ pub(crate) struct Resynthesis {
     /// The Q14 multipliers, each equal to 1.0 plus the drift. An audio reset
     /// sets them to 1.0, but it keeps the drift state.
     drift_ratio: [Q14; 16],
+    /// The Q14 equal-power gain of each choir voice.
+    choir_gain: Q14,
     /// The Q14 left and right gains of the choir voices. The code reads them
     /// only if the stereo pan is enabled.
     pan: [[Q14; 2]; 16],
@@ -525,6 +529,7 @@ impl Resynthesis {
             positions: [Q14::ZERO; 16],
             drift: [Q14::ZERO; 16],
             drift_ratio: [Q14::ONE; 16],
+            choir_gain: Q14::ONE,
             pan: [[Q14::ONE; 2]; 16],
             harmony_pan: [[Q14::ZERO; 2]; HARMONY_VOICES],
             harmony_ratios: [Q14::ONE; HARMONY_VOICES],
@@ -576,6 +581,12 @@ impl Resynthesis {
         let decay = (-std::f64::consts::LN_2 / base).exp();
         self.drift_decay = Q14::from_f64(decay);
         self.drift_amount = Q14::from_f64((1.0 - decay) * 0.008 * self.config.choir_detune as f64);
+        let choir_gain = 1.0 / f64::from(self.config.choir_voices).sqrt();
+        self.choir_gain = if self.config.choir_voices > 1 {
+            Q14::from_f64(choir_gain)
+        } else {
+            Q14::ONE
+        };
         for voice in 0..self.config.choir_voices as usize {
             if self.config.choir_voices > 1 {
                 let normalized =
@@ -583,7 +594,10 @@ impl Resynthesis {
                 let angle = 0.785398163565
                     - (self.config.choir_spread_percent as f64 * 0.785398163565 * 0.01)
                         * normalized;
-                self.pan[voice] = [Q14::from_f64(angle.cos()), Q14::from_f64(angle.sin())];
+                self.pan[voice] = [
+                    Q14::from_f64(choir_gain * angle.cos()),
+                    Q14::from_f64(choir_gain * angle.sin()),
+                ];
             } else {
                 self.pan[voice] = [Q14::ONE; 2];
             }
@@ -804,24 +818,26 @@ impl Resynthesis {
     /// Writes the effective ratio and the linear gain of each voice from the
     /// last frame, and returns the number of voices.
     ///
-    /// Slot zero is the lead. In Harmony mode, slots 1 to 4 are the harmony
-    /// voices, and the gain is the envelope of the harmony controller. In
-    /// Choir mode, the slots after the lead are the secondary voices with a
-    /// gain of 1. Each ratio includes the correction, the global shift and
-    /// the ratio of the voice. The entries after the count do not change.
+    /// Slot zero is the lead. In Harmony mode, the lead gain is 1, and slots
+    /// 1 to 4 use the harmony gain envelopes. In Choir mode, the slots after
+    /// the lead are the secondary voices, and each voice uses `choir_gain`.
+    /// Each ratio includes the correction, the global shift and the ratio of
+    /// the voice. The entries after the count do not change.
     pub(crate) fn voices(&self, ratios: &mut [f32; 16], gains: &mut [f32; 16]) -> u8 {
         let lead = (self.voice_ratios[0].to_bits() as f64 / 16384.0) as f32;
         ratios[0] = lead;
-        gains[0] = 1.0;
         if self.config.mode == MultiVoiceMode::Choir {
             let count = self.config.choir_voices as usize;
+            let gain = (self.choir_gain.to_bits() as f64 / 16384.0) as f32;
+            gains[0] = gain;
             for voice in 1..count {
                 ratios[voice] =
                     (lead as f64 * self.drift_ratio[voice].to_bits() as f64 / 16384.0) as f32;
-                gains[voice] = 1.0;
+                gains[voice] = gain;
             }
             count as u8
         } else {
+            gains[0] = 1.0;
             for voice in 0..HARMONY_VOICES {
                 ratios[voice + 1] =
                     (self.voice_ratios[voice + 1].to_bits() as f64 / 16384.0) as f32;
@@ -1132,12 +1148,12 @@ impl Resynthesis {
                 final_ratio = ratio;
                 self.voice_ratios[0] = ratio;
                 for (channel, sum) in mix.iter_mut().enumerate() {
-                    *sum = *sum
-                        + if self.config.stereo_output {
-                            value.mul(self.pan[0][channel])
-                        } else {
-                            value
-                        };
+                    let gain = if self.config.stereo_output {
+                        self.pan[0][channel]
+                    } else {
+                        self.choir_gain
+                    };
+                    *sum = sum.saturating_add(value.mul_wide(gain));
                 }
             }
             {
@@ -1163,16 +1179,16 @@ impl Resynthesis {
                     }
                     let values =
                         positions.map(|position| history::interpolation(&self.lead, position).0);
-                    // Keep the voice and channel order of each wrapping sum.
+                    // Keep the voice and channel order of each sum.
                     for (lane, value) in values.into_iter().enumerate() {
                         let current_voice = voice + lane;
                         for (channel, sum) in mix.iter_mut().enumerate() {
-                            *sum = *sum
-                                + if self.config.stereo_output {
-                                    value.mul(self.pan[current_voice][channel])
-                                } else {
-                                    value
-                                };
+                            let gain = if self.config.stereo_output {
+                                self.pan[current_voice][channel]
+                            } else {
+                                self.choir_gain
+                            };
+                            *sum = sum.saturating_add(value.mul_wide(gain));
                         }
                     }
                     voice += 4;
@@ -1189,18 +1205,18 @@ impl Resynthesis {
                         self.move_reader(voice, ratio, period, self.delays[voice], false);
                     let (value, _) = history::interpolation(&self.lead, position);
                     for (channel, sum) in mix.iter_mut().enumerate() {
-                        *sum = *sum
-                            + if self.config.stereo_output {
-                                value.mul(self.pan[voice][channel])
-                            } else {
-                                value
-                            };
+                        let gain = if self.config.stereo_output {
+                            self.pan[voice][channel]
+                        } else {
+                            self.choir_gain
+                        };
+                        *sum = sum.saturating_add(value.mul_wide(gain));
                     }
                 }
             }
-            // The multiplication by 1.0 keeps the wrap of the product.
+            // Clamp the mix so later Q14 and Q8 products do not wrap.
             for sum in &mut mix {
-                *sum = Q14::ONE.mul(*sum);
+                *sum = (*sum).clamp(-CHOIR_MIX_LIMIT, CHOIR_MIX_LIMIT);
             }
         } else {
             let (period, ratio) = self.period_for(delayed, write);
