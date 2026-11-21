@@ -169,7 +169,11 @@ voice. It disables the effects and the formant stage.
 | Formant        | Changes the vocal tract with an LPC model and aspiration    | Disabled       | `resynthesis.formant`    |
 | Alien          | Plays recent audio in reverse loops                         | Disabled       | `alien`                  |
 | Reverb         | Echo, Schroeder, SmallRoom, Binaural, MediumHall, LargeHall | Disabled       | `reverb.network`         |
-| Output gain    | Linear gain, 0..=64                                         | 1              | `output_gain`            |
+| Output gain    | Linear gain, 0..=64, before `-32767..=32767` clipping       | 1              | `output_gain`            |
+
+The internal Q14 stages use `i64` products and saturate at the `i32`
+limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
+multi-voice mixes.
 
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
 dry path starts after Warm and has a delay of 1,543 frames. Each
@@ -179,9 +183,9 @@ and `brightness_hz`) that apply to that network.
 ### Harmony sources
 
 Set `resynthesis.mode` to `VoiceModeConfig::Harmony`, which contains
-`harmony` and `harmony_gain`. `harmony_gain` scales the harmony voices in
-mono and stereo modes. Then select the source with
-`resynthesis.mode.harmony.source`:
+`harmony` and `harmony_gain`. `harmony_gain` scales the four harmony voices
+in mono and in stereo. It does not scale the lead voice. Then select the
+source with `resynthesis.mode.harmony.source`:
 
 | Source          | The voices follow                                      |
 | --------------- | ------------------------------------------------------ |
@@ -565,9 +569,10 @@ ignores both directories. The archive contains only these items:
 - The package metadata.
 - The README.
 
-The `build:wasm` script uses `--no-opt`. This flag disables the separate
-Binaryen pass, but Rust still builds in release mode. The TypeScript and
-Node.js type declarations are only development dependencies.
+The `build:wasm` script builds the crate in release mode with LTO and one
+codegen unit. Then `wasm-pack` runs Binaryen `wasm-opt` on
+`pkg/tunelet_bg.wasm`. The TypeScript and Node.js type declarations are only
+development dependencies.
 
 ## License
 
