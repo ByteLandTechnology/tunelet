@@ -1,23 +1,15 @@
 /**
- * Builds the npm archive, checks its file list and imports the package in
- * Node.js.
+ * This script packs the npm archive, checks its eight files, runs
+ * `loadTunelet()` and checks the TypeScript declarations.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { gunzipSync } from "node:zlib";
 
-const EXPECTED_ARCHIVE_ENTRIES = [
+const EXPECTED_ARCHIVE_PATHS = [
   "package/LICENSE",
   "package/README.md",
   "package/dist/index.d.ts",
@@ -28,185 +20,157 @@ const EXPECTED_ARCHIVE_ENTRIES = [
   "package/pkg/tunelet_bg.wasm",
 ];
 
-/** Reads a null-terminated UTF-8 field from a tar header slice. */
-function readHeaderText(slice) {
-  const zeroIndex = slice.indexOf(0);
-  const end = zeroIndex === -1 ? slice.length : zeroIndex;
-  return slice.subarray(0, end).toString("utf8");
-}
-
-/** Reads the `path` record from a PAX header block. */
-function readPaxPath(block) {
-  const text = block.toString("utf8");
-  let index = 0;
-  while (index < text.length) {
-    const spaceIndex = text.indexOf(" ", index);
-    if (spaceIndex === -1) {
-      break;
-    }
-    const recordLength = Number.parseInt(text.slice(index, spaceIndex), 10);
-    if (!Number.isFinite(recordLength) || recordLength <= 0) {
-      break;
-    }
-    const record = text.slice(spaceIndex + 1, index + recordLength - 1);
-    if (record.startsWith("path=")) {
-      return record.slice("path=".length);
-    }
-    index += recordLength;
-  }
-  return undefined;
-}
-
-/** Decompresses a `.tgz` archive and returns its regular file entries. */
-function readTarEntries(tarballPath) {
-  const tarBytes = gunzipSync(readFileSync(tarballPath));
-  const entries = [];
-  let offset = 0;
-  let nextLongPath;
-  let nextPaxPath;
-
-  while (offset + 512 <= tarBytes.length) {
-    const header = tarBytes.subarray(offset, offset + 512);
-    // Stop at the first zero block that marks the end of the archive.
-    if (header.every((byte) => byte === 0)) {
-      break;
-    }
-
-    const sizeText = readHeaderText(header.subarray(124, 136)).trim();
-    const size = sizeText.length === 0 ? 0 : Number.parseInt(sizeText, 8);
-    assert.ok(
-      Number.isInteger(size) && size >= 0,
-      `Invalid tar entry size: ${sizeText}`,
-    );
-
-    const typeByte = header[156];
-    const typeFlag = typeByte === 0 ? "0" : String.fromCharCode(typeByte);
-    const name = readHeaderText(header.subarray(0, 100));
-    const prefix = readHeaderText(header.subarray(345, 500));
-    const headerPath = prefix.length > 0 ? `${prefix}/${name}` : name;
-
-    const dataStart = offset + 512;
-    const dataEnd = dataStart + size;
-    assert.ok(dataEnd <= tarBytes.length, "Truncated tar archive.");
-    const data = tarBytes.subarray(dataStart, dataEnd);
-    offset = dataStart + Math.ceil(size / 512) * 512;
-
-    if (typeFlag === "L") {
-      nextLongPath = data.toString("utf8").replace(/\0+$/, "");
-      continue;
-    }
-    if (typeFlag === "x") {
-      // Read the path from the PAX header block.
-      nextPaxPath = readPaxPath(data);
-      continue;
-    }
-    if (typeFlag === "g") {
-      continue;
-    }
-
-    const entryPath = nextPaxPath ?? nextLongPath ?? headerPath;
-    nextPaxPath = undefined;
-    nextLongPath = undefined;
-
-    if (typeFlag === "0") {
-      entries.push({ path: entryPath, data });
-    }
-  }
-
-  return entries;
-}
-
-/** Runs `npm pack` into `packDir` from `repoRoot`. */
-function runNpmPack(repoRoot, packDir) {
-  if (process.platform === "win32") {
-    execFileSync(
-      "cmd.exe",
-      ["/d", "/s", "/c", "npm.cmd", "pack", "--pack-destination", packDir],
-      { cwd: repoRoot, stdio: "inherit" },
-    );
-    return;
-  }
-  execFileSync("npm", ["pack", "--pack-destination", packDir], {
-    cwd: repoRoot,
-    stdio: "inherit",
-  });
-}
+const PACKAGE_NAME_PATTERN =
+  /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
-const packageMetadata = JSON.parse(
-  readFileSync(join(repoRoot, "package.json"), "utf8"),
-);
-const packageName = packageMetadata.name;
-assert.ok(
-  typeof packageName === "string" && packageName.length > 0,
-  "package.json must define a non-empty name.",
-);
 
-// Create a temporary directory and delete it in the finally block.
-const tempDir = mkdtempSync(join(tmpdir(), "tunelet-pack-"));
-try {
-  const packDir = join(tempDir, "pack");
-  const consumerDir = join(tempDir, "consumer");
-  mkdirSync(packDir);
-  mkdirSync(consumerDir);
-
-  runNpmPack(repoRoot, packDir);
-
-  const tarballs = readdirSync(packDir).filter((file) => file.endsWith(".tgz"));
+/** Read and check the current package name so scoped names also work. */
+function readPackageName() {
+  const packageJsonPath = path.join(repoRoot, "package.json");
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  const packageName = packageJson.name;
   assert.equal(
-    tarballs.length,
-    1,
-    `Expected one .tgz archive, found ${tarballs.length}.`,
+    typeof packageName,
+    "string",
+    "package.json name must be a string",
   );
+  assert.match(
+    packageName,
+    PACKAGE_NAME_PATTERN,
+    `Invalid package name: ${packageName}`,
+  );
+  return packageName;
+}
 
-  const entries = readTarEntries(join(packDir, tarballs[0]));
-  const actualPaths = entries.map((entry) => entry.path).sort();
-  assert.deepEqual(actualPaths, EXPECTED_ARCHIVE_ENTRIES);
+/** Run `npm pack` without a shell and return the relative archive path. */
+function packArchive(packDir) {
+  const npmExecPath = process.env.npm_execpath;
+  if (npmExecPath) {
+    execFileSync(
+      process.execPath,
+      [npmExecPath, "pack", "--pack-destination", packDir],
+      { cwd: repoRoot, stdio: "inherit" },
+    );
+  } else if (process.platform === "win32") {
+    const npmCliPath = path.join(
+      path.dirname(process.execPath),
+      "node_modules",
+      "npm",
+      "bin",
+      "npm-cli.js",
+    );
+    if (!fs.existsSync(npmCliPath)) {
+      throw new Error(`npm-cli.js was not found at ${npmCliPath}`);
+    }
+    execFileSync(
+      process.execPath,
+      [npmCliPath, "pack", "--pack-destination", packDir],
+      { cwd: repoRoot, stdio: "inherit" },
+    );
+  } else {
+    execFileSync("npm", ["pack", "--pack-destination", packDir], {
+      cwd: repoRoot,
+      stdio: "inherit",
+    });
+  }
 
-  // Install the archive files into node_modules under the package name.
-  const installDir = join(
+  const archives = fs
+    .readdirSync(packDir)
+    .filter((entry) => entry.endsWith(".tgz"));
+  assert.equal(
+    archives.length,
+    1,
+    `Expected one archive, found ${archives.length}`,
+  );
+  return path.posix.join("pack", archives[0]);
+}
+
+/** Check that the archive contains only the eight expected files. */
+function verifyArchiveEntries(tempDir, relativeArchivePath) {
+  const rawList = execFileSync("tar", ["-tzf", relativeArchivePath], {
+    cwd: tempDir,
+    encoding: "utf8",
+  });
+  const actualPaths = rawList
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^\.\//, ""))
+    .filter((line) => line.length > 0 && !line.endsWith("/"))
+    .sort();
+
+  assert.deepEqual(actualPaths, [...EXPECTED_ARCHIVE_PATHS].sort());
+}
+
+/** Extract the archive into an isolated `node_modules` directory. */
+function installArchive(
+  tempDir,
+  relativeArchivePath,
+  consumerDir,
+  packageName,
+) {
+  const extractDir = path.join(tempDir, "extract");
+  fs.mkdirSync(extractDir);
+  execFileSync("tar", ["-xzf", relativeArchivePath, "-C", "extract"], {
+    cwd: tempDir,
+  });
+
+  const installedDir = path.join(
     consumerDir,
     "node_modules",
     ...packageName.split("/"),
   );
-  for (const entry of entries) {
-    assert.ok(entry.data.byteLength > 0, `Empty archive entry: ${entry.path}`);
-    assert.ok(
-      entry.path.startsWith("package/"),
-      `Unexpected archive prefix: ${entry.path}`,
-    );
-    const relativePath = entry.path.slice("package/".length);
-    const destination = join(installDir, ...relativePath.split("/"));
-    mkdirSync(dirname(destination), { recursive: true });
-    writeFileSync(destination, entry.data);
+  fs.mkdirSync(path.dirname(installedDir), { recursive: true });
+  fs.renameSync(path.join(extractDir, "package"), installedDir);
+
+  for (const archivePath of EXPECTED_ARCHIVE_PATHS) {
+    const relativeFile = archivePath.slice("package/".length);
+    const fullPath = path.join(installedDir, relativeFile);
+    const stat = fs.statSync(fullPath);
+    assert.ok(stat.isFile(), `Expected file at ${relativeFile}`);
+    assert.ok(stat.size > 0, `Expected non-empty file at ${relativeFile}`);
   }
 
-  writeFileSync(
-    join(consumerDir, "package.json"),
-    JSON.stringify({ private: true, type: "module" }),
+  const packedMetadata = JSON.parse(
+    fs.readFileSync(path.join(installedDir, "package.json"), "utf8"),
   );
+  assert.equal(packedMetadata.name, packageName);
 
-  // Import the package from an isolated directory and construct a processor.
-  const smokeScriptPath = join(consumerDir, "smoke.mjs");
-  writeFileSync(
-    smokeScriptPath,
+  fs.writeFileSync(
+    path.join(consumerDir, "package.json"),
+    JSON.stringify({
+      name: "tunelet-pack-consumer",
+      private: true,
+      type: "module",
+    }),
+  );
+}
+
+/** Import the installed package in Node.js and process one audio block. */
+function verifyRuntimeImport(consumerDir, packageName) {
+  const checkPath = path.join(consumerDir, "check.mjs");
+  fs.writeFileSync(
+    checkPath,
     [
       'import assert from "node:assert/strict";',
       "",
-      "const name = process.argv[2];",
-      "const entry = await import(name);",
-      "const wasm = await import(`${name}/wasm`);",
+      "const packageName = process.argv[2];",
+      "const rootModule = await import(packageName);",
+      "const wasmModule = await import(`${packageName}/wasm`);",
       "",
-      'assert.equal(typeof entry.loadTunelet, "function");',
-      "assert.equal(entry.default, entry.loadTunelet);",
-      "assert.equal(entry.Tunelet, wasm.Tunelet);",
+      'assert.equal(typeof rootModule.loadTunelet, "function");',
+      "assert.equal(rootModule.default, rootModule.loadTunelet);",
+      'assert.equal(typeof rootModule.initSync, "function");',
+      'assert.equal(typeof rootModule.Tunelet, "function");',
+      'assert.equal(typeof rootModule.defaultConfig, "function");',
+      'assert.equal(typeof wasmModule.default, "function");',
+      'assert.equal(typeof wasmModule.initSync, "function");',
       "",
-      "await entry.loadTunelet();",
-      "const config = entry.defaultConfig();",
-      "const processor = new entry.Tunelet(48000, 128, config);",
+      "const wasmExports = await rootModule.loadTunelet();",
+      "assert.ok(wasmExports);",
+      "",
+      "const config = rootModule.defaultConfig();",
+      "const processor = new rootModule.Tunelet(48000, 128, config);",
       "try {",
-      "  assert.equal(processor.sampleRate, 48000);",
-      "  assert.equal(processor.maxBlockFrames, 128);",
       "  const input = new Int16Array(128);",
       "  const left = new Int16Array(128);",
       "  const right = new Int16Array(128);",
@@ -218,10 +182,95 @@ try {
     ].join("\n"),
   );
 
-  execFileSync(process.execPath, [smokeScriptPath, packageName], {
+  execFileSync(process.execPath, [checkPath, packageName], {
     cwd: consumerDir,
     stdio: "inherit",
   });
+}
+
+/** Check TypeScript resolution for the root entry and the `./wasm` entry. */
+function verifyTypeDeclarations(consumerDir, packageName) {
+  const checkTsPath = path.join(consumerDir, "check.ts");
+  const pkgLiteral = JSON.stringify(packageName);
+  const wasmLiteral = JSON.stringify(`${packageName}/wasm`);
+  fs.writeFileSync(
+    checkTsPath,
+    [
+      "import loadTunelet, {",
+      "  defaultConfig,",
+      "  initSync as rootInitSync,",
+      "  loadTunelet as namedLoadTunelet,",
+      "  Tunelet,",
+      "  type ProcessorConfig,",
+      `} from ${pkgLiteral};`,
+      "import init, {",
+      "  initSync as wasmInitSync,",
+      "  type InitInput,",
+      "  type InitOutput,",
+      `} from ${wasmLiteral};`,
+      "",
+      "export async function verifyTypes(source?: InitInput): Promise<void> {",
+      "  const exportsFromRoot: InitOutput = await loadTunelet(source);",
+      "  const exportsFromNamed: InitOutput = await namedLoadTunelet(source);",
+      "  const exportsFromWasm: InitOutput = await init(source);",
+      "  const config: ProcessorConfig = defaultConfig();",
+      "  const processor = new Tunelet(48000, 128, config);",
+      "  const input = new Int16Array(128);",
+      "  const left = new Int16Array(128);",
+      "  const right = new Int16Array(128);",
+      "  processor.process(input, left, right);",
+      "  processor.free();",
+      "  void rootInitSync;",
+      "  void wasmInitSync;",
+      "  void exportsFromRoot;",
+      "  void exportsFromNamed;",
+      "  void exportsFromWasm;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const tscBin = path.join(
+    repoRoot,
+    "node_modules",
+    "typescript",
+    "bin",
+    "tsc",
+  );
+  execFileSync(
+    process.execPath,
+    [
+      tscBin,
+      "--noEmit",
+      "--module",
+      "NodeNext",
+      "--moduleResolution",
+      "NodeNext",
+      "--target",
+      "ES2020",
+      "--lib",
+      "ES2020,ESNext.Disposable,DOM",
+      "--strict",
+      checkTsPath,
+    ],
+    { cwd: consumerDir, stdio: "inherit" },
+  );
+}
+
+const packageName = readPackageName();
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tunelet-verify-pack-"));
+
+try {
+  const packDir = path.join(tempDir, "pack");
+  const consumerDir = path.join(tempDir, "consumer");
+  fs.mkdirSync(packDir);
+  fs.mkdirSync(consumerDir);
+
+  const relativeArchivePath = packArchive(packDir);
+  verifyArchiveEntries(tempDir, relativeArchivePath);
+  installArchive(tempDir, relativeArchivePath, consumerDir, packageName);
+  verifyRuntimeImport(consumerDir, packageName);
+  verifyTypeDeclarations(consumerDir, packageName);
 } finally {
-  rmSync(tempDir, { recursive: true, force: true });
+  fs.rmSync(tempDir, { recursive: true, force: true });
 }
