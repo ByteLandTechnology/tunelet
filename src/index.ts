@@ -7,7 +7,7 @@
  * that wasm-bindgen generates, which include `Tunelet`, `defaultConfig`,
  * `initSync` and the configuration, event and feedback types.
  */
-import init, { initSync } from "../pkg/tunelet.js";
+import init from "../pkg/tunelet.js";
 import type { InitInput, InitOutput } from "../pkg/tunelet.js";
 
 export * from "../pkg/tunelet.js";
@@ -74,7 +74,7 @@ async function initialize(
     const fs: typeof import("node:fs/promises") = await import(
       /* webpackIgnore: true */ /* @vite-ignore */ moduleName
     );
-    return initSync({ module: await fs.readFile(input) });
+    return init({ module_or_path: await fs.readFile(input) });
   }
 
   return init({ module_or_path: input });
