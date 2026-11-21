@@ -130,8 +130,15 @@ npm run build
   Do not change the version in `Cargo.toml`, `Cargo.lock`,
   `package.json`, `package-lock.json` or `.release-please-manifest.json`
   by hand. The commit types and the `!` mark set the next version. The
-  release workflow is `.github/workflows/release.yml`. It publishes to
-  npm and crates.io through trusted publishing, so do not rename it.
+  release workflow is `.github/workflows/release.yml`. Do not rename
+  this file, because the OIDC trusted publishers on npmjs.org and
+  crates.io require that name.
+
+  In that workflow, `prepare-artifacts` builds the archives one time,
+  writes `SHA256SUMS.txt` and attests the files. Then the publish jobs
+  promote the release in sequence to GitHub Packages, npmjs.org and
+  crates.io. To verify the package archives locally, run
+  `cargo package --locked` and `npm pack`.
 
 ## Prohibited changes
 

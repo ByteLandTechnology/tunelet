@@ -1,22 +1,30 @@
-# Release management with release-please, and trusted publishing to npm and
-# crates.io.
+# Release management with release-please and sequential package promotion.
 #
-# Each push to main updates the release pull request. When you merge the
-# release pull request, release-please makes the tag and the GitHub release.
-# Then two jobs publish the release through OIDC: publish-npm publishes the
-# npm package, and publish-crate publishes the crate to crates.io. The
-# trusted publishers on npm and on crates.io must name this file
-# (release.yml). The jobs do not use stored tokens.
+# A concurrency group queues pushes on main and does not cancel active runs.
+# Each push to main updates the release pull request. If a merge creates a
+# release, prepare-artifacts validates the crate, builds the Wasm and
+# TypeScript files one time, writes SHA256SUMS.txt and attests all archives.
 #
-# The publish-github job also publishes the npm package to GitHub Packages
-# as @bytelandtechnology/tunelet. It uses the GITHUB_TOKEN of the workflow.
-# GitHub links the package to this repository through the repository field.
+# Then three jobs promote the release in sequence:
+# - publish-github publishes @bytelandtechnology/tunelet to GitHub Packages
+#   with GITHUB_TOKEN and uploads the archive and SHA256SUMS.txt to the
+#   GitHub Release.
+# - publish-npm verifies the archive digest and publishes tunelet to
+#   npmjs.org with OIDC provenance.
+# - publish-crate publishes tunelet to crates.io through OIDC.
+#
+# The OIDC trusted publishers on npmjs.org and crates.io require the file
+# name release.yml. These jobs do not use stored secrets.
 name: Release
 
 on:
   push:
     branches:
       - main
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions: {}
 
@@ -34,13 +42,14 @@ jobs:
       - id: release
         uses: googleapis/release-please-action@v5
 
-  publish-npm:
+  prepare-artifacts:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -54,47 +63,101 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
-          registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
-      # Trusted publishing needs npm 11.5.1 or later.
-      - run: npm install --global npm@latest
+      - run: cargo doc --locked --no-deps
+      - run: cargo package --locked
       - run: npm ci
-      # The prepack script builds the Wasm bindings and the TypeScript entry.
-      - run: npm publish
+      - run: npm run build
+      - run: npm pack --ignore-scripts
+      # GitHub Packages accepts only names in the scope of the owner.
+      - run: |
+          npm pkg set name=@bytelandtechnology/tunelet
+          npm pack --ignore-scripts
+          git checkout -- package.json
+      - run: sha256sum tunelet-*.tgz bytelandtechnology-tunelet-*.tgz target/package/tunelet-*.crate > SHA256SUMS.txt
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            tunelet-*.tgz
+            bytelandtechnology-tunelet-*.tgz
+            target/package/tunelet-*.crate
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-tarball
+          path: tunelet-*.tgz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gh-packages-tarball
+          path: bytelandtechnology-tunelet-*.tgz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-checksums
+          path: SHA256SUMS.txt
+          if-no-files-found: error
 
   publish-github:
-    needs: release-please
+    needs: [release-please, prepare-artifacts]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
-      - uses: dtolnay/rust-toolchain@stable
+          name: gh-packages-tarball
+      - uses: actions/download-artifact@v8
         with:
-          targets: wasm32-unknown-unknown
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-pack
+          name: release-checksums
+      - run: |
+          test -f ./bytelandtechnology-tunelet-*.tgz
+          sha256sum --check --ignore-missing --strict SHA256SUMS.txt
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
           registry-url: "https://npm.pkg.github.com"
           scope: "@bytelandtechnology"
           package-manager-cache: false
-      - run: npm ci
-      # GitHub Packages accepts only names in the scope of the owner.
-      - run: npm pkg set name=@bytelandtechnology/tunelet
-      # The prepack script builds the Wasm bindings and the TypeScript entry.
-      - run: npm publish
+      # A tarball path skips prepack and keeps the archive from prepare-artifacts.
+      - run: npm publish ./bytelandtechnology-tunelet-*.tgz
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: gh release upload --clobber -- "$TAG_NAME" ./bytelandtechnology-tunelet-*.tgz SHA256SUMS.txt
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+
+  publish-npm:
+    needs: [release-please, prepare-artifacts, publish-github]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm-tarball
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-checksums
+      - run: |
+          test -f ./tunelet-*.tgz
+          sha256sum --check --ignore-missing --strict SHA256SUMS.txt
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+      # The OIDC trusted publisher needs npm 11.5.1 or later.
+      - run: npm install --global npm@latest
+      # A tarball path skips prepack and keeps the archive from prepare-artifacts.
+      - run: npm publish --provenance ./tunelet-*.tgz
 
   publish-crate:
-    needs: release-please
+    needs: [release-please, prepare-artifacts, publish-npm]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
