@@ -23,6 +23,7 @@ use crate::filter::{Biquad, Design};
 use crate::lpc;
 use crate::numeric::fixed::{Q14, Q6};
 use crate::numeric::{db_to_gain, fast_sinc, mul14, round_q14, NumericContext};
+use crate::resynthesis::History;
 use crate::{Error, SampleRate};
 
 /// The controls for vocal-tract changes and synthesized aspiration during
@@ -128,12 +129,13 @@ const BANKS: usize = 30;
 struct Stamp {
     /// The new model bank that was active when the related audio frame was
     /// recorded.
-    current: usize,
+    current: u8,
     /// The previous bank, for the short transition between coefficients.
-    previous: usize,
+    previous: u8,
     /// The weight of the current bank in Q14, from zero to 16384 inclusive.
-    blend: i32,
+    blend: u16,
 }
+const _: () = assert!(std::mem::size_of::<Stamp>() == 4);
 impl Default for Stamp {
     fn default() -> Self {
         Self {
@@ -157,12 +159,14 @@ pub(crate) struct Formant {
     /// The ring of pre-emphasized Q14 audio words. It is aligned with the
     /// resynthesis history.
     input: Vec<i32>,
+    /// One generation tag for each slot in `input`.
+    input_tags: Vec<u32>,
     /// The preallocated segment memory for period folding and
     /// autocorrelation.
     temporary: Vec<i32>,
-    /// The Q14 coefficient banks for the inverse filter. Only the first ORDER
-    /// coefficients are used.
-    inverse: Vec<[i32; MAX_ORDER]>,
+    /// The Q14 coefficient banks for the inverse filter, with ORDER entries
+    /// in each bank.
+    inverse: Vec<[i32; ORDER]>,
     /// The Q14 coefficient banks for the forward filter. `orders` holds the
     /// active lengths.
     models: Vec<[i32; MAX_ORDER]>,
@@ -171,6 +175,8 @@ pub(crate) struct Formant {
     orders: [usize; BANKS],
     /// One record of a bank pair and a blend for each frame of input history.
     stamps: Vec<Stamp>,
+    /// One generation tag for each slot in `stamps`.
+    stamp_tags: Vec<u32>,
     /// The index of the current coefficient bank.
     current: usize,
     /// The bank before `current`. The stage keeps it while the coefficients
@@ -233,6 +239,8 @@ pub(crate) struct Formant {
     /// The wrapping count of model designs that the stage tried. Only the
     /// telemetry reads it.
     generation: u32,
+    /// The active generation tag for `input` and `stamps`. It starts at one.
+    ring_generation: u32,
 }
 
 impl Formant {
@@ -249,12 +257,14 @@ impl Formant {
             config,
             rate,
             input: vec![0; HISTORY_FRAMES],
+            input_tags: vec![0; HISTORY_FRAMES],
             temporary: vec![0_i32; (2 * (rate.as_u32() as usize / 40) + MAX_ORDER + 256).max(2865)],
-            inverse: vec![[0; MAX_ORDER]; BANKS],
+            inverse: vec![[0; ORDER]; BANKS],
             models: vec![[0; MAX_ORDER]; BANKS],
             orders: [0; BANKS],
             stamps: vec![Stamp::default(); HISTORY_FRAMES],
-            current: BANKS - 1,
+            stamp_tags: vec![0; HISTORY_FRAMES],
+            current: 1,
             previous: 0,
             blend: 0,
             design_counter: 0,
@@ -277,9 +287,9 @@ impl Formant {
             noise_gain: 0_i32,
             noise_amplitude: 0_i32,
             generation: 0,
+            ring_generation: 1,
         };
         result.set_config(config);
-        result.reset();
         result
     }
     /// Quantizes the validated controls, prepares the Q7 map for the area
@@ -308,16 +318,20 @@ impl Formant {
         self.noise_filter
             .set_design(Design::high_pass(self.rate.hz(), frequency as f32, 0.707));
     }
-    /// Clears the audio, the stamps, the synthesis history and the history of
-    /// the aspiration filter.
+    /// Invalidates the audio and the stamps, and clears the synthesis history
+    /// and the history of the aspiration filter.
     ///
     /// The function also selects and clears the initial bank pair, and starts
     /// the correlation smoothing again. The other banks stay allocated. The
     /// stage clears each bank when it uses that bank again.
     pub(crate) fn reset(&mut self) {
-        self.input.fill(0_i32);
-
-        self.stamps.fill(Stamp::default());
+        if self.ring_generation == u32::MAX {
+            self.input_tags.fill(0);
+            self.stamp_tags.fill(0);
+            self.ring_generation = 1;
+        } else {
+            self.ring_generation += 1;
+        }
         self.history = [[0; MAX_ORDER]; 2];
         self.history_index = 0;
         self.current = BANKS - 1;
@@ -326,6 +340,36 @@ impl Formant {
         self.design_counter = 0;
         self.noise_filter.reset();
         self.smooth_reset = true;
+    }
+    /// Reads one pre-emphasized input word, or zero if its tag is older.
+    #[inline]
+    fn input_sample(&self, index: usize) -> i32 {
+        if self.input_tags[index] == self.ring_generation {
+            self.input[index]
+        } else {
+            0
+        }
+    }
+    /// Writes one pre-emphasized input word and records the active tag.
+    #[inline]
+    fn set_input(&mut self, index: usize, value: i32) {
+        self.input[index] = value;
+        self.input_tags[index] = self.ring_generation;
+    }
+    /// Reads one stamp, or returns the default stamp if its tag is older.
+    #[inline]
+    fn stamp(&self, index: usize) -> Stamp {
+        if self.stamp_tags[index] == self.ring_generation {
+            self.stamps[index]
+        } else {
+            Stamp::default()
+        }
+    }
+    /// Writes one stamp and records the active tag.
+    #[inline]
+    fn set_stamp(&mut self, index: usize, stamp: Stamp) {
+        self.stamps[index] = stamp;
+        self.stamp_tags[index] = self.ring_generation;
     }
     /// Starts a new model and a new correlation window when pitch acquisition
     /// locks.
@@ -363,13 +407,14 @@ impl Formant {
         &mut self,
         sample: i32,
         previous: i32,
-        periods: &[Q6],
+        periods: &History<Q6>,
+        period_generation: u32,
         write: usize,
         output_period_q6: i32,
     ) -> i32 {
-        self.input[write] = self.remove_glottal(sample, previous);
+        self.set_input(write, self.remove_glottal(sample, previous));
 
-        self.design(periods, write, output_period_q6);
+        self.design(periods, period_generation, write, output_period_q6);
         self.inverse(write)
     }
     /// Moves to the next bank and keeps the old bank for the blend.
@@ -440,7 +485,13 @@ impl Formant {
     ///
     /// If the Durbin analysis fails, smoothing starts again. The selected
     /// bank keeps the inverse coefficients that the analysis wrote.
-    fn design(&mut self, periods: &[Q6], position: usize, output_period_q6: i32) {
+    fn design(
+        &mut self,
+        periods: &History<Q6>,
+        period_generation: u32,
+        position: usize,
+        output_period_q6: i32,
+    ) {
         let period = output_period_q6.wrapping_shr(6).max(0) as usize;
         let design_now = self.design_counter == 0;
         self.design_counter += 1;
@@ -452,20 +503,21 @@ impl Formant {
                 count = (self.rate.as_u32() as usize + 50) / 100;
                 for i in 0..count {
                     self.temporary[i] =
-                        self.input[(position + HISTORY_FRAMES - i) % HISTORY_FRAMES];
+                        self.input_sample((position + HISTORY_FRAMES - i) % HISTORY_FRAMES);
                 }
                 self.temporary[count..count + ORDER].fill(0_i32);
             } else {
-                count = if periods[position] == Q6::ZERO {
+                let position_period = periods.get(position, period_generation);
+                count = if position_period == Q6::ZERO {
                     period * 2
                 } else {
                     period
                 };
                 let extra = (period / 10).max(1);
-                if periods[position] == Q6::ZERO {
+                if position_period == Q6::ZERO {
                     for i in 0..count + extra {
                         self.temporary[i] =
-                            self.input[(position + HISTORY_FRAMES - i) % HISTORY_FRAMES];
+                            self.input_sample((position + HISTORY_FRAMES - i) % HISTORY_FRAMES);
                     }
                 } else {
                     for i in 0..count + extra {
@@ -479,12 +531,13 @@ impl Formant {
                                 .wrapping_shr(6)
                                 .rem_euclid(HISTORY_FRAMES as i32)
                                 as usize;
-                            sum = sum.wrapping_add(self.input[index]);
+                            sum = sum.wrapping_add(self.input_sample(index));
                             reads += 1;
-                            if periods[index] == Q6::ZERO {
+                            let slot_period = periods.get(index, period_generation);
+                            if slot_period == Q6::ZERO {
                                 break;
                             }
-                            accumulator = accumulator.wrapping_sub(periods[index].to_bits());
+                            accumulator = accumulator.wrapping_sub(slot_period.to_bits());
                         }
                         self.temporary[i] = sum.wrapping_div(reads);
                     }
@@ -572,7 +625,7 @@ impl Formant {
 
             let valid = lpc::durbin(
                 &correlations,
-                &mut self.inverse[self.current][..ORDER],
+                &mut self.inverse[self.current],
                 &mut parcor,
                 &mut scratch,
             );
@@ -608,8 +661,7 @@ impl Formant {
                         }
                     }
                 } else {
-                    self.models[self.current][..ORDER]
-                        .copy_from_slice(&self.inverse[self.current][..ORDER]);
+                    self.models[self.current][..ORDER].copy_from_slice(&self.inverse[self.current]);
                     self.orders[self.current] = ORDER;
                 }
             } else {
@@ -619,11 +671,14 @@ impl Formant {
         if self.blend < 16384 {
             self.blend = (self.blend + 1638).min(16384);
         }
-        self.stamps[position] = Stamp {
-            current: self.current,
-            previous: self.previous,
-            blend: self.blend,
-        };
+        self.set_stamp(
+            position,
+            Stamp {
+                current: self.current as u8,
+                previous: self.previous as u8,
+                blend: self.blend as u16,
+            },
+        );
     }
 
     /// Applies the blended 50th-order prediction-error filter to the delayed
@@ -653,9 +708,9 @@ impl Formant {
             } else {
                 cursor - 1
             };
-            sum = sum.wrapping_add(self.input[cursor].wrapping_mul(coefficient));
+            sum = sum.wrapping_add(self.input_sample(cursor).wrapping_mul(coefficient));
         }
-        self.input[read].wrapping_sub(round_q14(sum))
+        self.input_sample(read).wrapping_sub(round_q14(sum))
     }
     /// Blends random aspiration into a Q14 sample word. The signal modulates
     /// the aspiration, and a high-pass filter changes it.
@@ -684,16 +739,19 @@ impl Formant {
     /// `output`. The entries after the prefix are not specified, and you must
     /// not use them. Negative positions wrap in the ring.
     fn coefficients(&self, position: i32, output: &mut [i32; MAX_ORDER]) -> usize {
-        let stamp = self.stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
-        let mut order = self.orders[stamp.current];
-        if stamp.blend < 16384 && self.orders[stamp.previous] != 0 {
-            order = order.max(self.orders[stamp.previous]);
+        let stamp = self.stamp(position.rem_euclid(HISTORY_FRAMES as i32) as usize);
+        let current = usize::from(stamp.current);
+        let previous = usize::from(stamp.previous);
+        let blend = i32::from(stamp.blend);
+        let mut order = self.orders[current];
+        if blend < 16384 && self.orders[previous] != 0 {
+            order = order.max(self.orders[previous]);
             for (i, value) in output[..order].iter_mut().enumerate() {
-                *value = mul14(16384 - stamp.blend, self.models[stamp.previous][i])
-                    .wrapping_add(mul14(stamp.blend, self.models[stamp.current][i]));
+                *value = mul14(16384 - blend, self.models[previous][i])
+                    .wrapping_add(mul14(blend, self.models[current][i]));
             }
         } else {
-            output[..order].copy_from_slice(&self.models[stamp.current][..order]);
+            output[..order].copy_from_slice(&self.models[current][..order]);
         }
         order
     }
@@ -704,16 +762,19 @@ impl Formant {
     /// Finds and blends the analysis coefficients of the stamp at a signed
     /// history frame, in the same way as [`Self::coefficients`].
     ///
-    /// The function writes ORDER entries to the start of `output`.
-    fn analysis_coefficients(&self, position: i32, output: &mut [i32; MAX_ORDER]) {
-        let stamp = self.stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
-        if stamp.blend < 16384 {
-            for (i, value) in output[..ORDER].iter_mut().enumerate() {
-                *value = mul14(16384 - stamp.blend, self.inverse[stamp.previous][i])
-                    .wrapping_add(mul14(stamp.blend, self.inverse[stamp.current][i]));
+    /// The function writes ORDER entries to `output`.
+    fn analysis_coefficients(&self, position: i32, output: &mut [i32; ORDER]) {
+        let stamp = self.stamp(position.rem_euclid(HISTORY_FRAMES as i32) as usize);
+        let current = usize::from(stamp.current);
+        let previous = usize::from(stamp.previous);
+        let blend = i32::from(stamp.blend);
+        if blend < 16384 {
+            for (i, value) in output.iter_mut().enumerate() {
+                *value = mul14(16384 - blend, self.inverse[previous][i])
+                    .wrapping_add(mul14(blend, self.inverse[current][i]));
             }
         } else {
-            output[..ORDER].copy_from_slice(&self.inverse[stamp.current][..ORDER]);
+            output.copy_from_slice(&self.inverse[current]);
         }
     }
     /// Writes the magnitude response of the two models of the stamp at a
@@ -743,7 +804,7 @@ impl Formant {
             output.fill(0.0);
             return false;
         }
-        let mut analysis = [0; MAX_ORDER];
+        let mut analysis = [0; ORDER];
         self.analysis_coefficients(position, &mut analysis);
         let points = input.len();
         let step = if points > 1 {
@@ -773,7 +834,7 @@ impl Formant {
             let emphasis = ((1.0 - glottal * cosine).powi(2) + (glottal * sine).powi(2))
                 .sqrt()
                 .max(1e-6);
-            *input = (1.0 / (magnitude(&analysis[..ORDER], cosine, sine) * emphasis)) as f32;
+            *input = (1.0 / (magnitude(&analysis, cosine, sine) * emphasis)) as f32;
             *output = (width / (magnitude(&synthesis[..order], cosine, sine) * emphasis)) as f32;
         }
         true

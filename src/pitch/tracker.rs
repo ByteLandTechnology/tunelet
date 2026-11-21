@@ -57,6 +57,10 @@ pub(crate) struct PitchTracker {
     pre: [Biquad; 2],
     /// Full-rate Q14 sample words in a fixed ring on the heap.
     raw: Box<[i32; HISTORY]>,
+    /// One generation tag for each slot in `raw`.
+    raw_tags: Box<[u32; HISTORY]>,
+    /// The active generation tag for `raw`. It starts at one.
+    generation: u32,
     /// The current full-rate history frame. It also sets the acquisition
     /// cadence of one frame in eight.
     write: usize,
@@ -117,6 +121,11 @@ impl PitchTracker {
                 .into_boxed_slice()
                 .try_into()
                 .expect("prepared pitch history length"),
+            raw_tags: vec![0; HISTORY]
+                .into_boxed_slice()
+                .try_into()
+                .expect("prepared pitch tag length"),
+            generation: 1,
             write: 0,
             detecting: true,
             first: true,
@@ -143,16 +152,31 @@ impl PitchTracker {
         self.threshold = Q14::from_f64(config.threshold as f64);
     }
 
-    /// Clears the full-rate audio, the current period and the prefilter
-    /// memories, and requests acquisition.
+    /// Invalidates the full-rate audio, clears the current period and the
+    /// prefilter memories, and requests acquisition.
     /// The acquisition tables clear at the next decimated call. The previous
     /// usable period stays until another tracking update replaces it.
     pub(crate) fn reset(&mut self) {
-        self.raw.fill(0);
+        if self.generation == u32::MAX {
+            self.raw_tags.fill(0);
+            self.generation = 1;
+        } else {
+            self.generation += 1;
+        }
         self.write = 0;
         self.restart();
         for pre in &mut self.pre {
             pre.reset();
+        }
+    }
+
+    /// Reads one full-rate sample word, or zero if its tag is older.
+    #[inline]
+    fn raw_sample(&self, index: usize) -> i32 {
+        if self.raw_tags[index] == self.generation {
+            self.raw[index]
+        } else {
+            0
         }
     }
 
@@ -427,16 +451,16 @@ impl PitchTracker {
         let mut energy: i32 = 0;
         let mut index = self.write;
         for _ in 0..period * 2 {
-            let sample = self.raw[index];
+            let sample = self.raw_sample(index);
             index = if index == 0 { HISTORY - 1 } else { index - 1 };
             energy = energy.wrapping_add(mul14(sample, sample));
         }
         self.tracking_energy[0] = energy;
         index = ring(self.write as i32 - period * 2);
         for lag in 1..TRACKING_LAGS {
-            let first = self.raw[index];
+            let first = self.raw_sample(index);
             index = if index == 0 { HISTORY - 1 } else { index - 1 };
-            let second = self.raw[index];
+            let second = self.raw_sample(index);
             index = if index == 0 { HISTORY - 1 } else { index - 1 };
             energy = energy.wrapping_add(mul14(first, first).wrapping_add(mul14(second, second)));
             self.tracking_energy[lag] = energy;
@@ -457,7 +481,7 @@ impl PitchTracker {
         let mut second = ring(self.write as i32 - period);
         let mut cross = 0_i32;
         for _ in 0..period {
-            cross = cross.wrapping_add(mul14(self.raw[first], self.raw[second]));
+            cross = cross.wrapping_add(mul14(self.raw_sample(first), self.raw_sample(second)));
             first = if first == 0 { HISTORY - 1 } else { first - 1 };
             second = if second == 0 { HISTORY - 1 } else { second - 1 };
         }
@@ -470,16 +494,33 @@ impl PitchTracker {
     /// stride of two. The separate wrapping path in `process_sample` uses the
     /// same arithmetic.
     #[inline]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "paired sample and tag arrays keep contiguous fixed-size views"
+    )]
     fn track_contiguous(
         current: i32,
+        generation: u32,
         middle: &[i32; TRACKING_LAGS],
+        middle_tags: &[u32; TRACKING_LAGS],
         delayed: &[i32; 2 * TRACKING_LAGS - 1],
+        delayed_tags: &[u32; 2 * TRACKING_LAGS - 1],
         energy: &mut [i32; TRACKING_LAGS],
         cross: &mut [i32; TRACKING_LAGS],
     ) {
         for lag in 0..TRACKING_LAGS {
-            let middle = middle[TRACKING_LAGS - 1 - lag];
-            let delayed = delayed[2 * (TRACKING_LAGS - 1) - lag * 2];
+            let middle_index = TRACKING_LAGS - 1 - lag;
+            let delayed_index = 2 * (TRACKING_LAGS - 1) - lag * 2;
+            let middle = if middle_tags[middle_index] == generation {
+                middle[middle_index]
+            } else {
+                0
+            };
+            let delayed = if delayed_tags[delayed_index] == generation {
+                delayed[delayed_index]
+            } else {
+                0
+            };
             energy[lag] = energy[lag]
                 .wrapping_add(mul14(current, current).wrapping_sub(mul14(delayed, delayed)));
             cross[lag] = cross[lag]
@@ -504,6 +545,7 @@ impl PitchTracker {
             self.write = 0;
         }
         self.raw[self.write] = sample;
+        self.raw_tags[self.write] = self.generation;
         let mut filtered = Q14::from_bits(sample);
         for pre in &mut self.pre {
             filtered = pre.process_sample(filtered);
@@ -519,28 +561,37 @@ impl PitchTracker {
                 }
             }
         } else {
-            let current = self.raw[self.write];
+            let current = self.raw_sample(self.write);
             let mut first = ring(self.write as i32 - self.base);
             let mut second = ring(self.write as i32 - self.base * 2);
             if first >= TRACKING_LAGS - 1 && second >= 2 * (TRACKING_LAGS - 1) {
                 // Contiguous windows let each lag update without a wrap of
                 // its indices.
+                let middle_range = first - (TRACKING_LAGS - 1)..=first;
+                let delayed_range = second - 2 * (TRACKING_LAGS - 1)..=second;
                 Self::track_contiguous(
                     current,
-                    self.raw[first - (TRACKING_LAGS - 1)..=first]
+                    self.generation,
+                    self.raw[middle_range.clone()]
                         .try_into()
                         .expect("a full tracking window"),
-                    self.raw[second - 2 * (TRACKING_LAGS - 1)..=second]
+                    self.raw_tags[middle_range]
+                        .try_into()
+                        .expect("the tags of the window"),
+                    self.raw[delayed_range.clone()]
                         .try_into()
                         .expect("79 tracking samples"),
+                    self.raw_tags[delayed_range]
+                        .try_into()
+                        .expect("79 sample tags"),
                     &mut self.tracking_energy,
                     &mut self.tracking_cross,
                 );
             } else {
                 for lag in 0..TRACKING_LAGS {
-                    let middle = self.raw[first];
+                    let middle = self.raw_sample(first);
                     first = if first == 0 { HISTORY - 1 } else { first - 1 };
-                    let delayed = self.raw[second];
+                    let delayed = self.raw_sample(second);
                     second = if second < 2 {
                         second + HISTORY - 2
                     } else {
@@ -568,8 +619,8 @@ impl PitchTracker {
                         best += 1;
                         self.tracking_energy.copy_within(0..TRACKING_LAGS - 1, 1);
                         self.tracking_cross.copy_within(0..TRACKING_LAGS - 1, 1);
-                        let first = self.raw[ring(self.write as i32 - self.base * 2)];
-                        let second = self.raw[ring(self.write as i32 - self.base * 2 - 1)];
+                        let first = self.raw_sample(ring(self.write as i32 - self.base * 2));
+                        let second = self.raw_sample(ring(self.write as i32 - self.base * 2 - 1));
                         self.tracking_energy[0] = self.tracking_energy[1]
                             .wrapping_sub(mul14(first, first).wrapping_add(mul14(second, second)));
                         self.tracking_cross[0] = self.cross_at(self.base);
@@ -579,8 +630,8 @@ impl PitchTracker {
                         self.tracking_energy.copy_within(1..TRACKING_LAGS, 0);
                         self.tracking_cross.copy_within(1..TRACKING_LAGS, 0);
                         let total = self.base + TRACKING_LAGS as i32 - 1;
-                        let first = self.raw[ring(self.write as i32 - total * 2 + 2)];
-                        let second = self.raw[ring(self.write as i32 - total * 2 + 1)];
+                        let first = self.raw_sample(ring(self.write as i32 - total * 2 + 2));
+                        let second = self.raw_sample(ring(self.write as i32 - total * 2 + 1));
                         self.tracking_energy[TRACKING_LAGS - 1] = self.tracking_energy
                             [TRACKING_LAGS - 2]
                             .wrapping_add(mul14(second, second).wrapping_add(mul14(first, first)));

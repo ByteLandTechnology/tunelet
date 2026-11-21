@@ -66,6 +66,8 @@ pub(crate) struct Alien {
     /// 192,000 stereo Q14 frames, which are allocated one time at
     /// construction.
     buffer: Vec<[Q14; 2]>,
+    /// One generation tag for each stereo frame in `buffer`.
+    tags: Vec<u32>,
     /// The current recording position. The position of the reverse reader
     /// comes from this cursor.
     read: usize,
@@ -74,6 +76,8 @@ pub(crate) struct Alien {
     /// The validated loop length. It is not more than half of the history
     /// capacity.
     loop_len: usize,
+    /// The active generation tag for `buffer`. It starts at one.
+    generation: u32,
 }
 impl Alien {
     /// Allocates a silent stereo ring from validated loop settings.
@@ -81,9 +85,11 @@ impl Alien {
         Self {
             config,
             buffer: vec![[Q14::default(); 2]; HISTORY_FRAMES],
+            tags: vec![0; HISTORY_FRAMES],
             read: 0,
             phase: 0,
             loop_len: config.loop_frames as usize,
+            generation: 1,
         }
     }
     /// Applies a validated configuration, keeps the recorded audio and clamps
@@ -100,10 +106,15 @@ impl Alien {
     pub(crate) fn loop_state(&self) -> (usize, usize) {
         (self.loop_len, self.phase)
     }
-    /// Clears the recorded audio and sets both cursors to zero, but keeps the
-    /// configured loop.
+    /// Invalidates the recorded audio and sets both cursors to zero, but keeps
+    /// the configured loop.
     pub(crate) fn reset(&mut self) {
-        self.buffer.fill([Q14::default(); 2]);
+        if self.generation == u32::MAX {
+            self.tags.fill(0);
+            self.generation = 1;
+        } else {
+            self.generation += 1;
+        }
         self.read = 0;
         self.phase = 0;
     }
@@ -114,6 +125,7 @@ impl Alien {
     /// validated loop limit keeps that subtraction in a single ring wrap.
     pub(crate) fn process_sample(&mut self, input: [Q14; 2]) -> [Q14; 2] {
         self.buffer[self.read] = input;
+        self.tags[self.read] = self.generation;
         let result = if self.config.enabled {
             let read = self.read + HISTORY_FRAMES - self.phase * 2;
             let read = if read >= HISTORY_FRAMES {
@@ -122,7 +134,11 @@ impl Alien {
                 read
             };
             let distance = self.phase.min(self.loop_len - self.phase);
-            let mut result = self.buffer[read];
+            let mut result = if self.tags[read] == self.generation {
+                self.buffer[read]
+            } else {
+                [Q14::ZERO; 2]
+            };
             if distance < FADE_FRAMES {
                 let gain: Q14 = Fixed::<0>::from_bits(distance as i32)
                     .div(Fixed::<0>::from_bits(FADE_FRAMES as i32));

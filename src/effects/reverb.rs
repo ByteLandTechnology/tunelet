@@ -422,9 +422,13 @@ struct DelayLine {
     /// Fixed-length storage that the preparation allocates. The values use
     /// the Q14 audio scale.
     buffer: Vec<Q14>,
+    /// One generation tag for each slot in `buffer`.
+    tags: Vec<u32>,
     /// The current frame position, always less than the buffer length. A
     /// reset does not change it.
     write: usize,
+    /// The active generation tag for `buffer`. It starts at one.
+    generation: u32,
 }
 impl DelayLine {
     /// Allocates a silent ring that is not empty. The caller supplies the
@@ -432,12 +436,19 @@ impl DelayLine {
     fn new(length: usize) -> Self {
         Self {
             buffer: vec![Q14::default(); length],
+            tags: vec![0; length],
             write: 0,
+            generation: 1,
         }
     }
-    /// Clears the samples and does not move the current write position.
+    /// Invalidates the samples and does not move the current write position.
     fn reset(&mut self) {
-        self.buffer.fill(Q14::default());
+        if self.generation == u32::MAX {
+            self.tags.fill(0);
+            self.generation = 1;
+        } else {
+            self.generation += 1;
+        }
     }
     /// Maps a delay to a storage index with a maximum of one wrap.
     ///
@@ -454,13 +465,19 @@ impl DelayLine {
     /// Reads a prepared delay offset and does not advance the ring.
     #[inline]
     fn get(&self, delay: usize) -> Q14 {
-        self.buffer[self.index(delay)]
+        let index = self.index(delay);
+        if self.tags[index] == self.generation {
+            self.buffer[index]
+        } else {
+            Q14::ZERO
+        }
     }
     /// Writes a value at a prepared delay offset and returns the value.
     #[inline]
     fn put(&mut self, value: Q14, delay: usize) -> Q14 {
         let index = self.index(delay);
         self.buffer[index] = value;
+        self.tags[index] = self.generation;
         value
     }
     /// Advances by one frame and clears the slot at the new current position.
@@ -470,6 +487,7 @@ impl DelayLine {
             self.write = 0;
         }
         self.buffer[self.write] = Q14::default();
+        self.tags[self.write] = self.generation;
     }
     /// Calculates one allpass section in place.
     ///

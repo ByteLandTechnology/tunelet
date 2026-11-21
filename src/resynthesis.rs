@@ -40,7 +40,7 @@ use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
 use crate::{Error, SampleRate};
-use history::prepare_history;
+pub(crate) use history::History;
 
 /// The method that resynthesis uses to render its voices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -369,10 +369,12 @@ pub(crate) struct Resynthesis {
     /// The pitch estimator at the full rate, with decimated acquisition.
     pitch: PitchTracker,
     /// The Q14 input history after Punch and Warm, before formant analysis.
-    raw: Box<[Q14; HISTORY]>,
+    raw: History<Q14>,
     /// The current frame. The raw, period, ratio and rendered histories use
     /// the same frame.
     write: usize,
+    /// The active generation tag for the ring histories. It starts at one.
+    generation: u32,
     /// The 128 Q14 samples of one cosine cycle, for harmonic modulation.
     cosine: [Q14; 128],
     /// The preallocated inverse and forward spectral models and the
@@ -386,23 +388,25 @@ pub(crate) struct Resynthesis {
     scale: CorrectionTable,
     /// The delayed source audio after the two prepared shift filters. If
     /// formants are enabled, the source is inverse-filtered.
-    filtered: Box<[Q14; HISTORY]>,
+    filtered: History<Q14>,
     /// The history of the rendered choir lead. All secondary choir voices
     /// read this history.
-    lead: Box<[Q14; HISTORY]>,
+    lead: History<Q14>,
     /// The Q6 tracked periods, aligned to the audio. The lead voice can
     /// replace a delayed entry with its resampled output period. This aligns
     /// the secondary voices.
-    periods: Box<[Q6; HISTORY]>,
+    periods: History<Q6>,
     /// The last usable Q6 tracker periods. The code keeps them through
     /// unvoiced gaps.
-    previous_periods: Box<[Q6; HISTORY]>,
+    previous_periods: History<Q6>,
     /// The Q14 ratios of the correction only, aligned to each recorded input
     /// frame.
-    ratios: Box<[Q14; HISTORY]>,
+    ratios: History<Q14>,
     /// The fixed memory for the analysis overlap. It gives the source a delay
     /// of 1,543 frames.
     overlap: [Q14; OVERLAP_FRAMES],
+    /// One generation tag for each slot in `overlap`.
+    overlap_tags: [u32; OVERLAP_FRAMES],
     /// The current slot in the overlap ring.
     overlap_index: usize,
     /// The configured integer frame offset of each voice. Harmony uses
@@ -491,8 +495,9 @@ impl Resynthesis {
             rate,
             config,
             pitch: PitchTracker::new(rate, config.pitch),
-            raw: prepare_history(Q14::ZERO),
+            raw: History::new(Q14::ZERO),
             write: 0,
+            generation: 1,
             cosine: {
                 let mut phase = 0.0_f64;
                 std::array::from_fn(|_| {
@@ -514,12 +519,13 @@ impl Resynthesis {
                 }
                 scale
             },
-            filtered: prepare_history(Q14::ZERO),
-            lead: prepare_history(Q14::ZERO),
-            periods: prepare_history(Q6::ZERO),
-            previous_periods: prepare_history(Q6::ZERO),
-            ratios: prepare_history(Q14::ONE),
+            filtered: History::new(Q14::ZERO),
+            lead: History::new(Q14::ZERO),
+            periods: History::new(Q6::ZERO),
+            previous_periods: History::new(Q6::ZERO),
+            ratios: History::new(Q14::ONE),
             overlap: [Q14::ZERO; OVERLAP_FRAMES],
+            overlap_tags: [0; OVERLAP_FRAMES],
             overlap_index: 0,
             delays: [0; 16],
             positions: [Q14::ZERO; 16],
@@ -551,7 +557,8 @@ impl Resynthesis {
         };
         result.configure_coefficients();
         result.configure_shift_filters();
-        result.reset();
+        result.create_delays();
+        result.old_position = result.positions[0];
         result
     }
 
@@ -678,9 +685,9 @@ impl Resynthesis {
         self.reset_audio();
     }
 
-    /// Clears the audio and period histories, the tracker, the formant
-    /// synthesis and the filter history. Then initializes the readers and
-    /// the correction again.
+    /// Invalidates the audio and period histories, resets the tracker, the
+    /// formant synthesis and the filter history, and initializes the readers
+    /// and the correction again.
     ///
     /// These items do not change:
     /// - The correction keyboard.
@@ -692,16 +699,21 @@ impl Resynthesis {
     /// - The harmony release envelopes and the last harmony gains.
     fn reset_audio(&mut self) {
         self.pitch.reset();
-        self.raw.fill(Q14::ZERO);
+        if self.generation == u32::MAX {
+            self.raw.clear_tags();
+            self.filtered.clear_tags();
+            self.lead.clear_tags();
+            self.periods.clear_tags();
+            self.previous_periods.clear_tags();
+            self.ratios.clear_tags();
+            self.overlap_tags.fill(0);
+            self.generation = 1;
+        } else {
+            self.generation += 1;
+        }
         self.write = 0;
         self.formant.reset();
         self.harmony.reset();
-        self.filtered.fill(Q14::ZERO);
-        self.lead.fill(Q14::ZERO);
-        self.periods.fill(Q6::ZERO);
-        self.previous_periods.fill(Q6::ZERO);
-        self.ratios.fill(Q14::ONE);
-        self.overlap.fill(Q14::ZERO);
         self.overlap_index = 0;
         self.previous_output = [Q14::ZERO; 2];
         for filter in &mut self.post {
@@ -760,7 +772,7 @@ impl Resynthesis {
     ///
     /// The analysis does not advance, and the correction does not change.
     pub(crate) fn estimate(&self) -> PitchEstimate {
-        let period = (self.periods[self.write].to_bits() as f64 / 64.0) as f32;
+        let period = (self.periods.get(self.write, self.generation).to_bits() as f64 / 64.0) as f32;
         self.config.pitch.report(PitchEstimate {
             period_samples: period,
             frequency_hz: if period > 0.0 {
@@ -926,12 +938,19 @@ impl Resynthesis {
     /// the current audio. If that is also unvoiced, it uses the last usable
     /// delayed period. The indices must be less than HISTORY.
     fn period_for(&self, delayed: usize, current: usize) -> (Q6, Q14) {
-        if self.periods[delayed] != Q6::ZERO {
-            (self.periods[delayed], self.ratios[delayed])
-        } else if self.periods[current] != Q6::ZERO {
-            (self.periods[current], self.ratios[current])
+        let delayed_period = self.periods.get(delayed, self.generation);
+        if delayed_period != Q6::ZERO {
+            (delayed_period, self.ratios.get(delayed, self.generation))
         } else {
-            (self.previous_periods[delayed], self.ratios[delayed])
+            let current_period = self.periods.get(current, self.generation);
+            if current_period != Q6::ZERO {
+                (current_period, self.ratios.get(current, self.generation))
+            } else {
+                (
+                    self.previous_periods.get(delayed, self.generation),
+                    self.ratios.get(delayed, self.generation),
+                )
+            }
         }
     }
 
@@ -997,13 +1016,14 @@ impl Resynthesis {
             ratio = Q14::ONE;
         }
         if ratio != Q14::ZERO {
-            self.periods[delay] = period.div(ratio);
+            self.periods.set(delay, period.div(ratio), self.generation);
         }
         self.old_position = self.old_position + ratio;
         let position = self.move_reader(0, ratio, period, self.delays[0], true);
-        let (mut value, center) = history::interpolation(&self.filtered, position);
+        let (mut value, center) = history::interpolation(&self.filtered, position, self.generation);
         if self.fade < Q14::ONE {
-            let (old, _) = history::interpolation(&self.filtered, self.old_position);
+            let (old, _) =
+                history::interpolation(&self.filtered, self.old_position, self.generation);
             value = value.mul(self.fade) + old.mul(Q14::ONE - self.fade);
             self.fade = (self.fade + FADE_STEP).min(Q14::ONE);
         }
@@ -1020,7 +1040,7 @@ impl Resynthesis {
             );
             self.previous_output[0] = value;
         }
-        self.lead[write] = value;
+        self.lead.set(write, value, self.generation);
         (value, ratio)
     }
 
@@ -1044,7 +1064,7 @@ impl Resynthesis {
         if self.write == HISTORY {
             self.write = 0;
         }
-        self.raw[self.write] = sample;
+        self.raw.set(self.write, sample, self.generation);
         let was_tracking = !self.pitch.is_detecting();
         let step = self.pitch.process_sample(sample.to_bits());
         let write = self.write;
@@ -1092,36 +1112,45 @@ impl Resynthesis {
                 self.drift_ratio[0] = Q14::ONE;
             }
         }
-        self.periods[write] = step.period;
-        self.previous_periods[write] = step.previous_period;
-        self.ratios[write] = self.correction;
+        self.periods.set(write, step.period, self.generation);
+        self.previous_periods
+            .set(write, step.previous_period, self.generation);
+        self.ratios.set(write, self.correction, self.generation);
         self.overlap_index += 1;
         if self.overlap_index == OVERLAP_FRAMES {
             self.overlap_index = 0;
         }
-        self.overlap[self.overlap_index] = if self.config.formant.enabled {
-            let previous = self.raw[ring(write as i32 - 1)];
+        let overlap_sample = if self.config.formant.enabled {
+            let previous = self.raw.get(ring(write as i32 - 1), self.generation);
             Q14::from_bits(self.formant.process_analysis(
                 sample.to_bits(),
                 previous.to_bits(),
-                self.periods.as_slice(),
+                &self.periods,
+                self.generation,
                 write,
                 step.previous_period.to_bits(),
             ))
         } else {
-            self.raw[ring(write as i32 - ANALYSIS_FRAMES as i32)]
+            self.raw
+                .get(ring(write as i32 - ANALYSIS_FRAMES as i32), self.generation)
         };
+        self.overlap[self.overlap_index] = overlap_sample;
+        self.overlap_tags[self.overlap_index] = self.generation;
         // The inverse analysis adds a delay of ANALYSIS_FRAMES. Read ahead by
         // the same number of frames in the overlap ring. Then the total delay
         // of the source is OVERLAP_FRAMES in the two formant modes.
         let overlap_read = (self.overlap_index + ANALYSIS_FRAMES) % OVERLAP_FRAMES;
-        let mut filtered = self.overlap[overlap_read];
+        let mut filtered = if self.overlap_tags[overlap_read] == self.generation {
+            self.overlap[overlap_read]
+        } else {
+            Q14::ZERO
+        };
         for filter in &mut self.post {
             filtered = filter.process_sample(filtered);
         }
-        self.filtered[write] = filtered;
+        self.filtered.set(write, filtered, self.generation);
         let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
-        let dry = self.raw[delayed];
+        let dry = self.raw.get(delayed, self.generation);
         let mut mix = [Q14::ZERO; 2];
         let mut final_ratio = Q14::ONE;
         if self.config.mode == MultiVoiceMode::Choir {
@@ -1161,8 +1190,9 @@ impl Resynthesis {
                             false,
                         );
                     }
-                    let values =
-                        positions.map(|position| history::interpolation(&self.lead, position).0);
+                    let generation = self.generation;
+                    let values = positions
+                        .map(|position| history::interpolation(&self.lead, position, generation).0);
                     // Keep the voice and channel order of each wrapping sum.
                     for (lane, value) in values.into_iter().enumerate() {
                         let current_voice = voice + lane;
@@ -1187,7 +1217,7 @@ impl Resynthesis {
                     final_ratio = ratio;
                     let position =
                         self.move_reader(voice, ratio, period, self.delays[voice], false);
-                    let (value, _) = history::interpolation(&self.lead, position);
+                    let (value, _) = history::interpolation(&self.lead, position, self.generation);
                     for (channel, sum) in mix.iter_mut().enumerate() {
                         *sum = *sum
                             + if self.config.stereo_output {
@@ -1233,7 +1263,8 @@ impl Resynthesis {
                 final_ratio = current;
                 self.voice_ratios[slot] = current;
                 let position = self.move_reader(slot, current, period, 0, false);
-                let (mut value, _) = history::interpolation(&self.filtered, position);
+                let (mut value, _) =
+                    history::interpolation(&self.filtered, position, self.generation);
                 if slot > 0 {
                     value = value.mul(self.harmony_gains[slot - 1]);
                 }
