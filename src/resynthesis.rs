@@ -452,14 +452,14 @@ impl VoiceBank {
     /// Updates the choir and harmony stereo pan gains of this bank.
     fn configure_pan(&mut self, choir_voices: u8, choir_spread_percent: f32, harmony_gain: f32) {
         self.choir_voices = choir_voices;
-        for voice in 0..choir_voices as usize {
+        for (voice, pan) in self.pan[..choir_voices as usize].iter_mut().enumerate() {
             if choir_voices > 1 {
                 let normalized = (voice as f64 + voice as f64) / (choir_voices as f64 - 1.0) - 1.0;
                 let angle = 0.785398163565
                     - (choir_spread_percent as f64 * 0.785398163565 * 0.01) * normalized;
-                self.pan[voice] = [Q14::from_f64(angle.cos()), Q14::from_f64(angle.sin())];
+                *pan = [Q14::from_f64(angle.cos()), Q14::from_f64(angle.sin())];
             } else {
-                self.pan[voice] = [Q14::ONE; 2];
+                *pan = [Q14::ONE; 2];
             }
         }
         self.harmony_gain = Q14::from_f64(harmony_gain as f64);
@@ -479,9 +479,11 @@ impl VoiceBank {
     /// Moves all 16 reader coordinates back by `HISTORY` when `write` wraps.
     fn wrap_origin(&mut self) {
         let shift = position_of(HISTORY as i32);
-        for voice in 0..16 {
-            self.positions[voice] = self.positions[voice] - shift;
-            self.old_positions[voice] = self.old_positions[voice] - shift;
+        for position in &mut self.positions {
+            *position = *position - shift;
+        }
+        for position in &mut self.old_positions {
+            *position = *position - shift;
         }
     }
 
@@ -882,11 +884,12 @@ impl Resynthesis {
             }
             self.bank_fade = Q14::ZERO;
         } else if old.choir_voices < config.choir_voices {
-            for voice in old.choir_voices as usize..config.choir_voices as usize {
-                self.active.positions[voice] = self.active.positions[0];
-                self.active.old_positions[voice] = self.active.positions[0];
-                self.active.fades[voice] = Q14::ONE;
-            }
+            let lead = self.active.positions[0];
+            let start = old.choir_voices as usize;
+            let end = config.choir_voices as usize;
+            self.active.positions[start..end].fill(lead);
+            self.active.old_positions[start..end].fill(lead);
+            self.active.fades[start..end].fill(Q14::ONE);
         }
         self.configure_coefficients();
     }

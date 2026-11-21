@@ -590,30 +590,23 @@ impl Reverb {
             ]
         };
         let mut wet_sum = [Q14::ZERO; 2];
-        for index in 0..2 {
-            if !self.banks[index].active {
+        for (index, bank) in self.banks.iter_mut().enumerate() {
+            if !bank.active {
                 continue;
             }
-            let bank_input = if self.config.enabled
-                && index == self.active_bank
-                && self.banks[index].decay_remaining == 0
-            {
-                frame
-            } else {
-                [Q14::ZERO; 2]
-            };
-            let wet = self.banks[index].process_wet(
-                bank_input,
-                &self.taps,
-                self.binaural_offset,
-                self.scratch,
-            );
+            let bank_input =
+                if self.config.enabled && index == self.active_bank && bank.decay_remaining == 0 {
+                    frame
+                } else {
+                    [Q14::ZERO; 2]
+                };
+            let wet = bank.process_wet(bank_input, &self.taps, self.binaural_offset, self.scratch);
             wet_sum[0] = wet_sum[0] + wet[0];
             wet_sum[1] = wet_sum[1] + wet[1];
-            if self.banks[index].decay_remaining > 0 {
-                self.banks[index].decay_remaining -= 1;
-                if self.banks[index].decay_remaining == 0 {
-                    self.banks[index].clear();
+            if bank.decay_remaining > 0 {
+                bank.decay_remaining -= 1;
+                if bank.decay_remaining == 0 {
+                    bank.clear();
                 }
             }
         }
