@@ -21,11 +21,11 @@
 //! - Each object must contain all required fields.
 //! - The optional harmony `voices` field defaults to 4.
 //!
-//! [`default_config`] gives a configuration to start from. Control events use
-//! `{ type, value }`, and the reset control has no `value`. MIDI messages use
-//! `{ type, channel, note, velocity }`, with the fields that apply to the
-//! selected variant. The TypeScript declarations come from the same Rust types
-//! that validation uses.
+//! [`default_config`] and [`preset_config`] give configurations to start from.
+//! Control events use `{ type, value }`, and the reset control has no
+//! `value`. MIDI messages use `{ type, channel, note, velocity }`, with the
+//! fields that apply to the selected variant. The TypeScript declarations come
+//! from the same Rust types that validation uses.
 //!
 //! The class allocates the PCM storage at construction and uses it again for
 //! each block. These operations can allocate:
@@ -42,7 +42,8 @@
 //! `free()` method.
 
 use crate::{
-    Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
+    CorrectionScale, Error, Feedback, NoteMask, PitchClass, PrepareConfig, Preset, Processor,
+    ProcessorConfig, SampleRate, Telemetry, TimedEvent,
 };
 use js_sys::{Float32Array, Int16Array};
 use serde::{Deserialize, Serialize};
@@ -74,6 +75,63 @@ pub struct BlockEvents(Vec<TimedEvent>);
 #[wasm_bindgen(js_name = defaultConfig)]
 pub fn default_config() -> Result<Ts<ProcessorConfig>, JsError> {
     Ok(ProcessorConfig::default().into_ts()?)
+}
+
+/// Returns a complete, independent preset configuration for JavaScript.
+///
+/// Change its fields and give it to `Tunelet` or to `setConfig`.
+/// [`Preset::LushChoir`] sets `outputGain` to 0.35 so that the eight choir
+/// voices do not overload the output.
+///
+/// # Errors
+///
+/// If `preset` is not a valid preset name or the conversion fails, this
+/// function returns a JavaScript `Error`.
+#[wasm_bindgen(js_name = presetConfig)]
+pub fn preset_config(preset: Ts<Preset>) -> Result<Ts<ProcessorConfig>, JsError> {
+    Ok(ProcessorConfig::from_preset(preset.to_rust()?).into_ts()?)
+}
+
+/// Returns the twelve-note correction mask of `scale` with `key` as the tonic.
+///
+/// Give the result to `config.resynthesis.correction.notes`.
+///
+/// # Errors
+///
+/// If `key` or `scale` is not valid or the conversion fails, this function
+/// returns a JavaScript `Error`.
+#[wasm_bindgen(js_name = noteMaskFromKeyScale)]
+pub fn note_mask_from_key_scale(
+    key: Ts<PitchClass>,
+    scale: Ts<CorrectionScale>,
+) -> Result<Ts<NoteMask>, JsError> {
+    Ok(NoteMask::from_key_scale(key.to_rust()?, scale.to_rust()?).into_ts()?)
+}
+
+/// Converts a pitch shift in semitones, -24..=24, to a linear pitch ratio in
+/// 0.25..=4.
+///
+/// Give the result to `config.resynthesis.pitchRatio`.
+///
+/// # Errors
+///
+/// If `semitones` is not finite or is outside -24..=24, this function returns
+/// a JavaScript `Error`.
+#[wasm_bindgen(js_name = semitonesToRatio)]
+pub fn semitones_to_ratio(semitones: f32) -> Result<f32, JsError> {
+    Ok(crate::semitones_to_ratio(semitones)?)
+}
+
+/// Converts a linear pitch ratio, 0.25..=4, to a pitch shift in semitones in
+/// -24..=24.
+///
+/// # Errors
+///
+/// If `ratio` is not finite or is outside 0.25..=4, this function returns a
+/// JavaScript `Error`.
+#[wasm_bindgen(js_name = ratioToSemitones)]
+pub fn ratio_to_semitones(ratio: f32) -> Result<f32, JsError> {
+    Ok(crate::ratio_to_semitones(ratio)?)
 }
 
 /// A stateful PCM processor that JavaScript uses as the `Tunelet` class.

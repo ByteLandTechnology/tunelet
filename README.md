@@ -136,11 +136,18 @@ fn main() -> Result<(), tunelet::Error> {
 ### TypeScript
 
 ```ts
-import { loadTunelet, Tunelet, defaultConfig } from "tunelet";
+import {
+  loadTunelet,
+  Tunelet,
+  defaultConfig,
+  noteMaskFromKeyScale,
+  semitonesToRatio,
+} from "tunelet";
 
 await loadTunelet();
 const config = defaultConfig();
-config.resynthesis.pitchRatio = 1.25;
+config.resynthesis.correction.notes = noteMaskFromKeyScale("a", "minor");
+config.resynthesis.pitchRatio = semitonesToRatio(4);
 const processor = new Tunelet(48000, 1024, config);
 
 const input = new Int16Array(1024);
@@ -203,9 +210,9 @@ To prepare a processor, do these steps:
    limit.
 3. Create a `Processor` with that preparation and a `ProcessorConfig`.
 
-Configuration structures implement `Default`. To select voices and effects,
-edit their fields. To change the sample rate or the block limit, make a new
-processor.
+Configuration structures implement `Default`, and `ProcessorConfig::from_preset`
+returns vocal presets. To select voices and effects, edit their fields. To
+change the sample rate or the block limit, make a new processor.
 
 Select the process function for your output layout:
 
@@ -363,7 +370,7 @@ these items:
 
 Both environments use the same imports and the same initialization call. An
 import of the package does not load the binary. Call `loadTunelet()` before
-you use `Tunelet` or `defaultConfig()`.
+you use `Tunelet`, `defaultConfig()` or the other helper functions.
 
 - Node.js reads the packaged binary from a file URL relative to the module.
 - Browsers fetch the served Wasm asset.
@@ -406,19 +413,20 @@ page that opens the JavaScript.
 
 ### TypeScript API
 
-| Operation                         | TypeScript API                                           |
-| --------------------------------- | -------------------------------------------------------- |
-| Shared initialization             | `loadTunelet(source?)`                                   |
-| Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
-| In-place mono downmix             | `processMono(audio, events?)`                            |
-| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
-| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
-| Feedback                          | `feedback()`, `takeFeedback()`                           |
-| Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
-| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`         |
-| Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)` |
-| Configured tail budget            | `tailFrames()`                                           |
-| Reset or release memory           | `reset()`, `free()`                                      |
+| Operation                         | TypeScript API                                                                               |
+| --------------------------------- | -------------------------------------------------------------------------------------------- |
+| Shared initialization             | `loadTunelet(source?)`                                                                       |
+| Mono PCM to planar stereo         | `process(input, left, right, events?)`                                                       |
+| In-place mono downmix             | `processMono(audio, events?)`                                                                |
+| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`, `presetConfig(preset)`                   |
+| Scales and pitch ratios           | `noteMaskFromKeyScale(key, scale)`, `semitonesToRatio(semitones)`, `ratioToSemitones(ratio)` |
+| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`                                              |
+| Feedback                          | `feedback()`, `takeFeedback()`                                                               |
+| Telemetry                         | `telemetry()`, `takeTelemetry()`                                                             |
+| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`                                             |
+| Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)`                                     |
+| Configured tail budget            | `tailFrames()`                                                                               |
+| Reset or release memory           | `reset()`, `free()`                                                                          |
 
 ### Audio buffers
 
@@ -439,7 +447,7 @@ audio device.
 Configuration objects contain all required fields. They use camelCase names
 and show enums as string literals. To change the configuration, do these steps:
 
-1. Start from `defaultConfig()` or `config()`.
+1. Start from `defaultConfig()`, `presetConfig(preset)` or `config()`.
 2. Edit the necessary fields.
 3. Call `setConfig()`.
 

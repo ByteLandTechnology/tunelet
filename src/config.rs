@@ -2,11 +2,13 @@
 
 use crate::effects::alien::AlienConfig;
 use crate::effects::punch::PunchConfig;
-use crate::effects::reverb::ReverbConfig;
+use crate::effects::reverb::{ReverbConfig, ReverbMode};
 use crate::effects::warm::WarmConfig;
 use crate::error::{check_range, ConfigProblem};
+use crate::harmony::{HarmonyScale, HarmonySource};
+use crate::resynthesis::{MultiVoiceMode, ResynthesisConfig};
+use crate::scale::{CorrectionScale, NoteMask, PitchClass};
 use crate::Error;
-use crate::ResynthesisConfig;
 use std::num::NonZeroUsize;
 
 /// The sample rate of the input and the output.
@@ -183,7 +185,130 @@ impl Default for ProcessorConfig {
     }
 }
 
+/// A preset vocal chain for [`ProcessorConfig::from_preset`].
+///
+/// Each preset returns a complete [`ProcessorConfig`] that passes
+/// [`ProcessorConfig::validate`]. You can edit any field before you give the
+/// configuration to [`crate::Processor::new`] or
+/// [`crate::Processor::set_config`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(rename_all = "camelCase")
+)]
+pub enum Preset {
+    /// Gentle chromatic correction (`retune_ms` = 35), subtle Warm drive and a
+    /// `SmallRoom` reverb. This is the default preset.
+    #[default]
+    NaturalTune,
+    /// Instant chromatic correction (`retune_ms` = 0), Punch transient emphasis,
+    /// active formants with light aspiration and a `MediumHall` reverb.
+    HardPopTune,
+    /// Eight stereo choir voices with Warm saturation, a `LargeHall` reverb and
+    /// an output gain of 0.35 to prevent overload.
+    LushChoir,
+    /// Stereo smart-interval harmony in C major (a third and a fifth above the
+    /// lead), C major correction and a `MediumHall` reverb.
+    DiatonicHarmony,
+    /// Punch and Warm dynamics, disabled pitch correction and subtle formant
+    /// depth with a 0.25 dry mix for speech.
+    WarmBroadcast,
+}
+
 impl ProcessorConfig {
+    /// Returns a validated configuration for `preset`.
+    ///
+    /// Edit the returned copy to set a key, a scale or stage levels before you
+    /// apply it. [`Preset::LushChoir`] sets `output_gain` to 0.35 so that the
+    /// sum of the eight choir voices does not overload the output.
+    pub fn from_preset(preset: Preset) -> Self {
+        let mut config = Self::default();
+        match preset {
+            Preset::NaturalTune => {
+                config.warm.enabled = true;
+                config.warm.drive_db = 1.5;
+                config.resynthesis.correction.retune_ms = 35.0;
+                config.reverb.enabled = true;
+                config.reverb.mode = ReverbMode::SmallRoom;
+                config.reverb.mix = 0.12;
+                config.reverb.decay = 0.35;
+                config.reverb.brightness_hz = 6000.0;
+            }
+            Preset::HardPopTune => {
+                config.punch.enabled = true;
+                config.punch.gain_db = 2.0;
+                config.punch.impact = 0.6;
+                config.punch.ceiling_db = -1.5;
+                config.punch.attack_ms = 5.0;
+                config.resynthesis.correction.retune_ms = 0.0;
+                config.resynthesis.formant.enabled = true;
+                config.resynthesis.formant.aspiration_mix = 0.05;
+                config.resynthesis.formant.aspiration_cutoff_hz = 5000.0;
+                config.reverb.enabled = true;
+                config.reverb.mode = ReverbMode::MediumHall;
+                config.reverb.mix = 0.15;
+                config.reverb.diffusion = 0.6;
+                config.reverb.decay = 0.45;
+                config.reverb.brightness_hz = 7000.0;
+            }
+            Preset::LushChoir => {
+                config.warm.enabled = true;
+                config.warm.drive_db = 2.0;
+                config.resynthesis.correction.retune_ms = 25.0;
+                config.resynthesis.mode = MultiVoiceMode::Choir;
+                config.resynthesis.choir_voices = 8;
+                config.resynthesis.choir_detune = 55.0;
+                config.resynthesis.choir_delay = 110.0;
+                config.resynthesis.choir_spread_percent = 100.0;
+                config.resynthesis.stereo_output = true;
+                config.reverb.enabled = true;
+                config.reverb.mode = ReverbMode::LargeHall;
+                config.reverb.mix = 0.3;
+                config.reverb.diffusion = 0.7;
+                config.reverb.decay = 0.65;
+                config.reverb.brightness_hz = 5000.0;
+                config.output_gain = 0.35;
+            }
+            Preset::DiatonicHarmony => {
+                config.resynthesis.correction.notes =
+                    NoteMask::from_key_scale(PitchClass::C, CorrectionScale::Major);
+                config.resynthesis.correction.retune_ms = 20.0;
+                config.resynthesis.mode = MultiVoiceMode::Harmony;
+                config.resynthesis.stereo_output = true;
+                config.resynthesis.harmony_gain = 0.4;
+                config.resynthesis.harmony.source = HarmonySource::SmartInterval;
+                config.resynthesis.harmony.key = PitchClass::C;
+                config.resynthesis.harmony.scale = HarmonyScale::Major;
+                config.resynthesis.harmony.diatonic_intervals = [2, 4, -2, 0];
+                config.resynthesis.harmony.portamento_ms = 25.0;
+                config.resynthesis.harmony.voices = 2;
+                config.reverb.enabled = true;
+                config.reverb.mode = ReverbMode::MediumHall;
+                config.reverb.mix = 0.18;
+                config.reverb.decay = 0.5;
+                config.reverb.brightness_hz = 5500.0;
+                config.output_gain = 0.75;
+            }
+            Preset::WarmBroadcast => {
+                config.punch.enabled = true;
+                config.punch.gain_db = 3.0;
+                config.punch.impact = 0.4;
+                config.punch.ceiling_db = -1.5;
+                config.punch.attack_ms = 12.0;
+                config.warm.enabled = true;
+                config.warm.drive_db = 3.5;
+                config.resynthesis.correction.enabled = false;
+                config.resynthesis.formant.enabled = true;
+                config.resynthesis.formant.width = 1.05;
+                config.resynthesis.formant.stretch = 1.04;
+                config.resynthesis.dry_mix = 0.25;
+                config.output_gain = 0.9;
+            }
+        }
+        config
+    }
+
     /// Checks all stages and the final gain, and does not change state.
     ///
     /// The validation uses the signal order: Punch, Warm, resynthesis, Alien,
@@ -203,6 +328,36 @@ impl ProcessorConfig {
         self.reverb.validate()?;
         validate_output_gain(self.output_gain)
     }
+}
+
+/// Converts a pitch shift in semitones, -24..=24, to a linear pitch ratio in
+/// 0.25..=4.
+///
+/// Zero semitones give a ratio of 1. Twelve semitones give 2, and -12
+/// semitones give 0.5. Give the result to [`ResynthesisConfig::pitch_ratio`].
+///
+/// # Errors
+///
+/// If `semitones` is not finite or is outside -24..=24, this function returns
+/// [`Error::InvalidConfig`] with the field `semitones`.
+pub fn semitones_to_ratio(semitones: f32) -> Result<f32, Error> {
+    check_range("semitones", semitones, -24.0, 24.0)?;
+    Ok((f64::from(semitones) / 12.0).exp2() as f32)
+}
+
+/// Converts a linear pitch ratio, 0.25..=4, to a pitch shift in semitones in
+/// -24..=24.
+///
+/// A ratio of 1 gives 0 semitones. A ratio of 2 gives 12 semitones, and a
+/// ratio of 0.5 gives -12 semitones.
+///
+/// # Errors
+///
+/// If `ratio` is not finite or is outside 0.25..=4, this function returns
+/// [`Error::InvalidConfig`] with the field `ratio`.
+pub fn ratio_to_semitones(ratio: f32) -> Result<f32, Error> {
+    check_range("ratio", ratio, 0.25, 4.0)?;
+    Ok((12.0 * f64::from(ratio).log2()) as f32)
 }
 
 /// Checks the output gain range.
