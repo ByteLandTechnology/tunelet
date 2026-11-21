@@ -25,7 +25,7 @@
 //! to one of these orders changes the rendered samples:
 //! - The order of the reader updates.
 //! - The order in which stages read random values.
-//! - The order of the wrapping arithmetic.
+//! - The order of the fixed-point arithmetic.
 
 mod history;
 
@@ -35,7 +35,7 @@ use crate::formant::{Formant, FormantConfig, ANALYSIS_FRAMES};
 use crate::harmony::{HarmonyConfig, HarmonyState, HARMONY_VOICES};
 use crate::midi::MidiEvent;
 use crate::numeric::fixed::{Q12, Q14, Q6, Q8};
-use crate::numeric::{ring, NumericContext, HISTORY};
+use crate::numeric::{clamp_i32, ring, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
@@ -223,11 +223,11 @@ pub struct ResynthesisConfig {
     /// Validation applies to these controls, and they can receive MIDI, also
     /// while Choir is selected.
     pub harmony: HarmonyConfig,
-    /// The pan gain of the harmony voices, 0..=1. The default is 0.5.
+    /// The linear gain of the four harmony voices, 0..=1. The default is 0.5.
     ///
-    /// The code applies this gain only if `stereo_output` is `true`. The
-    /// harmony path without pan does not use this control. It does not scale
-    /// the lead voice.
+    /// If `stereo_output` is `true`, the stereo pan gains include this gain.
+    /// If `stereo_output` is `false`, this gain scales each harmony voice
+    /// directly. It does not scale the lead voice.
     pub harmony_gain: f32,
     /// The modulation depth, 0..=24, without a unit. The default is 0 (off).
     ///
@@ -334,7 +334,7 @@ pub(crate) fn validate_choir_spread_percent(choir_spread_percent: f32) -> Result
     )
 }
 
-/// Checks the range of the harmony pan gain.
+/// Checks the range of the linear gain of the harmony voices.
 pub(crate) fn validate_harmony_gain(harmony_gain: f32) -> Result<(), Error> {
     check_range("resynthesis.harmony_gain", harmony_gain, 0.0, 1.0)
 }
@@ -462,6 +462,8 @@ pub(crate) struct Resynthesis {
     /// The Q14 left and right gains of the choir voices. The code reads them
     /// only if the stereo pan is enabled.
     pan: [[Q14; 2]; 16],
+    /// If stereo pan is off, the Q14 linear gain of the harmony voices.
+    harmony_gain: Q14,
     /// The Q14 pan gains of the harmony voices. They include the configured
     /// harmony level.
     harmony_pan: [[Q14; 2]; HARMONY_VOICES],
@@ -569,6 +571,7 @@ impl Resynthesis {
             drift: [Q14::ZERO; 16],
             drift_ratio: [Q14::ONE; 16],
             pan: [[Q14::ONE; 2]; 16],
+            harmony_gain: Q14::ZERO,
             harmony_pan: [[Q14::ZERO; 2]; HARMONY_VOICES],
             harmony_ratios: [Q14::ONE; HARMONY_VOICES],
             harmony_gains: [Q12::ZERO; HARMONY_VOICES],
@@ -648,11 +651,13 @@ impl Resynthesis {
         }
     }
 
-    /// Calculates the stereo pan gains for the harmony voices unconditionally.
+    /// Quantizes the harmony gain and calculates the stereo pan gains for the
+    /// harmony voices unconditionally.
     ///
-    /// The harmony level is part of the stereo pan gains. Thus, the path
-    /// without pan never applies that control.
-    fn configure_harmony_pan(&mut self) {
+    /// The stereo pan gains include the harmony gain. The mono harmony path
+    /// uses a separate Q14 gain.
+    fn configure_harmony_gain(&mut self) {
+        self.harmony_gain = Q14::from_f64(self.config.harmony_gain as f64);
         for (voice, fraction) in [0.3333333333333333, 0.6666666666666666, 0.0, 1.0]
             .into_iter()
             .enumerate()
@@ -677,7 +682,7 @@ impl Resynthesis {
         self.configure_correction_decay();
         self.configure_choir_drift();
         self.configure_choir_pan();
-        self.configure_harmony_pan();
+        self.configure_harmony_gain();
     }
 
     /// Prepares two low-pass sections if the global shift is upward. If not,
@@ -759,7 +764,7 @@ impl Resynthesis {
             self.configure_choir_drift();
         }
         if old.harmony_gain != config.harmony_gain {
-            self.configure_harmony_pan();
+            self.configure_harmony_gain();
         }
         if old.harmonic_modulation != config.harmonic_modulation {
             self.configure_harmonic_modulation();
@@ -905,13 +910,13 @@ impl Resynthesis {
         self.harmony.set_voices(voices);
     }
 
-    /// Stores the harmony pan gain. If the value changed, updates the harmony
-    /// pan gains.
+    /// Stores the harmony gain. If the value changed, updates the mono gain and
+    /// the stereo pan gains.
     pub(crate) fn set_harmony_gain(&mut self, harmony_gain: f32) {
         let changed = self.config.harmony_gain != harmony_gain;
         self.config.harmony_gain = harmony_gain;
         if changed {
-            self.configure_harmony_pan();
+            self.configure_harmony_gain();
         }
     }
 
@@ -1127,8 +1132,7 @@ impl Resynthesis {
     ///
     /// If correction is disabled or the active table is empty, the ratio moves
     /// toward 1.0. If the target selection starts again and the shifted
-    /// period is not positive, the ratio becomes 1.0 immediately. A
-    /// multiplication by fixed-point 1.0 still wraps. Do not remove it.
+    /// period is not positive, the ratio becomes 1.0 immediately.
     fn update_correction(&mut self, period: Q6) {
         let mut target_ratio = Q14::ONE;
         if self.config.correction.enabled && self.scale.count != 0 {
@@ -1159,8 +1163,7 @@ impl Resynthesis {
             } else {
                 period >> (-self.octave) as u32
             });
-            // The comparisons multiply by 1.0 to keep the wrap of the product.
-            while table_period(self.scale_index + 1).mul::<14, 6>(Q14::ONE) < target {
+            while table_period(self.scale_index + 1) < target {
                 self.scale_index += 1;
                 if self.scale_index == count {
                     self.scale_index = 0;
@@ -1168,7 +1171,7 @@ impl Resynthesis {
                     self.octave -= 1;
                 }
             }
-            while target.mul::<14, 6>(Q14::ONE) < table_period(self.scale_index) {
+            while target < table_period(self.scale_index) {
                 if self.scale_index == 0 {
                     self.scale_index = count - 1;
                     target = target << 1;
@@ -1428,7 +1431,7 @@ impl Resynthesis {
                     }
                     let values =
                         positions.map(|position| history::interpolation(&self.lead, position).0);
-                    // Keep the voice and channel order of each wrapping sum.
+                    // Keep the voice and channel order of each sum.
                     for (lane, value) in values.into_iter().enumerate() {
                         let current_voice = voice + lane;
                         for (channel, sum) in mix.iter_mut().enumerate() {
@@ -1462,10 +1465,6 @@ impl Resynthesis {
                             };
                     }
                 }
-            }
-            // The multiplication by 1.0 keeps the wrap of the product.
-            for sum in &mut mix {
-                *sum = Q14::ONE.mul(*sum);
             }
         } else {
             let (period, ratio) = self.period_for(delayed, write);
@@ -1501,6 +1500,9 @@ impl Resynthesis {
                 let (mut value, _) = history::interpolation(&self.filtered, position);
                 if slot > 0 {
                     value = value.mul(self.harmony_gains[slot - 1]);
+                    if !self.config.stereo_output {
+                        value = value.mul(self.harmony_gain);
+                    }
                 }
                 for (channel, sum) in mix.iter_mut().enumerate() {
                     *sum = *sum
@@ -1531,11 +1533,10 @@ impl Resynthesis {
             if self.current_output_period != Q6::ZERO {
                 // The phase advances by depth x 4 x ratio / period, in Q14
                 // cycles.
-                let step = self
-                    .modulation
-                    .wrapping_mul(4)
-                    .wrapping_mul(final_ratio.to_bits())
-                    .wrapping_div(self.current_output_period.to_bits());
+                let step = clamp_i32(
+                    (i64::from(self.modulation) * 4 * i64::from(final_ratio.to_bits()))
+                        / i64::from(self.current_output_period.to_bits()),
+                );
                 self.modulation_phase = self.modulation_phase + Q14::from_bits(step);
                 if self.modulation_phase > Q14::ONE {
                     self.modulation_phase = self.modulation_phase - Q14::ONE;
@@ -1560,11 +1561,14 @@ impl Resynthesis {
         }
         // The dry branch is the delayed raw input. It bypasses the shift
         // filters, the voice readers, the formant stages and the harmonic
-        // modulation. Keep the two products in Q22. Rescale their wrapping sum
+        // modulation. Calculate the Q22 blend in `i64`, then shift and clamp
         // to Q14 one time only.
-        let wet = Q8::ONE - self.dry_mix;
+        let dry_mix = i64::from(self.dry_mix.to_bits());
+        let wet = i64::from((Q8::ONE - self.dry_mix).to_bits());
+        let dry = i64::from(dry.to_bits());
         for sum in &mut mix {
-            *sum = (dry.mul::<8, 22>(self.dry_mix) + sum.mul::<8, 22>(wet)).rescale();
+            let blended = (dry * dry_mix + i64::from(sum.to_bits()) * wet) >> 8;
+            *sum = Q14::from_bits(clamp_i32(blended));
         }
         mix
     }
