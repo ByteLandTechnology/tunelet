@@ -1,6 +1,7 @@
 /**
- * This script packs the npm archive, checks its eight files, runs
- * `loadTunelet()` and checks the TypeScript declarations.
+ * This script builds stale outputs, packs the npm archive without
+ * lifecycle scripts, checks its eight files, runs `loadTunelet()` and
+ * checks the TypeScript declarations.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -8,6 +9,21 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+const BUILD_INPUT_FILES = [
+  "Cargo.toml",
+  "Cargo.lock",
+  "package.json",
+  "tsconfig.json",
+];
+
+const BUILD_OUTPUT_FILES = [
+  "dist/index.d.ts",
+  "dist/index.js",
+  "pkg/tunelet.d.ts",
+  "pkg/tunelet.js",
+  "pkg/tunelet_bg.wasm",
+];
 
 const EXPECTED_ARCHIVE_PATHS = [
   "package/LICENSE",
@@ -43,15 +59,14 @@ function readPackageName() {
   return packageName;
 }
 
-/** Run `npm pack` without a shell and return the relative archive path. */
-function packArchive(packDir) {
+/** Run an npm command without a shell. */
+function runNpm(args) {
   const npmExecPath = process.env.npm_execpath;
   if (npmExecPath) {
-    execFileSync(
-      process.execPath,
-      [npmExecPath, "pack", "--pack-destination", packDir],
-      { cwd: repoRoot, stdio: "inherit" },
-    );
+    execFileSync(process.execPath, [npmExecPath, ...args], {
+      cwd: repoRoot,
+      stdio: "inherit",
+    });
   } else if (process.platform === "win32") {
     const npmCliPath = path.join(
       path.dirname(process.execPath),
@@ -63,17 +78,67 @@ function packArchive(packDir) {
     if (!fs.existsSync(npmCliPath)) {
       throw new Error(`npm-cli.js was not found at ${npmCliPath}`);
     }
-    execFileSync(
-      process.execPath,
-      [npmCliPath, "pack", "--pack-destination", packDir],
-      { cwd: repoRoot, stdio: "inherit" },
-    );
+    execFileSync(process.execPath, [npmCliPath, ...args], {
+      cwd: repoRoot,
+      stdio: "inherit",
+    });
   } else {
-    execFileSync("npm", ["pack", "--pack-destination", packDir], {
+    execFileSync("npm", args, {
       cwd: repoRoot,
       stdio: "inherit",
     });
   }
+}
+
+/** Find the newest modification timestamp in a file or directory tree. */
+function newestMtimeNs(targetPath) {
+  const stat = fs.statSync(targetPath, { bigint: true });
+  let newest = stat.mtimeNs;
+  if (stat.isDirectory()) {
+    for (const entry of fs.readdirSync(targetPath)) {
+      const childMtime = newestMtimeNs(path.join(targetPath, entry));
+      if (childMtime > newest) {
+        newest = childMtime;
+      }
+    }
+  }
+  return newest;
+}
+
+/** Check whether `dist/` or `pkg/` is absent or older than the inputs. */
+function outputsNeedBuild() {
+  let oldestOutputMtimeNs = null;
+  for (const relativePath of BUILD_OUTPUT_FILES) {
+    const fullPath = path.join(repoRoot, relativePath);
+    if (!fs.existsSync(fullPath)) {
+      return true;
+    }
+    const stat = fs.statSync(fullPath, { bigint: true });
+    if (!stat.isFile() || stat.size === 0n) {
+      return true;
+    }
+    if (oldestOutputMtimeNs === null || stat.mtimeNs < oldestOutputMtimeNs) {
+      oldestOutputMtimeNs = stat.mtimeNs;
+    }
+  }
+
+  let newestInputMtimeNs = newestMtimeNs(path.join(repoRoot, "src"));
+  for (const relativePath of BUILD_INPUT_FILES) {
+    const inputMtimeNs = newestMtimeNs(path.join(repoRoot, relativePath));
+    if (inputMtimeNs > newestInputMtimeNs) {
+      newestInputMtimeNs = inputMtimeNs;
+    }
+  }
+
+  return oldestOutputMtimeNs < newestInputMtimeNs;
+}
+
+/** Build stale outputs, pack the archive without scripts and return its path. */
+function packArchive(packDir) {
+  if (outputsNeedBuild()) {
+    runNpm(["run", "build"]);
+  }
+  runNpm(["pack", "--ignore-scripts", "--pack-destination", packDir]);
 
   const archives = fs
     .readdirSync(packDir)

@@ -96,14 +96,18 @@ cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
 rustup target add wasm32-unknown-unknown
-cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
+cargo clippy --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --release --no-deps --target wasm32-unknown-unknown --features wasm
 ```
 
 If you change the Wasm or TypeScript code, also run these commands.
-`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
-`npm run build` compiles `src/wasm.rs` and `src/index.ts`.
-`npm run verify:pack` runs `npm run build` and checks the archives:
+`npm run check:wasm` runs Clippy and rustdoc in release mode for
+`wasm32-unknown-unknown`. `npm run build` compiles `src/wasm.rs` and
+`src/index.ts`. `npm run verify:pack` checks the timestamps of `dist/`
+and `pkg/` against `src/`, `Cargo.toml`, `Cargo.lock`, `package.json`
+and `tsconfig.json`. If an output is absent or stale, it runs
+`npm run build`. Then it runs `npm pack --ignore-scripts` and checks
+the archive:
 
 ```sh
 npm ci
