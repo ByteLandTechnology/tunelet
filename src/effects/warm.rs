@@ -70,6 +70,8 @@ pub(crate) struct Warm {
     /// The Q8 normalization gain. The stage divides by it again after the
     /// nonlinear curve.
     compression: Q8,
+    /// The 40-bit reciprocal of `compression`, `ceil(2^40 / compression)`.
+    compression_recip: u64,
     /// The Q14 envelope coefficient for a 200 ms half-life at the window
     /// cadence.
     smooth: Q14,
@@ -95,6 +97,7 @@ impl Warm {
             window_peak: Q14::default(),
             counter: 0,
             compression: Q8::ONE,
+            compression_recip: (1u64 << 40).div_ceil(256),
             smooth: Q14::from_f64(0.5_f64.powf(1.0 / (rate.hz() as f64 * 0.2 / 100.0))),
             drive: Q12::default(),
             output_gain: Q14::default(),
@@ -123,6 +126,7 @@ impl Warm {
         self.window_peak = Q14::default();
         self.counter = 0;
         self.compression = Q8::ONE;
+        self.compression_recip = (1u64 << 40).div_ceil(256);
     }
     /// Processes one PCM sample through the saturation and the high-pass
     /// filter.
@@ -153,6 +157,8 @@ impl Warm {
             } else {
                 self.output_headroom
             };
+            let den = self.compression.to_bits() as u64;
+            self.compression_recip = (1u64 << 40).div_ceil(den);
             self.window_peak = Q14::default();
         }
         sample = sample
@@ -164,7 +170,10 @@ impl Warm {
         } else {
             sample = self.drive.mul::<14, 14>(sample).max(-Q14::ONE);
         }
-        sample = sample.div(self.compression);
+        let bits = sample.to_bits();
+        let quotient =
+            (((u64::from(bits.unsigned_abs()) << 8) * self.compression_recip) >> 40) as i32;
+        sample = Q14::from_bits(if bits < 0 { -quotient } else { quotient });
         let output: Q14 = self.output_gain.mul::<14, 14>(sample) << 1;
         self.filter
             .process_sample(output)
