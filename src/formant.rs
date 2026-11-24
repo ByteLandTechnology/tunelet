@@ -135,7 +135,7 @@ struct Stamp {
     blend: u16,
 }
 /// Keeps each stamp at four bytes in the history ring.
-const _: () = assert!(std::mem::size_of::<Stamp>() == 4);
+const _: () = assert!(size_of::<Stamp>() == 4);
 impl Default for Stamp {
     fn default() -> Self {
         Self {

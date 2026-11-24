@@ -346,7 +346,7 @@ impl PitchTracker {
             let mut energy = self.energy[lag];
             let mut cross = self.cross[lag];
             if energy > ONE {
-                let sh0 = 31 - ((energy as u32) >> 14).leading_zeros();
+                let sh0 = ((energy as u32) >> 14).ilog2();
                 let sh = sh0 + u32::from((energy >> sh0) > ONE);
                 energy >>= sh;
                 cross >>= sh;
@@ -582,7 +582,7 @@ impl PitchTracker {
         let filtered = filtered.to_bits();
         let mut step = PitchStep::default();
         if self.detecting {
-            if self.write & 7 == 0 {
+            if self.write.is_multiple_of(8) {
                 let lag = self.detection_lag(filtered);
                 if lag > 0 {
                     self.initialize_tracking(lag);
@@ -675,7 +675,7 @@ impl PitchTracker {
                         let mut denominator = y1.wrapping_mul(-2).wrapping_add(y0).wrapping_add(y2);
                         let abs = numerator.wrapping_abs();
                         if abs > ONE {
-                            let sh0 = 31 - ((abs as u32) >> 14).leading_zeros();
+                            let sh0 = ((abs as u32) >> 14).ilog2();
                             let sh = sh0 + u32::from((numerator >> sh0).wrapping_abs() > ONE);
                             numerator >>= sh;
                             denominator >>= sh;
