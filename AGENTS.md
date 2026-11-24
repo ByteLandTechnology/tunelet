@@ -103,7 +103,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --target wasm32-unknown-
 If you change the Wasm or TypeScript code, also run these commands.
 `npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
 `npm run build` compiles `src/wasm.rs` and `src/index.ts`.
-`npm run verify:pack` runs `npm run build` and checks the archives:
+`npm run verify:pack` runs `npm run build` one time and checks the
+`tunelet` and `@bytelandtechnology/tunelet` archives:
 
 ```sh
 npm ci
@@ -113,6 +114,9 @@ npm run verify:pack
 
 - `.github/workflows/ci.yml` runs these checks on each pull request and each
   push to `main`.
+- `node scripts/verify-pack.mjs --prebuilt` packs the built files without
+  `prepack` and checks only the current name in `package.json`. Each publish
+  job in `.github/workflows/release.yml` runs this check before `npm publish`.
 - Make sure that there are no new warnings. This includes broken
   rustdoc links.
 - The crate has no tests (`test = false`). Do not add tests or test

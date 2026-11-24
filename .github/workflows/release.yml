@@ -108,6 +108,13 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
+          cache: "npm"
+      - run: npm ci --ignore-scripts
+      # Check the prebuilt archive before registry authentication.
+      - run: node scripts/verify-pack.mjs --prebuilt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
       # Trusted publishing needs npm 11.5.1 or later.
       - run: npm install --global --ignore-scripts npm@latest
@@ -135,10 +142,17 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
-          registry-url: "https://npm.pkg.github.com"
-          scope: "@bytelandtechnology"
+          cache: "npm"
+      - run: npm ci --ignore-scripts
       # GitHub Packages accepts only names in the scope of the owner.
       - run: npm pkg set name=@bytelandtechnology/tunelet
+      # Check the prebuilt scoped archive before registry authentication.
+      - run: node scripts/verify-pack.mjs --prebuilt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@bytelandtechnology"
       # Publish the built files without a second prepack build.
       - run: npm publish --ignore-scripts
         env:

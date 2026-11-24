@@ -1,5 +1,5 @@
 /**
- * This script packs the npm archive, checks its eight files, runs
+ * This script packs the npm archives, checks their eight files, runs
  * `loadTunelet()` and checks the TypeScript declarations.
  */
 import assert from "node:assert/strict";
@@ -20,16 +20,33 @@ const EXPECTED_ARCHIVE_PATHS = [
   "package/pkg/tunelet_bg.wasm",
 ];
 
+const DEFAULT_PACKAGE_NAMES = [
+  "tunelet",
+  "@bytelandtechnology/tunelet",
+];
+
+const IGNORED_STAGE_ENTRIES = new Set([".git", "node_modules", "target"]);
+
 const PACKAGE_NAME_PATTERN =
   /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
-/** Read and check the current package name so scoped names also work. */
-function readPackageName() {
-  const packageJsonPath = path.join(repoRoot, "package.json");
-  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-  const packageName = packageJson.name;
+/** Parse the command-line options for this script. */
+function parseOptions(argv) {
+  let prebuilt = false;
+  for (const argument of argv) {
+    if (argument === "--prebuilt") {
+      prebuilt = true;
+    } else {
+      throw new Error(`Unknown option: ${argument}`);
+    }
+  }
+  return { prebuilt };
+}
+
+/** Check that the package name has a valid npm format. */
+function validatePackageName(packageName) {
   assert.equal(
     typeof packageName,
     "string",
@@ -43,15 +60,39 @@ function readPackageName() {
   return packageName;
 }
 
-/** Run `npm pack` without a shell and return the relative archive path. */
-function packArchive(packDir) {
+/** Read `package.json` and check its package name. */
+function readPackageJson() {
+  const packageJsonPath = path.join(repoRoot, "package.json");
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  validatePackageName(packageJson.name);
+  return packageJson;
+}
+
+/** Build a clean environment for `npm` in a directory. */
+function createNpmEnv(cwd) {
+  if (cwd === repoRoot) {
+    return process.env;
+  }
+  const env = { ...process.env };
+  delete env.INIT_CWD;
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("npm_package_") || key.startsWith("npm_lifecycle_")) {
+      delete env[key];
+    }
+  }
+  return env;
+}
+
+/** Run `npm` without a shell in the target directory. */
+function runNpm(args, cwd) {
+  const env = createNpmEnv(cwd);
   const npmExecPath = process.env.npm_execpath;
   if (npmExecPath) {
-    execFileSync(
-      process.execPath,
-      [npmExecPath, "pack", "--pack-destination", packDir],
-      { cwd: repoRoot, stdio: "inherit" },
-    );
+    execFileSync(process.execPath, [npmExecPath, ...args], {
+      cwd,
+      env,
+      stdio: "inherit",
+    });
   } else if (process.platform === "win32") {
     const npmCliPath = path.join(
       path.dirname(process.execPath),
@@ -63,17 +104,31 @@ function packArchive(packDir) {
     if (!fs.existsSync(npmCliPath)) {
       throw new Error(`npm-cli.js was not found at ${npmCliPath}`);
     }
-    execFileSync(
-      process.execPath,
-      [npmCliPath, "pack", "--pack-destination", packDir],
-      { cwd: repoRoot, stdio: "inherit" },
-    );
+    execFileSync(process.execPath, [npmCliPath, ...args], {
+      cwd,
+      env,
+      stdio: "inherit",
+    });
   } else {
-    execFileSync("npm", ["pack", "--pack-destination", packDir], {
-      cwd: repoRoot,
+    execFileSync("npm", args, {
+      cwd,
+      env,
       stdio: "inherit",
     });
   }
+}
+
+/** Run `npm pack` without a shell and return the relative archive path. */
+function packArchive(
+  packDir,
+  { cwd = repoRoot, ignoreScripts = false } = {},
+) {
+  const args = ["pack"];
+  if (ignoreScripts) {
+    args.push("--ignore-scripts");
+  }
+  args.push("--pack-destination", packDir);
+  runNpm(args, cwd);
 
   const archives = fs
     .readdirSync(packDir)
@@ -84,6 +139,24 @@ function packArchive(packDir) {
     `Expected one archive, found ${archives.length}`,
   );
   return path.posix.join("pack", archives[0]);
+}
+
+/** Copy the built package files and set a target name in `stageDir`. */
+function stagePackageTree(stageDir, packageJson, packageName) {
+  validatePackageName(packageName);
+  fs.mkdirSync(stageDir, { recursive: true });
+  for (const entry of fs.readdirSync(repoRoot)) {
+    if (IGNORED_STAGE_ENTRIES.has(entry) || entry === "package.json") {
+      continue;
+    }
+    fs.cpSync(path.join(repoRoot, entry), path.join(stageDir, entry), {
+      recursive: true,
+    });
+  }
+  fs.writeFileSync(
+    path.join(stageDir, "package.json"),
+    `${JSON.stringify({ ...packageJson, name: packageName }, null, 2)}\n`,
+  );
 }
 
 /** Check that the archive contains only the eight expected files. */
@@ -257,20 +330,62 @@ function verifyTypeDeclarations(consumerDir, packageName) {
   );
 }
 
-const packageName = readPackageName();
+/** Pack, install and check one archive for `packageName`. */
+function verifyPackage(runDir, packageName, packOptions) {
+  const packDir = path.join(runDir, "pack");
+  const consumerDir = path.join(runDir, "consumer");
+  fs.mkdirSync(packDir, { recursive: true });
+  fs.mkdirSync(consumerDir, { recursive: true });
+
+  const relativeArchivePath = packArchive(packDir, packOptions);
+  verifyArchiveEntries(runDir, relativeArchivePath);
+  installArchive(runDir, relativeArchivePath, consumerDir, packageName);
+  verifyRuntimeImport(consumerDir, packageName);
+  verifyTypeDeclarations(consumerDir, packageName);
+}
+
+const options = parseOptions(process.argv.slice(2));
+const packageJson = readPackageJson();
+const currentPackageName = packageJson.name;
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tunelet-verify-pack-"));
 
 try {
-  const packDir = path.join(tempDir, "pack");
-  const consumerDir = path.join(tempDir, "consumer");
-  fs.mkdirSync(packDir);
-  fs.mkdirSync(consumerDir);
+  if (options.prebuilt) {
+    verifyPackage(path.join(tempDir, "prebuilt"), currentPackageName, {
+      cwd: repoRoot,
+      ignoreScripts: true,
+    });
+  } else {
+    const targetNames = DEFAULT_PACKAGE_NAMES.includes(currentPackageName)
+      ? [
+          currentPackageName,
+          ...DEFAULT_PACKAGE_NAMES.filter(
+            (name) => name !== currentPackageName,
+          ),
+        ]
+      : [...DEFAULT_PACKAGE_NAMES];
 
-  const relativeArchivePath = packArchive(packDir);
-  verifyArchiveEntries(tempDir, relativeArchivePath);
-  installArchive(tempDir, relativeArchivePath, consumerDir, packageName);
-  verifyRuntimeImport(consumerDir, packageName);
-  verifyTypeDeclarations(consumerDir, packageName);
+    if (!DEFAULT_PACKAGE_NAMES.includes(currentPackageName)) {
+      runNpm(["run", "build"], repoRoot);
+    }
+
+    for (const [index, targetName] of targetNames.entries()) {
+      const runDir = path.join(tempDir, `check-${index}`);
+      if (targetName === currentPackageName && index === 0) {
+        verifyPackage(runDir, targetName, {
+          cwd: repoRoot,
+          ignoreScripts: false,
+        });
+      } else {
+        const stageDir = path.join(runDir, "stage");
+        stagePackageTree(stageDir, packageJson, targetName);
+        verifyPackage(runDir, targetName, {
+          cwd: stageDir,
+          ignoreScripts: true,
+        });
+      }
+    }
+  }
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }
