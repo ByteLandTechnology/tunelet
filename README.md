@@ -175,8 +175,11 @@ The internal Q14 stages use `i64` products and saturate at the `i32`
 limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
 multi-voice mixes.
 
-`resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+`resynthesis.latency_mode` selects `Standard` (1,593 nominal frames, default)
+or `LowLatency` (50 nominal frames, causal formant analysis).
+`resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The dry
+path starts after Warm and has a delay of 1,543 frames in `Standard` mode and
+zero frames in `LowLatency` mode.
 
 ### Harmony sources
 
@@ -299,7 +302,7 @@ These calls read the state of the processor. They do not change the audio.
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
-| `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
+| `latency_frames()`   | 1,593 (`Standard`) or 50 (`LowLatency`) frames of nominal latency |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
 
 The telemetry includes these items:
@@ -451,10 +454,11 @@ and show enums as string literals. To change the configuration, do these steps:
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+JavaScript `Error`. The optional `resynthesis.latencyMode` field defaults to
+`"standard"` if it is absent. The optional `resynthesis.harmony.voices` field
+defaults to 4 if it is absent. The conversion ignores extra object
+properties. The generated declarations contain the parameter documentation
+from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use

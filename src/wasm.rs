@@ -19,6 +19,7 @@
 //! - Field names use camelCase.
 //! - Enum values are strings.
 //! - Each object must contain all required fields.
+//! - The optional `latencyMode` field of resynthesis defaults to `"standard"`.
 //! - The optional harmony `voices` field defaults to 4.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
@@ -191,10 +192,12 @@ impl WasmProcessor {
         self.input.len()
     }
 
-    /// The nominal resynthesis latency: 1,593 frames at both sample rates.
+    /// The nominal resynthesis latency: 1,593 frames in `"standard"` mode or
+    /// 50 frames in `"lowLatency"` mode at both sample rates.
     ///
-    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
-    /// and effects have their own timing. Thus, this value does not align all
+    /// The dry path has a delay of 1,543 frames in `"standard"` mode and zero
+    /// frames in `"lowLatency"` mode. Resampled voices, choir delays and
+    /// effects have their own timing. Thus, this value does not align all
     /// paths.
     #[wasm_bindgen(getter, js_name = latencyFrames)]
     pub fn latency_frames(&self) -> usize {
