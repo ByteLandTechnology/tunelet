@@ -184,8 +184,11 @@ pub(crate) struct Formant {
     /// stage tries to make a model.
     design_counter: i32,
     /// The separate Q14 feedback histories of the synthesis, for the left and
-    /// right channels. Mono synthesis uses channel zero.
+    /// right channels. Choir uses channel zero, and mono harmony copies to
+    /// channel one.
     history: [[i32; MAX_ORDER]; 2],
+    /// If `true`, the two channels of `history` hold equal samples.
+    histories_match: bool,
     /// The next slot in the synthesis history. The two channels use the same
     /// slot.
     history_index: usize,
@@ -280,6 +283,7 @@ impl Formant {
             blend: 0,
             design_counter: 0,
             history: [[0; MAX_ORDER]; 2],
+            histories_match: true,
             history_index: 0,
             correlation_history: [[0; 111]; 2],
             correlation_sum: [0; 111],
@@ -344,6 +348,7 @@ impl Formant {
 
         self.stamps.fill(Stamp::default());
         self.history = [[0; MAX_ORDER]; 2];
+        self.histories_match = true;
         self.history_index = 0;
         self.current = BANKS - 1;
         self.next_filter();
@@ -849,10 +854,55 @@ impl Formant {
             blended = [0; MAX_ORDER];
             self.blend_coefficients(position, &mut blended)
         };
-        let sum = ring_sum(&self.history[0], self.history_index, coefficients);
+        let index = self.history_index;
+        let sum = ring_sum(&self.history[0], index, coefficients);
         let sample = sample.saturating_add(round_q14(sum));
-        self.history[0][self.history_index] = sample;
-        self.history_index += 1;
+        self.history[0][index] = sample;
+        if self.histories_match {
+            self.histories_match = sample == self.history[1][index];
+        } else if sample == self.history[1][index] {
+            self.histories_match = self.history[0] == self.history[1];
+        }
+        self.history_index = index + 1;
+        if self.history_index == MAX_ORDER {
+            self.history_index = 0;
+        }
+        round_q14(i64::from(sample) * i64::from(self.width))
+    }
+    /// Returns `true` if the two channels of `history` hold equal samples.
+    #[inline]
+    pub(crate) fn histories_match(&self) -> bool {
+        self.histories_match
+    }
+    /// Synthesizes one Q14 channel and copies the new feedback sample to
+    /// channel one. The two channels of `history` must be equal before this
+    /// call.
+    ///
+    /// If aspiration is active, the function reads one random value for each
+    /// frame. It adds the saturated excitation change before the feedback sum.
+    /// The history cursor advances one time.
+    pub(crate) fn forward_mono(
+        &mut self,
+        sample: i32,
+        position: i32,
+        context: &mut NumericContext,
+    ) -> i32 {
+        self.dirty = true;
+        let noise = self.add_noise(sample, context).saturating_sub(sample);
+        let sample = sample.saturating_add(noise);
+        let mut blended;
+        let coefficients = if let Some(slice) = self.coefficients(position) {
+            slice
+        } else {
+            blended = [0; MAX_ORDER];
+            self.blend_coefficients(position, &mut blended)
+        };
+        let index = self.history_index;
+        let sum = ring_sum(&self.history[0], index, coefficients);
+        let sample = sample.saturating_add(round_q14(sum));
+        self.history[0][index] = sample;
+        self.history[1][index] = sample;
+        self.history_index = index + 1;
         if self.history_index == MAX_ORDER {
             self.history_index = 0;
         }
@@ -885,16 +935,22 @@ impl Formant {
             blended = [0; MAX_ORDER];
             self.blend_coefficients(position, &mut blended)
         };
+        let index = self.history_index;
         let sums = [
-            ring_sum(&self.history[0], self.history_index, coefficients),
-            ring_sum(&self.history[1], self.history_index, coefficients),
+            ring_sum(&self.history[0], index, coefficients),
+            ring_sum(&self.history[1], index, coefficients),
         ];
         for (channel, sample) in samples.iter_mut().enumerate() {
             *sample = sample.saturating_add(round_q14(sums[channel]));
-            self.history[channel][self.history_index] = *sample;
+            self.history[channel][index] = *sample;
             *sample = round_q14(i64::from(*sample) * i64::from(self.width));
         }
-        self.history_index += 1;
+        if self.histories_match {
+            self.histories_match = self.history[0][index] == self.history[1][index];
+        } else if self.history[0][index] == self.history[1][index] {
+            self.histories_match = self.history[0] == self.history[1];
+        }
+        self.history_index = index + 1;
         if self.history_index == MAX_ORDER {
             self.history_index = 0;
         }
