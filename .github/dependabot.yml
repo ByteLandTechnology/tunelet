@@ -1,7 +1,38 @@
-# Update the actions in .github/workflows every week.
+# Update the GitHub Actions, Cargo and npm dependencies every week.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "build(cargo)"
+    groups:
+      cargo:
+        patterns:
+          - "*"
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "build(npm)"
+    groups:
+      npm:
+        patterns:
+          - "*"
+    # Keep @types/node on 24.x for Node.js 24.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types:
+          - "version-update:semver-major"
