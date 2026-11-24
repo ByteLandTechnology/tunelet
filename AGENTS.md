@@ -90,15 +90,30 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 
 ## Build and verify
 
+Run these Cargo checks in a POSIX shell (`sh`, `bash` or `zsh`):
+
 ```sh
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
+cargo package --list --locked
 rustup target add wasm32-unknown-unknown
 cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
 ```
+
+In PowerShell on Windows, set `RUSTDOCFLAGS` in the environment before `cargo doc` and `npm run check:wasm`:
+
+```powershell
+$env:RUSTDOCFLAGS = "-D warnings"
+cargo doc --locked --no-deps
+cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
+npm run check:wasm
+Remove-Item Env:RUSTDOCFLAGS
+```
+
+In `cmd.exe` on Windows, use `set "RUSTDOCFLAGS=-D warnings"` before the doc commands and `set "RUSTDOCFLAGS="` after them.
 
 If you change the Wasm or TypeScript code, also run these commands.
 `npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
@@ -111,8 +126,20 @@ RUSTDOCFLAGS="-D warnings" npm run check:wasm
 npm run verify:pack
 ```
 
-- `.github/workflows/ci.yml` runs these checks on each pull request and each
-  push to `main`.
+`node scripts/verify-pack.mjs --ignore-scripts` checks pre-built `pkg/` and
+`dist/` files without a second Wasm build. If `pkg/` is ready, run
+`npm run build:ts` before `node scripts/verify-pack.mjs --ignore-scripts`.
+You can also run `node scripts/verify-pack.mjs` directly outside `npm run`
+on Linux, macOS and Windows.
+
+- `.github/workflows/ci.yml` runs on each pull request and each push to `main`.
+  `build-wasm` checks the format, Clippy, rustdoc, the crate file list and
+  `check:wasm` on `ubuntu-latest`, then builds and uploads `pkg/`. `check-os`
+  runs on `ubuntu-latest`, `macos-latest` and `windows-latest` with isolated
+  failures (`fail-fast: false`). Each runner builds `libtunelet.so`,
+  `libtunelet.dylib` or `tunelet.dll`, compiles TypeScript and runs
+  `verify-pack.mjs`. `verify` reports the combined status for branch
+  protection.
 - Make sure that there are no new warnings. This includes broken
   rustdoc links.
 - The crate has no tests (`test = false`). Do not add tests or test
