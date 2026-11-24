@@ -1,5 +1,5 @@
 /**
- * This script packs the npm archive, checks its eight files, runs
+ * This script packs the npm archive, checks its 11 files, runs
  * `loadTunelet()` and checks the TypeScript declarations.
  */
 import assert from "node:assert/strict";
@@ -14,6 +14,9 @@ const EXPECTED_ARCHIVE_PATHS = [
   "package/README.md",
   "package/dist/index.d.ts",
   "package/dist/index.js",
+  "package/docs/images/lifecycle.svg",
+  "package/docs/images/signal-chain.svg",
+  "package/docs/images/timed-events.svg",
   "package/package.json",
   "package/pkg/tunelet.d.ts",
   "package/pkg/tunelet.js",
@@ -86,7 +89,7 @@ function packArchive(packDir) {
   return path.posix.join("pack", archives[0]);
 }
 
-/** Check that the archive contains only the eight expected files. */
+/** Check that the archive contains only the 11 expected files. */
 function verifyArchiveEntries(tempDir, relativeArchivePath) {
   const rawList = execFileSync("tar", ["-tzf", relativeArchivePath], {
     cwd: tempDir,

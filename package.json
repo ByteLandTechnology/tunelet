@@ -22,6 +22,7 @@
   },
   "files": [
     "dist",
+    "docs/images/*.svg",
     "pkg/tunelet.js",
     "pkg/tunelet.d.ts",
     "pkg/tunelet_bg.wasm"

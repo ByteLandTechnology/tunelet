@@ -4,18 +4,15 @@ tunelet is a Rust library for vocal pitch correction, choir, harmony,
 formant control and effects. It is also available as an npm package for
 browsers and Node.js.
 
-[![crates.io](https://img.shields.io/crates/v/tunelet.svg)](https://crates.io/crates/tunelet)
-[![npm](https://img.shields.io/npm/v/tunelet.svg)](https://www.npmjs.com/package/tunelet)
-[![docs.rs](https://img.shields.io/docsrs/tunelet)](https://docs.rs/tunelet)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![The tunelet crate and latest version on crates.io](https://img.shields.io/crates/v/tunelet.svg?color=0550ae&labelColor=555555)](https://crates.io/crates/tunelet)
+[![The tunelet package and latest version on npm](https://img.shields.io/npm/v/tunelet.svg?color=0550ae&labelColor=555555)](https://www.npmjs.com/package/tunelet)
+[![The tunelet API documentation and build status on docs.rs](https://img.shields.io/docsrs/tunelet?color=116329&labelColor=555555)](https://docs.rs/tunelet)
+[![The MIT License for tunelet](https://img.shields.io/badge/license-MIT-blue.svg?color=0550ae&labelColor=555555)](LICENSE)
 
 **[Website](https://tunelet.byteland.app)** ·
-[crates.io](https://crates.io/crates/tunelet) ·
-[npm](https://www.npmjs.com/package/tunelet) ·
-[GitHub Packages](https://github.com/ByteLandTechnology/tunelet/pkgs/npm/tunelet) ·
-[API documentation](https://docs.rs/tunelet)
+[GitHub Packages](https://github.com/ByteLandTechnology/tunelet/pkgs/npm/tunelet)
 
-![The tunelet signal chain: Punch, Warm, pitch tracking and resynthesis, Alien, reverb and the output gain](docs/images/signal-chain.svg)
+![The diagram shows the tunelet signal chain from the mono PCM input through Punch, Warm, resynthesis, Alien, reverb and the output gain. The Signal chain section below describes all stages, the dry path and the latency.](docs/images/signal-chain.svg)
 
 ## Contents
 
@@ -235,7 +232,12 @@ These rules apply to each call:
 To apply a control immediately before a specific frame, give `TimedEvent`
 values to the process call.
 
-![Timed events in a block of 16 frames](docs/images/timed-events.svg)
+![The diagram shows timed events at offsets 0, 5 and 11 in a block of 16 frames. The paragraph and the rules below describe this example.](docs/images/timed-events.svg)
+
+In the diagram, the block has 16 frames, from `0` to `15`. The `outputGain`
+event runs at offset `0`, immediately before frame `0`. At offset `5`, `midi`
+Note On runs before `reverb` in slice order, immediately before frame `5`. The
+`reset` event runs at offset `11`, immediately before frame `11`.
 
 These rules apply to the offsets:
 
@@ -244,7 +246,8 @@ These rules apply to the offsets:
 - An offset must not be less than the offset before it.
 
 Events with equal offsets execute in slice order. An empty block accepts no
-events. A stage event replaces all settings of that stage. To change one
+events. If an event is not valid, the call fails and the output and the state
+do not change. A stage event replaces all settings of that stage. To change one
 field, start from `processor.config()`.
 
 Harmony MIDI uses `ControlEvent::Midi`. MIDI for the correction keyboard uses
@@ -263,7 +266,7 @@ processor.process(&input, &mut output, &events)?;
 
 ## Lifecycle
 
-![The processor lifecycle: construction, process calls, drain and reset](docs/images/lifecycle.svg)
+![The diagram shows the processor lifecycle across construction, process calls, drain and reset. The Lifecycle subsections below describe each state and transition.](docs/images/lifecycle.svg)
 
 ### Construction
 
@@ -576,6 +579,7 @@ ignores both directories. The archive contains only these items:
 - The binary.
 - The package metadata.
 - The README.
+- The SVG diagrams.
 
 The `build:wasm` script builds the crate in release mode with LTO and one
 codegen unit. Then `wasm-pack` runs Binaryen `wasm-opt` on
