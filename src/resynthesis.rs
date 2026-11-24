@@ -27,7 +27,7 @@
 //! - The order in which stages read random values.
 //! - The order of the fixed-point arithmetic.
 
-mod history;
+pub(crate) mod history;
 
 use crate::error::{check_count, check_range};
 use crate::filter::{Biquad, Design};
@@ -40,7 +40,7 @@ use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
 use crate::{Error, SampleRate};
-use history::prepare_history;
+use history::{clear_dirty_ring, prepare_history, record_history};
 
 /// The method that resynthesis uses to render its voices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -702,39 +702,27 @@ impl Resynthesis {
         let written = usize::from(self.written);
         self.written = 0;
         self.pitch.reset();
-        if written == HISTORY {
-            self.raw.fill(Q14::ZERO);
-            self.filtered.fill(Q14::ZERO);
-            self.lead.fill(Q14::ZERO);
-            self.periods.fill(Q6::ZERO);
-            self.previous_periods.fill(Q6::ZERO);
-            self.ratios.fill(Q14::ONE);
-        } else if written > 0 {
-            let end = written + 1;
+        clear_dirty_ring(self.raw.as_mut_slice(), written, Q14::ZERO);
+        clear_dirty_ring(self.filtered.as_mut_slice(), written, Q14::ZERO);
+        clear_dirty_ring(self.lead.as_mut_slice(), written, Q14::ZERO);
+        if written > 0 {
             let lead_start = HISTORY - OVERLAP_FRAMES + 1;
-            self.raw[1..end].fill(Q14::ZERO);
-            self.filtered[1..end].fill(Q14::ZERO);
-            self.lead[1..end].fill(Q14::ZERO);
             if written < OVERLAP_FRAMES {
-                self.periods[1..end].fill(Q6::ZERO);
+                self.periods[1..=written].fill(Q6::ZERO);
                 self.periods[lead_start..lead_start + written].fill(Q6::ZERO);
             } else if written < HISTORY - OVERLAP_FRAMES {
-                self.periods[..end].fill(Q6::ZERO);
+                self.periods[..=written].fill(Q6::ZERO);
                 self.periods[lead_start..].fill(Q6::ZERO);
             } else {
                 self.periods.fill(Q6::ZERO);
             }
-            self.previous_periods[1..end].fill(Q6::ZERO);
-            self.ratios[1..end].fill(Q14::ONE);
         }
+        clear_dirty_ring(self.previous_periods.as_mut_slice(), written, Q6::ZERO);
+        clear_dirty_ring(self.ratios.as_mut_slice(), written, Q14::ONE);
         self.write = 0;
         self.formant.reset();
         self.harmony.reset();
-        if written >= OVERLAP_FRAMES {
-            self.overlap.fill(Q14::ZERO);
-        } else if written > 0 {
-            self.overlap[1..written + 1].fill(Q14::ZERO);
-        }
+        clear_dirty_ring(self.overlap.as_mut_slice(), written, Q14::ZERO);
         self.overlap_index = 0;
         self.previous_output = [Q14::ZERO; 2];
         for filter in &mut self.post {
@@ -1099,17 +1087,9 @@ impl Resynthesis {
     /// tracking was active before this frame.
     pub(crate) fn process_sample(&mut self, input: i16, numeric: &mut NumericContext) -> [Q14; 2] {
         let sample = Q14::from_bits(i32::from(input) >> 1);
-        self.write += 1;
-        if self.write == HISTORY {
-            self.write = 0;
-        }
-        if usize::from(self.written) < HISTORY {
-            self.written += 1;
-        }
-        self.raw[self.write] = sample;
+        let write = record_history(&mut self.raw, &mut self.write, &mut self.written, sample);
         let was_tracking = !self.pitch.is_detecting();
         let step = self.pitch.process_sample(sample.to_bits());
-        let write = self.write;
         // Readers have signed fractional coordinates. When the writer wraps,
         // move the origin of these coordinates with it. Do not apply a modulo
         // to each fractional position. This keeps the distances that the jump
