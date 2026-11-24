@@ -522,14 +522,15 @@ Rust functions.
 
 ### Rust crate
 
-To build the crate and check the format, the lints and the documentation,
-run these commands:
+To build the crate and check the format, the lints, the documentation and
+the archive, run these commands:
 
 ```sh
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 cargo doc --locked --no-deps
+cargo package --locked
 ```
 
 To check the `wasm` feature for `wasm32-unknown-unknown` with Cargo, run
