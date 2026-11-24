@@ -167,16 +167,20 @@ voice. It disables the effects and the formant stage.
 | Correction     | Moves the pitch to the nearest permitted note               | Chromatic      | `resynthesis.correction` |
 | Voices         | Renders a choir (1 to 16 voices) or harmony (lead and 0–4)  | Choir, 1 voice | `resynthesis.mode`       |
 | Formant        | Changes the vocal tract with an LPC model and aspiration    | Disabled       | `resynthesis.formant`    |
-| Alien          | Plays recent audio in reverse loops                         | Disabled       | `alien`                  |
+| Alien          | Plays recent audio in reverse loops, with wet mix           | Disabled       | `alien`                  |
 | Reverb         | Echo, Schroeder, SmallRoom, Binaural, MediumHall, LargeHall | Disabled       | `reverb`                 |
-| Output gain    | Linear gain, 0..=64, before `-32767..=32767` clipping       | 1              | `output_gain`            |
+| Output gain    | Linear gain, 0..=64, before global mix                      | 1              | `output_gain`            |
+| Mix            | Global wet fraction, 0..=1, before `-32767..=32767` clip    | 1              | `mix`                    |
+| Bypass         | Outputs the 1,593-frame delayed input before Punch          | Disabled       | `bypass`                 |
 
 The internal Q14 stages use `i64` products and saturate at the `i32`
 limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
 multi-voice mixes.
 
-`resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+`resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. That
+dry path starts after Warm and has a delay of 1,593 frames. `mix` blends
+the wet output with the 1,593-frame delayed input before Punch. If Alien is
+enabled, `alien.mix` sets the wet fraction of the reversed loop.
 
 ### Harmony sources
 
@@ -311,8 +315,8 @@ The telemetry includes these items:
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
 The peak windows of the telemetry are independent of the peak window of the
-feedback. The latency is nominal. Dry mixes, resampled voices and effects
-have different timing.
+feedback. The latency is nominal. The dry paths and bypass have a delay of
+1,593 frames. Resampled voices and effects have their own delays.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
@@ -451,10 +455,11 @@ and show enums as string literals. To change the configuration, do these steps:
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+JavaScript `Error`. If an optional field is absent,
+`resynthesis.harmony.voices` defaults to 4, `mix` and `alien.mix` default to
+1, and `bypass` defaults to `false`. The conversion ignores extra object
+properties. The generated declarations contain the parameter documentation
+from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use

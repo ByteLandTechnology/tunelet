@@ -1,6 +1,7 @@
 //! Reverse-loop playback with a continuous input history and boundary fades.
 
-use crate::error::check_count;
+use crate::error::{check_count, check_range};
+use crate::numeric::clamp_i32;
 use crate::numeric::fixed::{Fixed, Q14};
 use crate::Error;
 
@@ -24,36 +25,58 @@ const FADE_FRAMES: usize = 200;
     serde(rename_all = "camelCase")
 )]
 pub struct AlienConfig {
-    /// Selects reversed playback instead of the direct input. The default is
-    /// `false`. The recording and the phase continue to advance in both
-    /// states.
+    /// Enables the reversed loop. The default is `false`.
+    ///
+    /// The history and the phase continue to advance in both states.
     pub enabled: bool,
     /// The loop length in frames, 1..=96000. The default is 95,999.
     /// This value is a frame count at the two rates. Thus, its duration in
     /// seconds changes with the sample rate. A short loop can be fully inside
     /// the fades.
     pub loop_frames: u32,
+    /// The wet fraction of the reversed loop, 0..=1.
+    ///
+    /// The default is 1. The code quantizes this value to Q14. The dry weight
+    /// of the direct stereo input is `1 - mix`. If `enabled` is `false`, the
+    /// stage returns the direct input. In JavaScript, this field is optional.
+    /// If it is absent, the default is 1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "default_mix"),
+        tsify(optional)
+    )]
+    pub mix: f32,
 }
+
+/// The default wet fraction of Alien: full reversed playback.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn default_mix() -> f32 {
+    1.0
+}
+
 impl Default for AlienConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             loop_frames: 95_999,
+            mix: 1.0,
         }
     }
 }
 impl AlienConfig {
     /// Validates all fields, also when Alien is disabled.
     ///
-    /// `loop_frames` must be in its documented inclusive range. Validation
-    /// does not clamp values. It does not change the processor state.
+    /// `loop_frames` must be in its documented inclusive range. `mix` must be
+    /// finite and in 0..=1. Validation does not clamp values. It does not
+    /// change the processor state.
     ///
     /// # Errors
     ///
     /// Returns the first [`Error::InvalidConfig`] with its dotted field path
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_count("alien.loop_frames", i64::from(self.loop_frames), 1, 96_000)
+        check_count("alien.loop_frames", i64::from(self.loop_frames), 1, 96_000)?;
+        check_range("alien.mix", self.mix, 0.0, 1.0)
     }
 }
 
@@ -76,6 +99,8 @@ pub(crate) struct Alien {
     loop_len: usize,
     /// The number of frames in `buffer` since construction or the last reset.
     written: usize,
+    /// The Q14 wet weight of the reversed loop.
+    mix: Q14,
 }
 impl Alien {
     /// Allocates a silent stereo ring from validated loop settings.
@@ -87,6 +112,7 @@ impl Alien {
             phase: 0,
             loop_len: config.loop_frames as usize,
             written: 0,
+            mix: Q14::from_f64(f64::from(config.mix)),
         }
     }
     /// Applies a validated configuration, keeps the recorded audio and clamps
@@ -95,6 +121,7 @@ impl Alien {
         self.config = config;
         self.loop_len = config.loop_frames as usize;
         self.phase = self.phase.min(self.loop_len - 1);
+        self.mix = Q14::from_f64(f64::from(config.mix));
     }
     /// Returns the loop length and the current frame in the loop.
     ///
@@ -111,11 +138,11 @@ impl Alien {
         self.read = 0;
         self.phase = 0;
     }
-    /// Records a frame, selects the direct or reverse output, then advances
+    /// Records a frame, blends the direct and reverse output, then advances
     /// both cursors.
-    /// The recording cursor moves forward by one and the reverse offset
-    /// increases by two. Thus, the playback moves backward by one frame. The
-    /// validated loop limit keeps that subtraction in a single ring wrap.
+    /// The cursor moves forward by one and the reverse offset increases by
+    /// two. Thus, the playback moves backward by one frame. The validated
+    /// loop limit keeps that subtraction in a single ring wrap.
     pub(crate) fn process_sample(&mut self, input: [Q14; 2]) -> [Q14; 2] {
         self.buffer[self.read] = input;
         if self.written < HISTORY_FRAMES {
@@ -129,13 +156,20 @@ impl Alien {
                 read
             };
             let distance = self.phase.min(self.loop_len - self.phase);
-            let mut result = self.buffer[read];
+            let mut reverse = self.buffer[read];
             if distance < FADE_FRAMES {
                 let gain: Q14 = Fixed::<0>::from_bits(distance as i32)
                     .div(Fixed::<0>::from_bits(FADE_FRAMES as i32));
-                result = result.map(|sample| sample.mul::<14, 14>(gain));
+                reverse = reverse.map(|sample| sample.mul::<14, 14>(gain));
             }
-            result
+            let wet = i64::from(self.mix.to_bits());
+            let dry = i64::from((Q14::ONE - self.mix).to_bits());
+            [0, 1].map(|channel| {
+                let blended = (i64::from(input[channel].to_bits()) * dry
+                    + i64::from(reverse[channel].to_bits()) * wet)
+                    >> 14;
+                Q14::from_bits(clamp_i32(blended))
+            })
         } else {
             input
         };

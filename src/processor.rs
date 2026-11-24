@@ -5,6 +5,7 @@ use crate::effects::punch::{Punch, PunchConfig};
 use crate::effects::reverb::{self, Reverb};
 use crate::effects::warm::Warm;
 use crate::events::{ValidatedEvent, ValidatedEvents};
+use crate::numeric::fixed::Q14;
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
 use crate::resynthesis::{self, Resynthesis};
@@ -31,6 +32,13 @@ pub struct Processor {
     ///
     /// The temporary aspiration mute of a drain is not stored here.
     config: ProcessorConfig,
+    /// The 1,593-frame input delay line before Punch, for global mix and
+    /// bypass.
+    dry: Box<[i16; resynthesis::LATENCY_FRAMES]>,
+    /// The current cursor in `dry`, always less than `LATENCY_FRAMES`.
+    dry_index: usize,
+    /// The Q14 global wet weight.
+    mix: Q14,
     /// The input dynamics stage, which advances only while it is enabled.
     punch: Punch,
     /// The input saturation stage, which advances only while it is enabled.
@@ -96,10 +104,10 @@ impl Processor {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidConfig`] if a stage field or the output gain is
-    /// not valid. This check occurs before the allocation of the histories.
-    /// The types of `preparation` already make sure that the block limit is
-    /// not zero and that the sample rate is supported.
+    /// Returns [`Error::InvalidConfig`] if a stage field, the output gain or
+    /// the global mix is not valid. This check occurs before the allocation of
+    /// the histories. The types of `preparation` already make sure that the
+    /// block limit is not zero and that the sample rate is supported.
     pub fn new(preparation: PrepareConfig, config: ProcessorConfig) -> Result<Self, Error> {
         config.validate()?;
         let rate = preparation.sample_rate;
@@ -109,6 +117,9 @@ impl Processor {
         Ok(Self {
             preparation,
             config,
+            dry: Box::new([0; resynthesis::LATENCY_FRAMES]),
+            dry_index: 0,
+            mix: Q14::from_f64(f64::from(config.mix)),
             punch,
             warm: Warm::new(rate, config.warm),
             resynthesis: Box::new(Resynthesis::new(rate, config.resynthesis)),
@@ -321,9 +332,9 @@ impl Processor {
 
     /// Returns the nominal resynthesis latency: 1,593 frames at both rates.
     ///
-    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
-    /// and effects have their own timing. Thus, this value does not align all
-    /// paths.
+    /// The dry paths and bypass have a delay of 1,593 frames. Resampled
+    /// voices, choir delays and effects have their own timing. Thus, this
+    /// value does not align all paths.
     pub fn latency_frames(&self) -> usize {
         resynthesis::LATENCY_FRAMES
     }
@@ -501,6 +512,7 @@ impl Processor {
         if self.config.reverb != config.reverb {
             self.reverb.set_config(config.reverb);
         }
+        self.mix = Q14::from_f64(f64::from(config.mix));
         self.config = config;
         self.drain_remaining = None;
     }
@@ -508,10 +520,10 @@ impl Processor {
     /// Clears the audio histories, held notes, pitch feedback, peak and frame
     /// count.
     ///
-    /// This method cancels an active drain. It also clears the correction
-    /// ratio, the Punch envelopes, the Warm filters, the Alien recording and
-    /// the reverb delays. It releases the harmony MIDI notes and, in
-    /// MIDI-chord mode, the chord voices. It keeps these items:
+    /// This method cancels an active drain. It also clears the dry delay
+    /// buffer, the correction ratio, the Punch envelopes, the Warm filters,
+    /// the Alien history and the reverb delays. It releases the harmony MIDI
+    /// notes and, in MIDI-chord mode, the chord voices. It keeps these items:
     ///
     /// - the configuration
     /// - the random stream and the arctangent lookup position of Punch
@@ -529,6 +541,8 @@ impl Processor {
     /// When the method clears the held keys, it does not load the configured
     /// scale again. For a fully new state, make a new processor.
     pub fn reset(&mut self) {
+        self.dry.fill(0);
+        self.dry_index = 0;
         self.punch.reset();
         self.warm.reset();
         self.resynthesis.reset();
@@ -605,12 +619,18 @@ impl Processor {
 
     /// Renders one frame through the full chain and updates stereo feedback.
     ///
-    /// Resynthesis produces Q14 audio. Output gain is Q8. The gain product
-    /// uses `i64` arithmetic before the symmetric `-32767..=32767` PCM clamp.
-    /// This order and the peak measurement before the downmix are part of the
-    /// output.
+    /// Resynthesis produces Q14 audio. Output gain is Q8, and global mix is
+    /// Q14. The products use `i64` arithmetic before the symmetric
+    /// `-32767..=32767` PCM clamp. This order and the peak measurement before
+    /// the downmix are part of the output.
     fn next(&mut self, mut input: i16) -> [i16; 2] {
         self.input_peak = self.input_peak.max((input as i32).abs());
+        let delayed = self.dry[self.dry_index];
+        self.dry[self.dry_index] = input;
+        self.dry_index += 1;
+        if self.dry_index == resynthesis::LATENCY_FRAMES {
+            self.dry_index = 0;
+        }
         if self.config.punch.enabled {
             input = self.punch.process_sample(input, &mut self.numeric);
         }
@@ -621,10 +641,19 @@ impl Processor {
         self.last_resample_ratio = self.resynthesis.resample_ratio();
         let alien = self.alien.process_sample(voice);
         let reverb = self.reverb.process_sample(alien);
-        let gain = (self.config.output_gain as f64 * 256.0) as i64;
-        let result = reverb.map(|sample| {
-            (((i64::from(sample.to_bits()) * gain) >> 8) << 1).clamp(-32767, 32767) as i16
-        });
+        let result = if self.config.bypass {
+            [delayed.max(-32767); 2]
+        } else {
+            let gain = (self.config.output_gain as f64 * 256.0) as i64;
+            let wet_mix = i64::from(self.mix.to_bits());
+            let dry_mix = i64::from((Q14::ONE - self.mix).to_bits());
+            let dry = i64::from(delayed);
+            reverb.map(|sample| {
+                let wet = ((i64::from(sample.to_bits()) * gain) >> 8) << 1;
+                let blended = (dry * dry_mix + wet * wet_mix) >> 14;
+                blended.clamp(-32767, 32767) as i16
+            })
+        };
         self.peak = self
             .peak
             .max((result[0] as i32).abs())

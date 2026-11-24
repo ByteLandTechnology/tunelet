@@ -20,6 +20,8 @@
 //! - Enum values are strings.
 //! - Each object must contain all required fields.
 //! - The optional harmony `voices` field defaults to 4.
+//! - The optional `mix` and `alien.mix` fields default to 1.
+//! - The optional `bypass` field defaults to `false`.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
 //! `{ type, value }`, and the reset control has no `value`. MIDI messages use
@@ -193,9 +195,9 @@ impl WasmProcessor {
 
     /// The nominal resynthesis latency: 1,593 frames at both sample rates.
     ///
-    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
-    /// and effects have their own timing. Thus, this value does not align all
-    /// paths.
+    /// The dry paths and bypass have a delay of 1,593 frames. Resampled
+    /// voices, choir delays and effects have their own timing. Thus, this
+    /// value does not align all paths.
     #[wasm_bindgen(getter, js_name = latencyFrames)]
     pub fn latency_frames(&self) -> usize {
         self.processor.latency_frames()

@@ -121,14 +121,15 @@ impl PrepareConfig {
 
 /// The settings for the complete signal chain, in the order of the stages.
 ///
-/// The default enables chromatic pitch correction, one choir voice and unity
-/// output gain. Punch, Warm, formants, Alien and reverb are disabled. This
-/// configuration does active pitch processing. It is not a bypass with zero
-/// latency.
+/// The default enables chromatic pitch correction, one choir voice, unity
+/// output gain and unity global mix. Punch, Warm, formants, Alien, reverb and
+/// bypass are disabled. This configuration does active pitch correction. It is
+/// not a bypass with zero latency.
 ///
 /// Change a copy, then apply it with [`crate::Processor::set_config`] or
 /// [`crate::ControlEvent::Configure`]. The validation examines all fields
-/// before a change has an effect. This includes the fields of disabled stages.
+/// before a change has an effect. This includes the fields of disabled stages
+/// and `mix` while `bypass` is `true`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -161,16 +162,48 @@ pub struct ProcessorConfig {
     pub reverb: ReverbConfig,
     /// The linear gain after all effects, 0..=64.
     ///
-    /// The default is 1 (unity). Zero mutes the output, but the internal
-    /// processing continues. The gain is quantized in steps of 1/256 before
-    /// the fixed-point multiplication and the final PCM clipping. Thus, a
-    /// positive value below 1/256 also mutes the output.
+    /// The default is 1 (unity). If `mix` is 1, zero mutes the output, and
+    /// the internal stages continue to advance. The code quantizes the gain in
+    /// steps of 1/256 before the fixed-point multiplication and the global
+    /// mix. Thus, a positive value below 1/256 also mutes the wet path.
     pub output_gain: f32,
+    /// The global wet fraction after the output gain, 0..=1.
+    ///
+    /// The default is 1. The code quantizes this value to Q14. The dry path
+    /// delays the input before Punch by 1,593 frames. The wet weight is `mix`
+    /// and the dry weight is `1 - mix`, before the `-32767..=32767` clip. In
+    /// JavaScript, this field is optional. If it is absent, the default is 1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "default_mix"),
+        tsify(optional)
+    )]
+    pub mix: f32,
+    /// Selects the latency-aligned dry input instead of the processed chain.
+    ///
+    /// The default is `false`. If `bypass` is `true`, the processor outputs
+    /// the 1,593-frame delayed input before Punch, clipped to
+    /// `-32767..=32767`. The internal stages continue to advance. In
+    /// JavaScript, this field is optional. If it is absent, the default is
+    /// `false`.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default),
+        tsify(optional)
+    )]
+    pub bypass: bool,
+}
+
+/// The default global wet fraction: the full processed signal.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn default_mix() -> f32 {
+    1.0
 }
 
 impl Default for ProcessorConfig {
     /// Returns chromatic correction with zero retune time, one choir voice,
-    /// disabled effects, disabled formants and unity gain.
+    /// disabled effects, disabled formants, unity gain, unity mix and
+    /// disabled bypass.
     fn default() -> Self {
         Self {
             punch: PunchConfig::default(),
@@ -179,16 +212,19 @@ impl Default for ProcessorConfig {
             alien: AlienConfig::default(),
             reverb: ReverbConfig::default(),
             output_gain: 1.0,
+            mix: 1.0,
+            bypass: false,
         }
     }
 }
 
 impl ProcessorConfig {
-    /// Checks all stages and the final gain, and does not change state.
+    /// Checks all stages, the output gain and the global mix, and does not
+    /// change state.
     ///
     /// The validation uses the signal order: Punch, Warm, resynthesis, Alien,
-    /// reverb, then output gain. It includes disabled stages and the controls
-    /// of voice modes that are not active.
+    /// reverb, output gain, then global mix. It includes disabled stages,
+    /// inactive voice modes and `mix` while `bypass` is `true`.
     ///
     /// # Errors
     ///
@@ -201,7 +237,8 @@ impl ProcessorConfig {
         self.resynthesis.validate()?;
         self.alien.validate()?;
         self.reverb.validate()?;
-        validate_output_gain(self.output_gain)
+        validate_output_gain(self.output_gain)?;
+        check_range("mix", self.mix, 0.0, 1.0)
     }
 }
 

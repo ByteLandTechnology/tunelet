@@ -3,8 +3,9 @@
 //! [`Processor`] changes mono signed 16-bit PCM into the same number of stereo
 //! or mono frames. The sample rate is 44.1 kHz or 48 kHz. The signal chain is
 //! Punch → Warm → pitch tracking and resynthesis → Alien → reverb → output
-//! gain. The default configuration enables chromatic pitch correction and one
-//! choir voice. The optional effects and the formant stage are disabled.
+//! gain → mix, with a latency-aligned bypass. The default configuration
+//! enables chromatic pitch correction and one choir voice. The optional
+//! effects, the formant stage and bypass are disabled.
 //!
 //! # Preparing and configuring
 //!
