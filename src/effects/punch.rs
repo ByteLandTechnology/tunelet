@@ -2,14 +2,14 @@
 //! ceiling.
 
 use crate::error::check_range;
-use crate::numeric::fixed::{Q14, Q8};
+use crate::numeric::fixed::{Q14, Q16, Q28};
 use crate::numeric::{coefficient_to_exp_value, db_to_gain, envelope_decay, NumericContext};
 use crate::{Error, SampleRate};
 
 /// The update interval of the peak follower, in frames.
 const WINDOW_FRAMES: usize = 100;
-/// The base arctangent drive, approximately π/2 in Q8.
-const BASE_DRIVE: Q8 = Q8::from_bits(401);
+/// The base arctangent drive, approximately π/2 in Q16.
+const BASE_DRIVE: Q16 = Q16::from_bits(102_944);
 /// The 2/π factor in Q14 that normalizes the arctangent output.
 const TWO_OVER_PI: Q14 = Q14::from_bits(10430);
 
@@ -106,12 +106,15 @@ pub(crate) struct Punch {
     fast_decay: Q14,
     /// The shared Q14 coefficient when a follower moves up.
     attack_decay: Q14,
-    /// The configured linear input gain in Q8.
-    gain: Q8,
-    /// The linear output ceiling in Q14. It applies to the saturator angle.
-    ceiling_gain: Q14,
-    /// The cached Q8 drive: base drive × envelope ratio × input gain.
-    drive: Q8,
+    /// The configured linear input gain in Q16.
+    gain: Q16,
+    /// The linear output ceiling in Q28. It scales the saturator input and
+    /// output.
+    ceiling_gain: Q28,
+    /// The current Q16 drive: base drive × envelope ratio × input gain.
+    drive: Q16,
+    /// The per-sample Q16 step of the drive in this window.
+    drive_step: Q16,
 }
 impl Punch {
     /// Prepares the coefficients and resets both followers from validated
@@ -126,23 +129,35 @@ impl Punch {
             slow_decay: Q14::default(),
             fast_decay: Q14::default(),
             attack_decay: Q14::default(),
-            gain: Q8::ONE,
-            ceiling_gain: Q14::default(),
+            gain: Q16::ONE,
+            ceiling_gain: Q28::ONE,
             drive: BASE_DRIVE,
+            drive_step: Q16::default(),
         };
         result.set_config(config);
         result.reset();
         result
     }
-    /// Returns the cached drive divided by the base drive, as f32.
+    /// Returns the effective linear gain of the stage at the current envelope
+    /// level, as f32.
     ///
-    /// The value is the envelope ratio times the configured input gain. The
-    /// stage state does not change.
-    pub(crate) fn drive_ratio(&self) -> f32 {
-        (self.drive.to_bits() as f64 / BASE_DRIVE.to_bits() as f64) as f32
+    /// If the adaptive envelope is zero, the method returns the linear drive
+    /// ratio. The stage state does not change.
+    pub(crate) fn stage_gain(&self) -> f32 {
+        if self.slow <= Q14::ZERO {
+            return (self.drive.to_bits() as f64 / BASE_DRIVE.to_bits() as f64) as f32;
+        }
+        let ceiling = self.ceiling_gain.to_bits() as f64 / f64::from(1u32 << 28);
+        if ceiling <= 0.0 {
+            return 0.0;
+        }
+        let drive = self.drive.to_bits() as f64 / 65536.0;
+        let envelope = self.slow.to_bits() as f64 / 16384.0;
+        let output = ceiling * std::f64::consts::FRAC_2_PI * (drive * envelope / ceiling).atan();
+        (output / envelope) as f32
     }
     /// Calculates the quantized controls again, and keeps the envelopes and
-    /// the cached drive.
+    /// the current drive ramp.
     /// The processor controls the bypass. This stage never reads an enabled
     /// flag.
     pub(crate) fn set_config(&mut self, config: PunchConfig) {
@@ -157,8 +172,8 @@ impl Punch {
         self.slow_decay = decay(impact as f64);
         self.fast_decay = decay(5000.0);
         self.attack_decay = decay(config.attack_ms as f64);
-        self.gain = Q8::from_f64(db_to_gain(config.gain_db as f64));
-        self.ceiling_gain = Q14::from_f64(db_to_gain(config.ceiling_db as f64));
+        self.gain = Q16::from_f64(db_to_gain(config.gain_db as f64));
+        self.ceiling_gain = Q28::from_f64(db_to_gain(config.ceiling_db as f64));
     }
     /// Clears both envelopes and the current window, then calculates the drive
     /// again from the base drive and the input gain.
@@ -168,6 +183,7 @@ impl Punch {
         self.counter = 0;
         self.peak = Q14::default();
         self.drive = BASE_DRIVE.mul(self.gain);
+        self.drive_step = Q16::default();
     }
 
     /// Moves `current` toward `target` with a one-pole filter.
@@ -179,12 +195,11 @@ impl Punch {
         target + decay.mul(current - target)
     }
 
-    /// Tracks the current peak, updates the drive every 100 calls and
-    /// saturates one PCM sample.
-    /// The envelope ratio is approximately limited to 16 before it is
-    /// multiplied by the input gain. While the adaptive envelope is zero, the
-    /// ratio is 1. The Q8 drive goes into the cached arctangent lookup. The
-    /// final PCM value clips symmetrically.
+    /// Tracks the current peak, ramps the drive across each 100-frame window
+    /// and saturates one PCM sample.
+    /// The envelope ratio has a limit of 16 before multiplication by the input
+    /// gain. While the adaptive envelope is zero, the ratio is 1. The inverse
+    /// ceiling scales the arctangent input, and the ceiling scales the output.
     pub(crate) fn process_sample(&mut self, input: i16, context: &mut NumericContext) -> i16 {
         let sample = Q14::from_bits(i32::from(input) >> 1);
         self.peak = self.peak.max(sample.abs());
@@ -194,20 +209,29 @@ impl Punch {
             self.slow = Self::follow(self.slow, self.peak, self.attack_decay, self.slow_decay);
             self.fast = Self::follow(self.fast, self.peak, self.attack_decay, self.fast_decay);
             self.peak = Q14::default();
-            let smooth: Q8 = if self.slow > Q14::default() {
-                if self.fast >> 6 <= (self.slow >> 6) << 4 {
-                    self.fast.div(self.slow)
-                } else {
-                    Q8::from_bits(16 << 8)
-                }
+            let smooth: Q16 = if self.slow > Q14::default() {
+                self.fast
+                    .div::<14, 16>(self.slow)
+                    .min(Q16::from_bits(16 << 16))
             } else {
-                Q8::ONE
+                Q16::ONE
             };
-            self.drive = BASE_DRIVE.mul::<8, 8>(smooth).mul(self.gain);
+            let target: Q16 = BASE_DRIVE.mul::<16, 16>(smooth).mul(self.gain);
+            self.drive_step =
+                Q16::from_bits((target.to_bits() - self.drive.to_bits()) / WINDOW_FRAMES as i32);
         }
-        let driven: Q8 = sample.mul(self.drive);
-        let angle = Q14::from_bits(context.atan_q14.process(driven.to_bits(), 14 - 8));
-        let output: Q14 = TWO_OVER_PI.mul(self.ceiling_gain.mul::<14, 14>(angle));
-        output.to_bits().wrapping_shl(1).clamp(-32767, 32767) as i16
+        self.drive = self.drive + self.drive_step;
+        let driven = ((i64::from(sample.to_bits()) * i64::from(self.drive.to_bits())) << 12)
+            / i64::from(self.ceiling_gain.to_bits());
+        let ratio = driven.clamp(-i64::from(i32::MAX), i64::from(i32::MAX)) as i32;
+        let angle = context.atan_q14.process(ratio, 0);
+        let scaled = i64::from(TWO_OVER_PI.to_bits())
+            * ((i64::from(self.ceiling_gain.to_bits()) * i64::from(angle)) / (1 << 14));
+        let rounded = if scaled >= 0 {
+            (scaled + (1 << 27)) / (1 << 28)
+        } else {
+            (scaled - (1 << 27)) / (1 << 28)
+        };
+        ((rounded as i32) << 1).clamp(-32767, 32767) as i16
     }
 }

@@ -115,13 +115,13 @@ impl AtanQ14 {
     ///
     /// The function shifts the input word into Q14 and finds the two adjacent
     /// tangent entries. The caller selects the shift for the input format.
-    /// For example, Punch uses Q8 and a shift of 6. If the magnitude is
+    /// For example, Punch uses Q14 and a shift of 0. If the magnitude is
     /// larger than the last entry, the function uses a fixed terminal angle.
     /// The signed arithmetic wraps.
     pub(crate) fn process(&mut self, input: i32, shift: u32) -> i32 {
         let value = input.wrapping_shl(shift);
         let negative = value < 0;
-        let value = value.wrapping_abs();
+        let value = value.saturating_abs();
         if TAN[self.index] > value {
             while TAN[self.index - 1] > value {
                 self.index -= 1;

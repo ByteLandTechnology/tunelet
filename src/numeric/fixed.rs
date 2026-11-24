@@ -23,6 +23,11 @@ use std::ops::{Add, Neg, Shl, Shr, Sub};
 #[repr(transparent)]
 pub(crate) struct Fixed<const FRAC: u32>(i32);
 
+/// The format with 28 fractional bits, for the output ceiling of Punch.
+pub(crate) type Q28 = Fixed<28>;
+/// The format with 16 fractional bits, for stage gains, drives and linear
+/// steps.
+pub(crate) type Q16 = Fixed<16>;
 /// The format with 14 fractional bits, for audio, ratios, coefficients and
 /// frame positions.
 ///
