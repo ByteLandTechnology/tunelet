@@ -2,10 +2,11 @@
   <title id="title">The tunelet signal chain</title>
   <desc id="desc">Mono PCM goes through Punch, Warm, pitch tracking and resynthesis, Alien, reverb and the output gain. A dry path goes around the resynthesis stage.</desc>
   <style>
-    svg { --text: #1f2328; --muted: #59636e; --line: #8c959f; --fill: #f6f8fa; --accent: #0969da; --accent-fill: #ddf4ff; --dry: #9a6700; }
+    svg { --bg: #ffffff; --text: #1f2328; --muted: #59636e; --line: #656d76; --fill: #f6f8fa; --accent: #0969da; --accent-fill: #ddf4ff; --dry: #9a6700; }
     @media (prefers-color-scheme: dark) {
-      svg { --text: #e6edf3; --muted: #9198a1; --line: #6e7681; --fill: #161b22; --accent: #4493f8; --accent-fill: #0c2d52; --dry: #d29922; }
+      svg { --bg: #0d1117; --text: #e6edf3; --muted: #9198a1; --line: #7d8590; --fill: #161b22; --accent: #58a6ff; --accent-fill: #0c2d52; --dry: #d29922; }
     }
+    .bg { fill: var(--bg); }
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--text); }
     .name { font-size: 15px; font-weight: 600; text-anchor: middle; }
     .sub { font-size: 12px; fill: var(--muted); text-anchor: middle; }
@@ -31,6 +32,7 @@
       <path class="dryhead" d="M0,0 L10,5 L0,10 z"/>
     </marker>
   </defs>
+  <rect class="bg" width="100%" height="100%" fill="#ffffff"/>
 
   <!-- Input -->
   <rect class="io" x="10" y="82" width="100" height="56" rx="28"/>
