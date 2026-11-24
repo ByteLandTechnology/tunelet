@@ -216,11 +216,14 @@ processor.
 
 Select the process function for your output layout:
 
-| Output layout                  | Function for input      | Function for the tail |
-| ------------------------------ | ----------------------- | --------------------- |
-| `[[i16; 2]]` stereo frames     | `process`               | `drain`               |
-| Separate left and right slices | `process_planar`        | `drain_planar`        |
-| Mono slice                     | `process_mono_in_place` | `drain_mono`          |
+| Output layout                        | Function for input          | Function for the tail |
+| ------------------------------------ | --------------------------- | --------------------- |
+| `[[i16; 2]]` stereo frames           | `process`                   | `drain`               |
+| `[[f32; 2]]` stereo frames           | `process_f32`               | `drain_f32`           |
+| Separate `i16` left and right slices | `process_planar`            | `drain_planar`        |
+| Separate `f32` left and right slices | `process_planar_f32`        | `drain_planar_f32`    |
+| Mono `i16` slice                     | `process_mono_in_place`     | `drain_mono`          |
+| Mono `f32` slice                     | `process_mono_in_place_f32` | `drain_mono_f32`      |
 
 These rules apply to each call:
 
@@ -413,33 +416,39 @@ page that opens the JavaScript.
 
 ### TypeScript API
 
-| Operation                         | TypeScript API                                           |
-| --------------------------------- | -------------------------------------------------------- |
-| Shared initialization             | `loadTunelet(source?)`                                   |
-| Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
-| In-place mono downmix             | `processMono(audio, events?)`                            |
-| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
-| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
-| Feedback                          | `feedback()`, `takeFeedback()`                           |
-| Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
-| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`         |
-| Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)` |
-| Configured tail budget            | `tailFrames()`                                           |
-| Reset or release memory           | `reset()`, `free()`                                      |
+| Operation                         | TypeScript API                                                 |
+| --------------------------------- | -------------------------------------------------------------- |
+| Shared initialization             | `loadTunelet(source?)`                                         |
+| Mono `Int16Array` to stereo       | `process(input, left, right, events?)`                         |
+| Mono `Float32Array` to stereo     | `processF32(input, left, right, events?)`                      |
+| In-place `Int16Array` mono        | `processMono(audio, events?)`                                  |
+| In-place `Float32Array` mono      | `processMonoF32(audio, events?)`                               |
+| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`             |
+| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`                |
+| Feedback                          | `feedback()`, `takeFeedback()`                                 |
+| Telemetry                         | `telemetry()`, `takeTelemetry()`                               |
+| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`               |
+| `Int16Array` finite tail          | `beginDrain()`, `drain(left, right)`, `drainMono(audio)`       |
+| `Float32Array` finite tail        | `beginDrain()`, `drainF32(left, right)`, `drainMonoF32(audio)` |
+| Configured tail budget            | `tailFrames()`                                                 |
+| Reset or release memory           | `reset()`, `free()`                                            |
 
 ### Audio buffers
 
-All audio buffers are `Int16Array` buffers, and they must fit in the prepared
-frame limit. These rules apply:
+Audio methods accept `Int16Array` buffers or `Float32Array` buffers, and all
+buffers must fit in `maxBlockFrames`. These rules apply:
 
 - Stereo output arrays must not overlap.
 - The input can overlap an output, because the binding copies the input
   first.
 - Buffers must stay attached during each call.
 
-Web Audio uses Float32 samples, which you must convert to and from 16-bit
-PCM. This package does not install an AudioWorklet or an integration with an
-audio device.
+For `Float32Array` input, `NaN` becomes `0`, and other values clamp to
+`-1..=1`, multiply by `32767` and round to `-32767..=32767`. Each
+`Float32Array` output sample divides the clipped `i16` sample or downmix by
+`32768`, and unused drain frames get `0`. Web Audio channels can go directly
+to `processF32` or `processMonoF32`. This package does not install an
+AudioWorklet or an integration with an audio device.
 
 ### Configuration objects
 
