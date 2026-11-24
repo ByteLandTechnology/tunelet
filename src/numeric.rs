@@ -197,6 +197,16 @@ pub(crate) fn mul14(left: i32, right: i32) -> i32 {
     mul_shift(left, right, 14)
 }
 
+/// Multiplies two bounded Q14 words in `i32` with arithmetic truncation.
+///
+/// Callers must supply inputs with a magnitude of 46,340 or less. This
+/// prevents an `i32` overflow before the shift.
+#[inline]
+pub(crate) fn mul14_bounded(left: i32, right: i32) -> i32 {
+    debug_assert!(left.unsigned_abs() <= 46_340 && right.unsigned_abs() <= 46_340);
+    (left * right) >> 14
+}
+
 /// Wraps a signed frame index into 0..HISTORY with the Euclidean remainder.
 ///
 /// Negative reader positions also wrap correctly.
