@@ -99,5 +99,5 @@
   <text class="note" x="44" y="279">enabled by default</text>
   <rect class="node off" x="170" y="266" width="26" height="16" rx="4"/>
   <text class="note" x="204" y="279">disabled by default</text>
-  <text class="note" x="1082" y="279" text-anchor="end">Nominal latency: 1,593 frames at 44.1 kHz and 48 kHz</text>
+  <text class="note" x="1082" y="279" text-anchor="end">Nominal latency: 1,693 frames at 44.1 kHz and 48 kHz</text>
 </svg>

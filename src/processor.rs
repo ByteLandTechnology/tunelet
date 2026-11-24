@@ -1,7 +1,7 @@
 //! The processor: audio blocks, timed controls, host feedback and the tail.
 
 use crate::effects::alien::{self, Alien};
-use crate::effects::punch::{Punch, PunchConfig};
+use crate::effects::punch::Punch;
 use crate::effects::reverb::{self, Reverb};
 use crate::effects::warm::Warm;
 use crate::events::{ValidatedEvent, ValidatedEvents};
@@ -31,6 +31,10 @@ pub struct Processor {
     ///
     /// The temporary aspiration mute of a drain is not stored here.
     config: ProcessorConfig,
+    /// The 100-frame PCM lookahead ring, which advances also during bypass.
+    lookahead: [i16; resynthesis::LOOKAHEAD_FRAMES],
+    /// The read and write slot in `lookahead`.
+    lookahead_index: usize,
     /// The input dynamics stage, which advances only while it is enabled.
     punch: Punch,
     /// The input saturation stage, which advances only while it is enabled.
@@ -90,9 +94,9 @@ impl Processor {
     /// I/O. Audio histories, pitch reports and meters start clear. The random
     /// stream starts from the low 32 bits of `random_seed`.
     ///
-    /// Punch uses its default cached drive until the first window of 100
-    /// frames with Punch enabled. The initial note table of correction has the
-    /// rate behavior that [`crate::CorrectionConfig`] describes.
+    /// Punch initializes its drive immediately from `config.punch.gain_db`.
+    /// The initial note table of correction has the rate behavior that
+    /// [`crate::CorrectionConfig`] describes.
     ///
     /// # Errors
     ///
@@ -103,12 +107,12 @@ impl Processor {
     pub fn new(preparation: PrepareConfig, config: ProcessorConfig) -> Result<Self, Error> {
         config.validate()?;
         let rate = preparation.sample_rate;
-        // Drive uses the default gain until the first 100-frame peak window.
-        let mut punch = Punch::new(rate, PunchConfig::default());
-        punch.set_config(config.punch);
+        let punch = Punch::new(rate, config.punch);
         Ok(Self {
             preparation,
             config,
+            lookahead: [0; resynthesis::LOOKAHEAD_FRAMES],
+            lookahead_index: 0,
             punch,
             warm: Warm::new(rate, config.warm),
             resynthesis: Box::new(Resynthesis::new(rate, config.resynthesis)),
@@ -295,8 +299,8 @@ impl Processor {
     /// silence. It can also stop filter output that continues for a long
     /// time.
     pub fn tail_frames(&self) -> usize {
-        self.resynthesis
-            .tail_frames()
+        resynthesis::LOOKAHEAD_FRAMES
+            .saturating_add(self.resynthesis.tail_frames())
             .saturating_add(alien::tail_frames(self.config.alien))
             .saturating_add(reverb::tail_frames(
                 self.preparation.sample_rate,
@@ -319,10 +323,12 @@ impl Processor {
         self.config
     }
 
-    /// Returns the nominal resynthesis latency: 1,593 frames at both rates.
+    /// Returns the nominal processor latency: 1,693 frames at both rates.
     ///
-    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
-    /// and effects have their own timing. Thus, this value does not align all
+    /// This value includes the 100-frame lookahead and 1,593 frames in
+    /// resynthesis. The dry path has a delay of 1,643 frames (100 lookahead
+    /// frames and 1,543 overlap frames). Resampled voices, choir delays and
+    /// effects have their own timing. Thus, this value does not align all
     /// paths.
     pub fn latency_frames(&self) -> usize {
         resynthesis::LATENCY_FRAMES
@@ -375,7 +381,7 @@ impl Processor {
             voice_ratios,
             voice_gains,
             punch_gain: if self.config.punch.enabled {
-                self.punch.drive_ratio()
+                self.punch.stage_gain()
             } else {
                 1.0
             },
@@ -508,9 +514,10 @@ impl Processor {
     /// Clears the audio histories, held notes, pitch feedback, peak and frame
     /// count.
     ///
-    /// This method cancels an active drain. It also clears the correction
-    /// ratio, the Punch envelopes, the Warm filters, the Alien recording and
-    /// the reverb delays. It releases the harmony MIDI notes and, in
+    /// This method cancels an active drain. It also clears the lookahead ring,
+    /// the correction ratio, the Punch envelopes, the Warm filters, the Alien
+    /// recording and the reverb delays. It releases the harmony MIDI notes
+    /// and, in
     /// MIDI-chord mode, the chord voices. It keeps these items:
     ///
     /// - the configuration
@@ -529,6 +536,8 @@ impl Processor {
     /// When the method clears the held keys, it does not load the configured
     /// scale again. For a fully new state, make a new processor.
     pub fn reset(&mut self) {
+        self.lookahead.fill(0);
+        self.lookahead_index = 0;
         self.punch.reset();
         self.warm.reset();
         self.resynthesis.reset();
@@ -609,15 +618,22 @@ impl Processor {
     /// uses `i64` arithmetic before the symmetric `-32767..=32767` PCM clamp.
     /// This order and the peak measurement before the downmix are part of the
     /// output.
-    fn next(&mut self, mut input: i16) -> [i16; 2] {
+    fn next(&mut self, input: i16) -> [i16; 2] {
         self.input_peak = self.input_peak.max((input as i32).abs());
+        let mut delayed = self.lookahead[self.lookahead_index];
+        self.lookahead[self.lookahead_index] = input;
+        self.lookahead_index += 1;
+        if self.lookahead_index == resynthesis::LOOKAHEAD_FRAMES {
+            self.lookahead_index = 0;
+        }
+        let mut ahead = input;
         if self.config.punch.enabled {
-            input = self.punch.process_sample(input, &mut self.numeric);
+            (delayed, ahead) = self.punch.process_sample(delayed, ahead, &mut self.numeric);
         }
         if self.config.warm.enabled {
-            input = self.warm.process_sample(input);
+            delayed = self.warm.process_sample(delayed, ahead);
         }
-        let voice = self.resynthesis.process_sample(input, &mut self.numeric);
+        let voice = self.resynthesis.process_sample(delayed, &mut self.numeric);
         self.last_resample_ratio = self.resynthesis.resample_ratio();
         let alien = self.alien.process_sample(voice);
         let reverb = self.reverb.process_sample(alien);
@@ -771,7 +787,7 @@ pub struct Feedback {
     /// The count saturates at `u64::MAX`. Drain completion resets it in the
     /// last drain call.
     pub processed_frames: u64,
-    /// The nominal resynthesis latency, as [`Processor::latency_frames`] gives.
+    /// The nominal processor latency, as [`Processor::latency_frames`] gives.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(serialize_with = "crate::wasm::serialize_frame_count"),
@@ -855,18 +871,18 @@ pub struct Telemetry {
     /// harmony level or the pan. The harmony controller updates it every 101
     /// frames.
     pub voice_gains: [f32; 16],
-    /// The current drive of Punch, divided by its base drive.
+    /// The effective stage gain of Punch across the delayed envelope.
     ///
-    /// The value is the ratio of the two input envelopes times the
-    /// configured input gain. It is more than 1 at an attack. Punch updates
-    /// it every 100 frames. The value is 1 while Punch is disabled.
+    /// The value includes the adaptive drive and the ceiling saturation. Punch
+    /// updates it on each enabled frame. At zero envelope, it gives the
+    /// small-signal gain. The value is 1 while Punch is disabled.
     pub punch_gain: f32,
     /// The linear gain that Warm applies before its saturation curve and
     /// removes after it.
     ///
     /// The value is the inverse of the input peak envelope. For input below
-    /// -30 dB, it is the gain of +30 dB. Warm updates it every 100 frames.
-    /// The value is 1 while Warm is disabled.
+    /// -30 dB, it is the gain of +30 dB. Warm updates it on each enabled
+    /// frame. The value is 1 while Warm is disabled.
     pub warm_gain: f32,
     /// The length of the Alien loop in frames, as
     /// [`crate::AlienConfig::loop_frames`] gives.

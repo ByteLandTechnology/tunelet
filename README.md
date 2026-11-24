@@ -175,8 +175,10 @@ The internal Q14 stages use `i64` products and saturate at the `i32`
 limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
 multi-voice mixes.
 
-`resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+A 100-frame lookahead buffer runs before Punch, Warm and resynthesis, also
+during bypass. `resynthesis.dry_mix` sets the dry fraction at the resynthesis
+stage. The dry path starts after Warm and adds 1,543 frames of delay, for
+1,643 frames in total.
 
 ### Harmony sources
 
@@ -299,7 +301,7 @@ These calls read the state of the processor. They do not change the audio.
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
-| `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
+| `latency_frames()`   | 1,693 frames of nominal processor latency at both sample rates    |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
 
 The telemetry includes these items:

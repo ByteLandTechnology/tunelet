@@ -1,21 +1,19 @@
 //! Asymmetric saturation with gain compensation and a high-pass output filter.
 
+use crate::effects::{SlidingPeak, WINDOW_FRAMES};
 use crate::error::check_range;
 use crate::filter::{Biquad, Design};
-use crate::numeric::db_to_gain;
-use crate::numeric::fixed::{Fixed, Q12, Q14, Q8};
+use crate::numeric::fixed::{Fixed, Q12, Q14, Q20, Q28};
+use crate::numeric::{db_to_gain, envelope_decay};
 use crate::{Error, SampleRate};
-
-/// The update interval of the peak follower, in frames.
-const WINDOW_FRAMES: usize = 100;
 
 /// Asymmetric input saturation, followed by a 50 Hz high-pass filter.
 ///
 /// Warm operates after Punch and before pitch detection. Its adaptive
-/// normalization updates every 100 enabled frames. When Warm is disabled,
-/// the envelope and filter histories do not change. When Warm is enabled
-/// again, they continue from their last state, unless the processor was
-/// reset.
+/// normalization tracks a 100-frame lookahead peak window on each enabled
+/// frame. When Warm is disabled, the envelope and filter histories do not
+/// change. When Warm is enabled again, they continue from their last state,
+/// unless the processor was reset.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -61,27 +59,26 @@ impl WarmConfig {
 pub(crate) struct Warm {
     /// The 50 Hz one-pole high-pass output filter.
     filter: Biquad,
-    /// The kept Q14 peak envelope from completed windows.
-    peak: Q14,
-    /// The largest absolute Q14 sample in the current 100-frame window.
-    window_peak: Q14,
-    /// The number of enabled samples in this window.
-    counter: usize,
-    /// The Q8 normalization gain. The stage divides by it again after the
+    /// The 100-frame lookahead peak window.
+    window: SlidingPeak,
+    /// The Q28 peak envelope.
+    peak: Q28,
+    /// The lookahead frames left in the current upward peak ramp.
+    ramp_remaining: usize,
+    /// The Q20 normalization gain. The stage divides by it again after the
     /// nonlinear curve.
-    compression: Q8,
-    /// The Q14 envelope coefficient for a 200 ms half-life at the window
-    /// cadence.
-    smooth: Q14,
+    compression: Q20,
+    /// The Q28 envelope coefficient for a 200 ms half-life on each frame.
+    smooth: Q28,
     /// The linear saturation drive in Q12.
     drive: Q12,
     /// The Q14 compensation from the configured drive.
     output_gain: Q14,
-    /// The Q14 threshold of -30 dB. If the peak envelope is not above it, the
+    /// The Q28 threshold of -30 dB. If the peak envelope is not above it, the
     /// normalization uses a fixed headroom.
-    input_threshold: Q14,
-    /// The Q8 normalization gain of +30 dB for input below the threshold.
-    output_headroom: Q8,
+    input_threshold: Q28,
+    /// The Q20 normalization gain of +30 dB for input below the threshold.
+    output_headroom: Q20,
 }
 impl Warm {
     /// Prepares the fixed high-pass filter and the initial normalization
@@ -91,23 +88,22 @@ impl Warm {
         filter.set_design(Design::high_pass_one_pole(rate.hz(), 50.0));
         let mut result = Self {
             filter,
-            peak: Q14::default(),
-            window_peak: Q14::default(),
-            counter: 0,
-            compression: Q8::ONE,
-            smooth: Q14::from_f64(0.5_f64.powf(1.0 / (rate.hz() as f64 * 0.2 / 100.0))),
+            window: SlidingPeak::new(),
+            peak: Q28::ZERO,
+            ramp_remaining: 0,
+            compression: Q20::ONE,
+            smooth: Q28::from_f64(envelope_decay(200.0, rate.hz() as f64, 1)),
             drive: Q12::default(),
             output_gain: Q14::default(),
-            input_threshold: Q14::from_f64(db_to_gain(-30.0)),
-            output_headroom: Q8::from_f64(db_to_gain(30.0)),
+            input_threshold: Q28::from_f64(db_to_gain(-30.0)),
+            output_headroom: Q20::from_f64(db_to_gain(30.0)),
         };
         result.set_config(config);
         result
     }
-    /// Returns the Q8 normalization gain as f32. The stage state does not
-    /// change.
+    /// Returns the normalization gain as f32. The stage state does not change.
     pub(crate) fn normalization_gain(&self) -> f32 {
-        (self.compression.to_bits() as f64 / 256.0) as f32
+        (self.compression.to_bits() as f64 / f64::from(1u32 << 20)) as f32
     }
     /// Updates the drive and the output compensation, and keeps the envelope
     /// and filter state.
@@ -115,48 +111,54 @@ impl Warm {
         self.drive = Q12::from_f64(db_to_gain(config.drive_db as f64));
         self.output_gain = Q14::from_f64(db_to_gain(-(config.drive_db as f64) * 0.35));
     }
-    /// Clears the filter memories, the peak windows and the normalization,
-    /// and keeps the coefficients.
+    /// Clears the filter memories, the peak window and the normalization, and
+    /// keeps the coefficients.
     pub(crate) fn reset(&mut self) {
         self.filter.reset();
-        self.peak = Q14::default();
-        self.window_peak = Q14::default();
-        self.counter = 0;
-        self.compression = Q8::ONE;
+        self.window.reset();
+        self.peak = Q28::ZERO;
+        self.ramp_remaining = 0;
+        self.compression = Q20::ONE;
     }
-    /// Processes one PCM sample through the saturation and the high-pass
-    /// filter.
+    /// Updates the lookahead peak envelope and processes one delayed PCM
+    /// sample through the saturation and the high-pass filter.
     ///
     /// The steps are:
     ///
-    /// 1. Normalize the sample.
-    /// 2. Shape the positive and negative halves differently.
-    /// 3. Remove the normalization.
-    /// 4. Apply the high-pass filter and clip the result.
-    ///
-    /// The window update uses the current sample for the branch with an
-    /// immediate attack. It uses the window peak for the smoothed branch.
-    /// These values are not interchangeable. This difference is intentional.
-    pub(crate) fn process_sample(&mut self, input: i16) -> i16 {
-        let mut sample = Q14::from_bits(i32::from(input) >> 1);
-        self.window_peak = self.window_peak.max(sample.abs());
-        self.counter += 1;
-        if self.counter == WINDOW_FRAMES {
-            self.counter = 0;
-            self.peak = if sample.abs() > self.peak {
-                sample.abs()
+    /// 1. Update the 100-frame lookahead peak and move the envelope toward it.
+    /// 2. Normalize the delayed sample.
+    /// 3. Shape the positive and negative halves differently.
+    /// 4. Remove the normalization.
+    /// 5. Apply the high-pass filter and clip the result.
+    pub(crate) fn process_sample(&mut self, input: i16, lookahead: i16) -> i16 {
+        let ahead = Q14::from_bits(i32::from(lookahead) >> 1)
+            .abs()
+            .rescale::<28>();
+        let target = self.window.push(ahead);
+        if target > self.peak {
+            if self.ramp_remaining == 0 {
+                self.ramp_remaining = WINDOW_FRAMES;
+            }
+            let remaining = self.ramp_remaining as i32;
+            let step = (target.to_bits() - self.peak.to_bits()) / remaining;
+            self.peak = if self.ramp_remaining == 1 {
+                target
             } else {
-                self.window_peak + self.smooth.mul(self.peak - self.window_peak)
+                Q28::from_bits(self.peak.to_bits() + step)
             };
-            self.compression = if self.peak > self.input_threshold {
-                Fixed::<22>::ONE.div(self.peak)
-            } else {
-                self.output_headroom
-            };
-            self.window_peak = Q14::default();
+            self.ramp_remaining -= 1;
+        } else {
+            self.ramp_remaining = 0;
+            self.peak = target + self.smooth.mul(self.peak - target);
         }
+        self.compression = if self.peak > self.input_threshold {
+            Fixed::<24>::ONE.div(self.peak)
+        } else {
+            self.output_headroom
+        };
+        let mut sample = Q14::from_bits(i32::from(input) >> 1);
         sample = sample
-            .mul::<8, 14>(self.compression)
+            .mul::<20, 14>(self.compression)
             .clamp(-Q14::ONE, Q14::ONE);
         if sample > Q14::default() {
             let knee: Q12 = (self.drive - Q12::ONE).mul(sample);

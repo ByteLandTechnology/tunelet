@@ -153,10 +153,11 @@ impl CorrectionConfig {
 /// Validation applies to all controls, also when their stage or voice mode
 /// is not active.
 ///
-/// The dry path takes the audio after Punch and Warm and delays it by 1,543
-/// frames. The wet voice readers have more delay, which changes with the
-/// pitch. After this stage, the two paths go through Alien, reverb and the
-/// final output gain.
+/// The dry path takes the delayed audio after Punch and Warm and adds 1,543
+/// frames of overlap delay, for 1,643 frames from the processor input. The
+/// wet voice readers have more delay, which changes with the pitch. After
+/// this stage, the two paths go through Alien, reverb and the final output
+/// gain.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -238,9 +239,9 @@ pub struct ResynthesisConfig {
     /// The dry fraction at the resynthesis stage, 0..=1. The default is 0.
     ///
     /// The code truncates this value to Q8. The wet weight is 1.0 minus the
-    /// Q8 dry weight. The dry path starts after Punch and Warm and has a
-    /// delay of 1,543 frames. Alien, reverb and the output gain still occur
-    /// after this stage.
+    /// Q8 dry weight. The dry path starts after Punch and Warm and adds 1,543
+    /// frames to the 100-frame lookahead, for 1,643 frames in total. Alien,
+    /// reverb and the output gain still occur after this stage.
     pub dry_mix: f32,
     /// The seed for choir drift and aspiration, which use the same stream.
     /// The default is `0x1234_abcd`.
@@ -321,19 +322,22 @@ const SEEDS: [i32; 16] = [
     0x0dda, 0x01da, 0x167f, 0x0896,
 ];
 
-/// The length of the analysis overlap buffer. The dry path has the same
-/// delay.
+/// The length of the lookahead ring before Punch, Warm and resynthesis.
+pub(crate) const LOOKAHEAD_FRAMES: usize = 100;
+/// The length of the analysis overlap buffer. The dry path adds this delay
+/// after Warm.
 const OVERLAP_FRAMES: usize = 1543;
 /// The offset from the history position of a reader to its position for
 /// formant synthesis.
 const FORMANT_OFFSET_FRAMES: i32 = (OVERLAP_FRAMES - ANALYSIS_FRAMES) as i32;
 /// The number of frames that a new reader stays behind the write position.
 const READER_LAG_FRAMES: i32 = 50;
-/// The nominal latency of resynthesis. Each reader moves with the pitch and
-/// the delay.
+/// The nominal latency of the processor, with the 100-frame lookahead. Each
+/// reader moves with the pitch and the delay.
 ///
-/// The dry path uses only `OVERLAP_FRAMES`.
-pub(crate) const LATENCY_FRAMES: usize = OVERLAP_FRAMES + READER_LAG_FRAMES as usize;
+/// The dry path uses `LOOKAHEAD_FRAMES + OVERLAP_FRAMES` (1,643 frames).
+pub(crate) const LATENCY_FRAMES: usize =
+    LOOKAHEAD_FRAMES + OVERLAP_FRAMES + READER_LAG_FRAMES as usize;
 /// The counter value at which a control step runs. Usually, a step runs
 /// every 101 eligible frames.
 ///
