@@ -69,7 +69,7 @@ pub struct BlockEvents(Vec<TimedEvent>);
 ///
 /// # Errors
 ///
-/// If the conversion to a JavaScript object fails, this function returns a
+/// If the conversion to a JavaScript object fails, this function throws a
 /// JavaScript `Error`.
 #[wasm_bindgen(js_name = defaultConfig)]
 pub fn default_config() -> Result<Ts<ProcessorConfig>, JsError> {
@@ -297,9 +297,10 @@ impl WasmProcessor {
 
     /// Starts a finite tail budget and returns its frame count as a number.
     ///
-    /// Call this method one time after the final input block. Another call
-    /// starts the full budget again, but it does not clear the histories. Refer
-    /// to `drain` for completion.
+    /// Call this method one time after the final input block. Then call `drain`
+    /// or `drainMono` until the call returns zero. Completion resets the audio
+    /// histories and the feedback in the final drain call. Another call starts
+    /// the full budget again, and it does not clear the histories.
     #[wasm_bindgen(js_name = beginDrain)]
     pub fn begin_drain(&mut self) -> usize {
         self.processor.begin_drain()
@@ -337,11 +338,14 @@ impl WasmProcessor {
         Ok(count)
     }
 
-    /// Renders a mono tail block and returns its frame count.
+    /// Renders a mono tail block in `audio` and returns its frame count.
     ///
-    /// The method fills the unused output with zeros. The downmix and the peak
-    /// feedback are the same as for `processMono`. The return values, empty
-    /// arrays and completion are the same as for `drain`.
+    /// The method mixes each stereo tail frame to mono and fills the unused
+    /// output with zeros. Peak feedback measures the stereo output before the
+    /// mono downmix. If the drain is not active or is complete, the method
+    /// returns zero. Empty arrays do not use the budget. Completion resets the
+    /// histories and the feedback in the final drain call, also when that call
+    /// returns audio.
     ///
     /// # Errors
     ///

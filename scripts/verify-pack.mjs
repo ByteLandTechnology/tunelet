@@ -188,6 +188,116 @@ function verifyRuntimeImport(consumerDir, packageName) {
   });
 }
 
+/** Extract JSDoc comment blocks from a file and strip their comment markers. */
+function extractJsDocBlocks(source) {
+  return [...source.matchAll(/\/\*\*[\s\S]*?\*\//g)].map((match) => {
+    const block = match[0];
+    if (!block.includes("\n")) {
+      return block.slice(3, -2).trim();
+    }
+    return block
+      .split("\n")
+      .slice(1, -1)
+      .map((line) => line.replace(/^[ \t]*\*(?: |$)/, ""))
+      .join("\n");
+  });
+}
+
+/** Extract the JSDoc block immediately before a named member or export. */
+function extractMemberJsDoc(source, pattern, label) {
+  const match = pattern.exec(source);
+  assert.ok(match, `Expected JSDoc block for ${label}`);
+  return extractJsDocBlocks(match[1])[0];
+}
+
+/** Check that packed JSDoc comments contain clean TypeScript documentation. */
+function verifyNormalizedJsDoc(consumerDir, packageName) {
+  const installedDir = path.join(
+    consumerDir,
+    "node_modules",
+    ...packageName.split("/"),
+  );
+  const filesToCheck = [
+    path.join(installedDir, "dist", "index.d.ts"),
+    path.join(installedDir, "dist", "index.js"),
+    path.join(installedDir, "pkg", "tunelet.d.ts"),
+    path.join(installedDir, "pkg", "tunelet.js"),
+  ];
+
+  for (const filePath of filesToCheck) {
+    const content = fs.readFileSync(filePath, "utf8");
+    const blocks = extractJsDocBlocks(content);
+    assert.ok(blocks.length > 0, `Expected JSDoc blocks in ${filePath}`);
+    for (const text of blocks) {
+      assert.doesNotMatch(
+        text,
+        /(?:^|\n)#+\s/,
+        `Unexpected Markdown heading in ${filePath}`,
+      );
+      assert.ok(
+        !text.includes("::"),
+        `Unexpected Rust path separator in ${filePath}`,
+      );
+      assert.ok(
+        !text.includes("..="),
+        `Unexpected Rust inclusive range in ${filePath}`,
+      );
+      assert.doesNotMatch(
+        text,
+        /\b(?:None|NONE)\b/,
+        `Unexpected Rust None literal in ${filePath}`,
+      );
+      assert.doesNotMatch(
+        text,
+        /\[`[^`]+`\]/,
+        `Unexpected Rust intra-doc link in ${filePath}`,
+      );
+      assert.ok(
+        !text.includes("`Default`"),
+        `Unexpected Rust Default trait reference in ${filePath}`,
+      );
+      assert.doesNotMatch(
+        text,
+        /`(?:max_frequency_hz|min_frequency_hz|stereo_output|retune_ms|attack_ms)`/,
+        `Unexpected snake_case config field in ${filePath}`,
+      );
+    }
+  }
+
+  const dts = fs.readFileSync(
+    path.join(installedDir, "pkg", "tunelet.d.ts"),
+    "utf8",
+  );
+  const throwsCount = [...dts.matchAll(/\* @throws /g)].length;
+  assert.equal(throwsCount, 13, `Expected 13 @throws tags, found ${throwsCount}`);
+
+  const latencyDoc = extractMemberJsDoc(
+    dts,
+    /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+readonly latencyFrames: number;/,
+    "latencyFrames",
+  );
+  assert.ok(!latencyDoc.includes("latencyFrames"));
+  assert.ok(latencyDoc.includes("1,543 frames"));
+
+  const beginDrainDoc = extractMemberJsDoc(
+    dts,
+    /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+beginDrain\(\): number;/,
+    "beginDrain",
+  );
+  assert.ok(!beginDrainDoc.includes("beginDrain"));
+  assert.ok(beginDrainDoc.includes("returns zero"));
+  assert.ok(beginDrainDoc.includes("Completion resets"));
+
+  const drainMonoDoc = extractMemberJsDoc(
+    dts,
+    /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+drainMono\(audio: Int16Array\): number;/,
+    "drainMono",
+  );
+  assert.ok(!drainMonoDoc.includes("drainMono"));
+  assert.ok(drainMonoDoc.includes("mono downmix"));
+  assert.ok(drainMonoDoc.includes("Completion resets"));
+}
+
 /** Check TypeScript resolution for the root entry and the `./wasm` entry. */
 function verifyTypeDeclarations(consumerDir, packageName) {
   const checkTsPath = path.join(consumerDir, "check.ts");
@@ -271,6 +381,7 @@ try {
   installArchive(tempDir, relativeArchivePath, consumerDir, packageName);
   verifyRuntimeImport(consumerDir, packageName);
   verifyTypeDeclarations(consumerDir, packageName);
+  verifyNormalizedJsDoc(consumerDir, packageName);
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }
