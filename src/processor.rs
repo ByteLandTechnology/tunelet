@@ -5,6 +5,7 @@ use crate::effects::punch::{Punch, PunchConfig};
 use crate::effects::reverb::{self, Reverb};
 use crate::effects::warm::Warm;
 use crate::events::{ValidatedEvent, ValidatedEvents};
+use crate::numeric::fixed::{Frame, Q14};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
 use crate::resynthesis::{self, Resynthesis};
@@ -151,7 +152,7 @@ impl Processor {
     ) -> Result<(), Error> {
         Error::check_length(input.len(), output.len())?;
         self.process_into(input.len(), events, |processor, index| {
-            output[index] = processor.next(input[index]);
+            output[index] = processor.next(input[index]).into_stereo();
         })
     }
 
@@ -178,7 +179,7 @@ impl Processor {
         Error::check_length(input.len(), left.len())?;
         Error::check_length(input.len(), right.len())?;
         self.process_into(input.len(), events, |processor, index| {
-            let frame = processor.next(input[index]);
+            let frame = processor.next(input[index]).into_stereo();
             left[index] = frame[0];
             right[index] = frame[1];
         })
@@ -203,8 +204,7 @@ impl Processor {
         events: &[TimedEvent],
     ) -> Result<(), Error> {
         self.process_into(audio.len(), events, |processor, index| {
-            let output = processor.next(audio[index]);
-            audio[index] = downmix(output);
+            audio[index] = finish_mono(processor.next(audio[index]));
         })
     }
 
@@ -240,7 +240,9 @@ impl Processor {
     /// If the output is larger than the prepared block limit, the method
     /// returns [`Error::BlockTooLarge`] and does not change state or output.
     pub fn drain(&mut self, output: &mut [[i16; 2]]) -> Result<usize, Error> {
-        let count = self.drain_into(output.len(), |index, frame| output[index] = frame)?;
+        let count = self.drain_into(output.len(), |index, frame| {
+            output[index] = frame.into_stereo()
+        })?;
         output[count..].fill([0; 2]);
         Ok(count)
     }
@@ -259,6 +261,7 @@ impl Processor {
     pub fn drain_planar(&mut self, left: &mut [i16], right: &mut [i16]) -> Result<usize, Error> {
         Error::check_length(left.len(), right.len())?;
         let count = self.drain_into(left.len(), |index, frame| {
+            let frame = frame.into_stereo();
             left[index] = frame[0];
             right[index] = frame[1];
         })?;
@@ -282,7 +285,7 @@ impl Processor {
     /// returns [`Error::BlockTooLarge`] before it changes output or state.
     pub fn drain_mono(&mut self, output: &mut [i16]) -> Result<usize, Error> {
         let count = self.drain_into(output.len(), |index, frame| {
-            output[index] = downmix(frame);
+            output[index] = finish_mono(frame);
         })?;
         output[count..].fill(0);
         Ok(count)
@@ -609,7 +612,7 @@ impl Processor {
     /// uses `i64` arithmetic before the symmetric `-32767..=32767` PCM clamp.
     /// This order and the peak measurement before the downmix are part of the
     /// output.
-    fn next(&mut self, mut input: i16) -> [i16; 2] {
+    fn next(&mut self, mut input: i16) -> Frame<i16> {
         self.input_peak = self.input_peak.max((input as i32).abs());
         if self.config.punch.enabled {
             input = self.punch.process_sample(input, &mut self.numeric);
@@ -622,16 +625,27 @@ impl Processor {
         let alien = self.alien.process_sample(voice);
         let reverb = self.reverb.process_sample(alien);
         let gain = (self.config.output_gain as f64 * 256.0) as i64;
-        let result = reverb.map(|sample| {
-            (((i64::from(sample.to_bits()) * gain) >> 8) << 1).clamp(-32767, 32767) as i16
-        });
-        self.peak = self
-            .peak
-            .max((result[0] as i32).abs())
-            .max((result[1] as i32).abs());
-        for (peak, sample) in self.output_peaks.iter_mut().zip(result) {
-            *peak = (*peak).max((sample as i32).abs());
-        }
+        let result = match reverb {
+            Frame::Mono(sample) => {
+                let out = apply_output_gain(sample, gain);
+                let magnitude = (out as i32).abs();
+                self.peak = self.peak.max(magnitude);
+                self.output_peaks[0] = self.output_peaks[0].max(magnitude);
+                self.output_peaks[1] = self.output_peaks[1].max(magnitude);
+                Frame::Mono(out)
+            }
+            Frame::Stereo(samples) => {
+                let out = samples.map(|sample| apply_output_gain(sample, gain));
+                self.peak = self
+                    .peak
+                    .max((out[0] as i32).abs())
+                    .max((out[1] as i32).abs());
+                for (peak, sample) in self.output_peaks.iter_mut().zip(out) {
+                    *peak = (*peak).max((sample as i32).abs());
+                }
+                Frame::Stereo(out)
+            }
+        };
         self.frames = self.frames.saturating_add(1);
         result
     }
@@ -668,7 +682,7 @@ impl Processor {
     fn drain_into(
         &mut self,
         frames: usize,
-        mut write: impl FnMut(usize, [i16; 2]),
+        mut write: impl FnMut(usize, Frame<i16>),
     ) -> Result<usize, Error> {
         self.check_block(frames)?;
         let count = self.drain_remaining.unwrap_or(0).min(frames);
@@ -693,6 +707,21 @@ impl Processor {
             self.drain_remaining = Some(remaining);
         }
         Ok(count)
+    }
+}
+
+/// Applies the Q8 output gain to one Q14 sample and clamps to PCM bounds.
+#[inline]
+fn apply_output_gain(sample: Q14, gain: i64) -> i16 {
+    (((i64::from(sample.to_bits()) * gain) >> 8) << 1).clamp(-32767, 32767) as i16
+}
+
+/// Writes a mono frame directly or mixes a stereo frame to mono.
+#[inline]
+fn finish_mono(frame: Frame<i16>) -> i16 {
+    match frame {
+        Frame::Mono(sample) => sample,
+        Frame::Stereo(pair) => downmix(pair),
     }
 }
 

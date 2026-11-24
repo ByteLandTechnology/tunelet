@@ -2,7 +2,7 @@
 
 use crate::error::check_range;
 use crate::filter::{Biquad, Design};
-use crate::numeric::fixed::{Fixed, Q14};
+use crate::numeric::fixed::{Fixed, Frame, Q14};
 use crate::{Error, SampleRate};
 
 /// The echo or reverberation network. The default is [`Self::Echo`].
@@ -229,14 +229,20 @@ impl Reverb {
     /// In bypass, no delay or filter history advances. The internal mono
     /// averages use integer division toward zero. The PCM downmix in the
     /// processor uses a shift.
-    pub(crate) fn process_sample(&mut self, frame: [Q14; 2]) -> [Q14; 2] {
+    pub(crate) fn process_sample(&mut self, frame: Frame) -> Frame {
         if !self.config.enabled {
             return frame;
         }
         self.dirty = true;
-        let [left, right] = frame;
-        let mono =
-            Q14::from_bits(((i64::from(left.to_bits()) + i64::from(right.to_bits())) / 2) as i32);
+        let ([left, right], mono) = match frame {
+            Frame::Mono(sample) => ([sample, sample], sample),
+            Frame::Stereo([left, right]) => {
+                let mono = Q14::from_bits(
+                    ((i64::from(left.to_bits()) + i64::from(right.to_bits())) / 2) as i32,
+                );
+                ([left, right], mono)
+            }
+        };
         let t = self.taps;
         let dry = Q14::ONE - self.mix;
         let d = &mut self.delay;
@@ -269,7 +275,13 @@ impl Reverb {
                 d.allpass(t[40], t[43], self.decay);
                 d.allpass(t[44], t[45], self.decay);
                 let value = mul(mono, dry) + mul(self.mix, d.get(t[45]));
-                [value, value]
+                d.step();
+                let wet = (value - mul(mono, dry)).abs().to_bits();
+                self.wet_peak = self.wet_peak.max(wet);
+                return match frame {
+                    Frame::Mono(_) => Frame::Mono(value),
+                    Frame::Stereo(_) => Frame::Stereo([value, value]),
+                };
             }
             ReverbMode::SmallRoom => {
                 d.put(left, t[0]);
@@ -378,11 +390,8 @@ impl Reverb {
         }
         d.step();
         // Telemetry only. The wet contribution is the output minus the dry
-        // term. Schroeder and Binaural use the mono dry signal.
-        let dry_input = if matches!(
-            self.config.mode,
-            ReverbMode::Schroeder | ReverbMode::Binaural
-        ) {
+        // term. Binaural uses the mono dry signal.
+        let dry_input = if self.config.mode == ReverbMode::Binaural {
             [mono, mono]
         } else {
             [left, right]
@@ -391,7 +400,7 @@ impl Reverb {
             let wet = (*value - mul(input, dry)).abs().to_bits();
             self.wet_peak = self.wet_peak.max(wet);
         }
-        result
+        Frame::Stereo(result)
     }
 }
 

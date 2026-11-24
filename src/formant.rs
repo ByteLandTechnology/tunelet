@@ -189,6 +189,9 @@ pub(crate) struct Formant {
     /// The next slot in the synthesis history. The two channels use the same
     /// slot.
     history_index: usize,
+    /// If `true`, the two synthesis feedback histories can hold different
+    /// values.
+    channels_diverged: bool,
     /// The two previous normalized autocorrelation vectors for the moving
     /// average.
     correlation_history: [[i32; 111]; 2],
@@ -281,6 +284,7 @@ impl Formant {
             design_counter: 0,
             history: [[0; MAX_ORDER]; 2],
             history_index: 0,
+            channels_diverged: false,
             correlation_history: [[0; 111]; 2],
             correlation_sum: [0; 111],
             smooth_index: 0,
@@ -345,6 +349,7 @@ impl Formant {
         self.stamps.fill(Stamp::default());
         self.history = [[0; MAX_ORDER]; 2];
         self.history_index = 0;
+        self.channels_diverged = false;
         self.current = BANKS - 1;
         self.next_filter();
         self.next_filter();
@@ -829,6 +834,18 @@ impl Formant {
         }
         true
     }
+    /// If the two synthesis histories hold equal samples, returns `true`.
+    #[inline]
+    pub(crate) fn channels_match(&mut self) -> bool {
+        if !self.channels_diverged {
+            return true;
+        }
+        if self.history[0] == self.history[1] {
+            self.channels_diverged = false;
+            return true;
+        }
+        false
+    }
     /// Applies the optional aspiration and the stamped synthesis model to one
     /// Q14 excitation, then scales the result by the width.
     ///
@@ -839,6 +856,27 @@ impl Formant {
         sample: i32,
         position: i32,
         context: &mut NumericContext,
+    ) -> i32 {
+        self.forward_channel_zero(sample, position, context, false)
+    }
+    /// Runs [`Self::forward`] on channel zero and copies the feedback sample to
+    /// channel one.
+    pub(crate) fn forward_mirrored(
+        &mut self,
+        sample: i32,
+        position: i32,
+        context: &mut NumericContext,
+    ) -> i32 {
+        self.forward_channel_zero(sample, position, context, true)
+    }
+    /// Synthesizes one Q14 excitation on channel zero. If `mirror` is `true`,
+    /// writes the feedback sample to channel one also.
+    fn forward_channel_zero(
+        &mut self,
+        sample: i32,
+        position: i32,
+        context: &mut NumericContext,
+        mirror: bool,
     ) -> i32 {
         self.dirty = true;
         let sample = self.add_noise(sample, context);
@@ -852,6 +890,11 @@ impl Formant {
         let sum = ring_sum(&self.history[0], self.history_index, coefficients);
         let sample = sample.saturating_add(round_q14(sum));
         self.history[0][self.history_index] = sample;
+        if mirror {
+            self.history[1][self.history_index] = sample;
+        } else if sample != self.history[1][self.history_index] {
+            self.channels_diverged = true;
+        }
         self.history_index += 1;
         if self.history_index == MAX_ORDER {
             self.history_index = 0;
@@ -893,6 +936,9 @@ impl Formant {
             *sample = sample.saturating_add(round_q14(sums[channel]));
             self.history[channel][self.history_index] = *sample;
             *sample = round_q14(i64::from(*sample) * i64::from(self.width));
+        }
+        if self.history[0][self.history_index] != self.history[1][self.history_index] {
+            self.channels_diverged = true;
         }
         self.history_index += 1;
         if self.history_index == MAX_ORDER {

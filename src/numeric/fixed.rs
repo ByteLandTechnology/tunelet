@@ -38,6 +38,37 @@ pub(crate) type Q8 = Fixed<8>;
 /// The format with 6 fractional bits, for periods in samples.
 pub(crate) type Q6 = Fixed<6>;
 
+/// One mono sample or a `[left, right]` stereo pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Frame<T = Q14> {
+    /// One sample for the two channels.
+    Mono(T),
+    /// Separate left and right samples.
+    Stereo([T; 2]),
+}
+
+impl<T: Copy> Frame<T> {
+    /// Expands a mono sample to `[sample, sample]` or returns the stereo pair.
+    #[inline]
+    pub(crate) fn into_stereo(self) -> [T; 2] {
+        match self {
+            Self::Mono(sample) => [sample, sample],
+            Self::Stereo(pair) => pair,
+        }
+    }
+}
+
+impl<T> Frame<T> {
+    /// Applies `f` one time to a mono sample or in channel order to a pair.
+    #[inline]
+    pub(crate) fn map<U>(self, mut f: impl FnMut(T) -> U) -> Frame<U> {
+        match self {
+            Self::Mono(sample) => Frame::Mono(f(sample)),
+            Self::Stereo([left, right]) => Frame::Stereo([f(left), f(right)]),
+        }
+    }
+}
+
 impl<const F: u32> Fixed<F> {
     /// The exact value zero in this format.
     pub(crate) const ZERO: Self = Self(0);

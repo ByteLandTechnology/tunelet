@@ -1,7 +1,7 @@
 //! Reverse-loop playback with a continuous input history and boundary fades.
 
 use crate::error::check_count;
-use crate::numeric::fixed::{Fixed, Q14};
+use crate::numeric::fixed::{Fixed, Frame, Q14};
 use crate::Error;
 
 /// The number of history frames that the loop reads from.
@@ -116,8 +116,8 @@ impl Alien {
     /// The recording cursor moves forward by one and the reverse offset
     /// increases by two. Thus, the playback moves backward by one frame. The
     /// validated loop limit keeps that subtraction in a single ring wrap.
-    pub(crate) fn process_sample(&mut self, input: [Q14; 2]) -> [Q14; 2] {
-        self.buffer[self.read] = input;
+    pub(crate) fn process_sample(&mut self, input: Frame) -> Frame {
+        self.buffer[self.read] = input.into_stereo();
         if self.written < HISTORY_FRAMES {
             self.written += 1;
         }
@@ -129,7 +129,12 @@ impl Alien {
                 read
             };
             let distance = self.phase.min(self.loop_len - self.phase);
-            let mut result = self.buffer[read];
+            let [left, right] = self.buffer[read];
+            let mut result = if left == right {
+                Frame::Mono(left)
+            } else {
+                Frame::Stereo([left, right])
+            };
             if distance < FADE_FRAMES {
                 let gain: Q14 = Fixed::<0>::from_bits(distance as i32)
                     .div(Fixed::<0>::from_bits(FADE_FRAMES as i32));

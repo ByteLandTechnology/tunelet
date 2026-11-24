@@ -34,7 +34,7 @@ use crate::filter::{Biquad, Design};
 use crate::formant::{Formant, FormantConfig, ANALYSIS_FRAMES};
 use crate::harmony::{HarmonyConfig, HarmonyState, HARMONY_VOICES};
 use crate::midi::MidiEvent;
-use crate::numeric::fixed::{Q12, Q14, Q6, Q8};
+use crate::numeric::fixed::{Frame, Q12, Q14, Q6, Q8};
 use crate::numeric::{clamp_i32, ring, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
@@ -1083,7 +1083,7 @@ impl Resynthesis {
         (value, ratio)
     }
 
-    /// Renders one mono PCM input frame into stereo Q14 samples.
+    /// Renders one mono PCM input frame into a mono or stereo Q14 frame.
     ///
     /// The order of calls follows the module pipeline:
     /// 1. Analysis and control.
@@ -1097,7 +1097,7 @@ impl Resynthesis {
     /// readers. Their relative positions do not change. MIDI can make a
     /// harmony control step occur. The choir control advances only if
     /// tracking was active before this frame.
-    pub(crate) fn process_sample(&mut self, input: i16, numeric: &mut NumericContext) -> [Q14; 2] {
+    pub(crate) fn process_sample(&mut self, input: i16, numeric: &mut NumericContext) -> Frame {
         let sample = Q14::from_bits(i32::from(input) >> 1);
         self.write += 1;
         if self.write == HISTORY {
@@ -1184,7 +1184,11 @@ impl Resynthesis {
         self.filtered[write] = filtered;
         let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
         let dry = self.raw[delayed];
-        let mut mix = [Q14::ZERO; 2];
+        let mut mix = if self.config.stereo_output {
+            Frame::Stereo([Q14::ZERO; 2])
+        } else {
+            Frame::Mono(Q14::ZERO)
+        };
         let mut final_ratio = Q14::ONE;
         if self.config.mode == MultiVoiceMode::Choir {
             let voice_count = self.config.choir_voices as usize;
@@ -1193,13 +1197,13 @@ impl Resynthesis {
                 let (value, ratio) = self.render_lead(delayed, numeric);
                 final_ratio = ratio;
                 self.voice_ratios[0] = ratio;
-                for (channel, sum) in mix.iter_mut().enumerate() {
-                    *sum = *sum
-                        + if self.config.stereo_output {
-                            value.mul(self.pan[0][channel])
-                        } else {
-                            value
-                        };
+                match &mut mix {
+                    Frame::Mono(sum) => *sum = *sum + value,
+                    Frame::Stereo(sums) => {
+                        for (channel, sum) in sums.iter_mut().enumerate() {
+                            *sum = *sum + value.mul(self.pan[0][channel]);
+                        }
+                    }
                 }
             }
             {
@@ -1226,15 +1230,19 @@ impl Resynthesis {
                     let values =
                         positions.map(|position| history::interpolation(&self.lead, position).0);
                     // Keep the voice and channel order of each sum.
-                    for (lane, value) in values.into_iter().enumerate() {
-                        let current_voice = voice + lane;
-                        for (channel, sum) in mix.iter_mut().enumerate() {
-                            *sum = *sum
-                                + if self.config.stereo_output {
-                                    value.mul(self.pan[current_voice][channel])
-                                } else {
-                                    value
-                                };
+                    match &mut mix {
+                        Frame::Mono(sum) => {
+                            for value in values {
+                                *sum = *sum + value;
+                            }
+                        }
+                        Frame::Stereo(sums) => {
+                            for (lane, value) in values.into_iter().enumerate() {
+                                let current_voice = voice + lane;
+                                for (channel, sum) in sums.iter_mut().enumerate() {
+                                    *sum = *sum + value.mul(self.pan[current_voice][channel]);
+                                }
+                            }
                         }
                     }
                     voice += 4;
@@ -1250,13 +1258,13 @@ impl Resynthesis {
                     let position =
                         self.move_reader(voice, ratio, period, self.delays[voice], false);
                     let (value, _) = history::interpolation(&self.lead, position);
-                    for (channel, sum) in mix.iter_mut().enumerate() {
-                        *sum = *sum
-                            + if self.config.stereo_output {
-                                value.mul(self.pan[voice][channel])
-                            } else {
-                                value
-                            };
+                    match &mut mix {
+                        Frame::Mono(sum) => *sum = *sum + value,
+                        Frame::Stereo(sums) => {
+                            for (channel, sum) in sums.iter_mut().enumerate() {
+                                *sum = *sum + value.mul(self.pan[voice][channel]);
+                            }
+                        }
                     }
                 }
             }
@@ -1306,32 +1314,59 @@ impl Resynthesis {
                 let (mut value, _) = history::interpolation(&self.filtered, position);
                 if slot > 0 {
                     value = value.mul(self.harmony_gains[slot - 1]);
-                    if !self.config.stereo_output {
-                        value = value.mul(self.harmony_gain);
-                    }
                 }
-                for (channel, sum) in mix.iter_mut().enumerate() {
-                    *sum = *sum
-                        + if self.config.stereo_output && slot > 0 {
-                            value.mul(self.harmony_pan[slot - 1][channel])
-                        } else {
-                            value
-                        };
+                match &mut mix {
+                    Frame::Mono(sum) => {
+                        if slot > 0 {
+                            value = value.mul(self.harmony_gain);
+                        }
+                        *sum = *sum + value;
+                    }
+                    Frame::Stereo(sums) => {
+                        for (channel, sum) in sums.iter_mut().enumerate() {
+                            *sum = *sum
+                                + if slot > 0 {
+                                    value.mul(self.harmony_pan[slot - 1][channel])
+                                } else {
+                                    value
+                                };
+                        }
+                    }
                 }
             }
             if self.config.formant.enabled {
                 self.formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
-                mix = self
-                    .formant
-                    .forward_stereo(mix.map(Q14::to_bits), self.formant_position, numeric)
-                    .map(Q14::from_bits);
-                for (channel, value) in mix.iter_mut().enumerate() {
-                    *value =
-                        Q14::from_bits(self.formant.model_glottal(
+                if let Frame::Mono(value) = mix {
+                    if self.previous_output[0] == self.previous_output[1]
+                        && self.formant.channels_match()
+                    {
+                        let value = Q14::from_bits(self.formant.forward_mirrored(
+                            value.to_bits(),
+                            self.formant_position,
+                            numeric,
+                        ));
+                        let value = Q14::from_bits(
+                            self.formant
+                                .model_glottal(value.to_bits(), self.previous_output[0].to_bits()),
+                        );
+                        self.previous_output = [value; 2];
+                        mix = Frame::Mono(value);
+                    } else {
+                        mix = Frame::Stereo([value; 2]);
+                    }
+                }
+                if let Frame::Stereo(sums) = &mut mix {
+                    *sums = self
+                        .formant
+                        .forward_stereo(sums.map(Q14::to_bits), self.formant_position, numeric)
+                        .map(Q14::from_bits);
+                    for (channel, value) in sums.iter_mut().enumerate() {
+                        *value = Q14::from_bits(self.formant.model_glottal(
                             value.to_bits(),
                             self.previous_output[channel].to_bits(),
                         ));
-                    self.previous_output[channel] = *value;
+                        self.previous_output[channel] = *value;
+                    }
                 }
             }
         }
@@ -1361,9 +1396,7 @@ impl Resynthesis {
             let cosine = middle
                 + ((((left + right) >> 1) - middle).mul::<14, 14>(frac) + ((right - left) >> 1))
                     .mul(frac);
-            for sum in &mut mix {
-                *sum = sum.mul(cosine);
-            }
+            mix = mix.map(|sum| sum.mul(cosine));
         }
         // The dry branch is the delayed raw input. It bypasses the shift
         // filters, the voice readers, the formant stages and the harmonic
@@ -1372,10 +1405,9 @@ impl Resynthesis {
         let dry_mix = i64::from(self.dry_mix.to_bits());
         let wet = i64::from((Q8::ONE - self.dry_mix).to_bits());
         let dry = i64::from(dry.to_bits());
-        for sum in &mut mix {
+        mix.map(|sum| {
             let blended = (dry * dry_mix + i64::from(sum.to_bits()) * wet) >> 8;
-            *sum = Q14::from_bits(clamp_i32(blended));
-        }
-        mix
+            Q14::from_bits(clamp_i32(blended))
+        })
     }
 }
