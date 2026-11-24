@@ -206,7 +206,7 @@ impl Punch {
             self.drive = BASE_DRIVE.mul::<8, 8>(smooth).mul(self.gain);
         }
         let driven: Q8 = sample.mul(self.drive);
-        let angle = Q14::from_bits(context.atan_q14.process(driven.to_bits(), 14 - 8));
+        let angle = Q14::from_bits(context.atan_q14.process(driven.to_bits()));
         let output: Q14 = TWO_OVER_PI.mul(self.ceiling_gain.mul::<14, 14>(angle));
         output.to_bits().wrapping_shl(1).clamp(-32767, 32767) as i16
     }

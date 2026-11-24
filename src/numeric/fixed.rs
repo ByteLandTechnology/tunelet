@@ -91,18 +91,15 @@ impl<const F: u32> Fixed<F> {
         ))
     }
 
-    /// Returns the value shifted into format `R`.
+    /// Returns `self << (R - F)` in format `R`, clamped to `i32`.
     ///
-    /// If `R` adds fractional bits, the shift uses `i64` and clamps to `i32`.
-    /// If `R` removes fractional bits, the shift truncates toward -inf.
+    /// `R` must be at least `F`. `R - F` must be less than 32. The shift
+    /// uses `i64` arithmetic.
     #[inline]
     pub(crate) fn rescale<const R: u32>(self) -> Fixed<R> {
-        const { assert!(R.abs_diff(F) < 32, "rescale shift must be less than 32") };
-        if R >= F {
-            Fixed(clamp_i32(i64::from(self.0) << R.saturating_sub(F)))
-        } else {
-            Fixed(self.0 >> F.saturating_sub(R))
-        }
+        const { assert!(R >= F, "rescale cannot lose fraction bits") };
+        const { assert!(R - F < 32, "rescale shift must be less than 32") };
+        Fixed(clamp_i32(i64::from(self.0) << (R - F)))
     }
 
     /// Returns the saturated absolute value. `i32::MIN` becomes `i32::MAX`.

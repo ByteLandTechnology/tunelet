@@ -639,7 +639,6 @@ impl Formant {
                                 &parcor[..self.stretch_count],
                                 &mut self.models[self.current],
                                 &mut scratch,
-                                14,
                             );
                             self.orders[self.current] = self.stretch_count;
                         }

@@ -111,15 +111,14 @@ impl Default for AtanQ14 {
     }
 }
 impl AtanQ14 {
-    /// Returns the interpolated arctangent of the input as Q14 radians.
+    /// Returns the interpolated arctangent of a Q8 input as Q14 radians.
     ///
-    /// The function shifts the input word into Q14 and finds the two adjacent
-    /// tangent entries. The caller selects the shift for the input format.
-    /// For example, Punch uses Q8 and a shift of 6. If the magnitude is
-    /// larger than the last entry, the function uses a fixed terminal angle.
-    /// The signed arithmetic wraps.
-    pub(crate) fn process(&mut self, input: i32, shift: u32) -> i32 {
-        let value = input.wrapping_shl(shift);
+    /// The function shifts the Q8 input left by 6 into Q14. Then it finds the
+    /// two adjacent tangent entries. If the magnitude is larger than the last
+    /// entry, the function uses a fixed terminal angle. The signed arithmetic
+    /// wraps.
+    pub(crate) fn process(&mut self, input: i32) -> i32 {
+        let value = input.wrapping_shl(6);
         let negative = value < 0;
         let value = value.wrapping_abs();
         if TAN[self.index] > value {
