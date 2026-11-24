@@ -423,8 +423,8 @@ pub(crate) struct HarmonyState {
     /// The last usable Q14 ratio of the input period to the smoothed target
     /// period for each voice.
     current_ratio: [Q14; HARMONY_VOICES],
-    /// The Q12 attack and release envelope. A MIDI release or a reset does
-    /// not clear it.
+    /// The Q12 attack and release envelope. A MIDI release does not clear it,
+    /// and a full reset sets it to zero.
     smoothed_gain: [Q12; HARMONY_VOICES],
     /// The last active Q6 target. It is kept while the gain of a released
     /// voice decreases to zero.
@@ -509,8 +509,8 @@ impl HarmonyState {
     /// Applies a configuration that validation already accepted.
     ///
     /// If the source changes to an interval source or to a named or degree
-    /// chord source, the function calls `reset`. It prepares the tables
-    /// again only for the fields that changed.
+    /// chord source, the function calls `release_notes`. It prepares the
+    /// tables again only for the fields that changed.
     pub(crate) fn apply_config(&mut self, config: HarmonyConfig) {
         let old = self.config;
         self.config = config;
@@ -523,7 +523,7 @@ impl HarmonyState {
                     | HarmonySource::ChordByName
             )
         {
-            self.reset();
+            self.release_notes();
         }
         if old.key != config.key
             || old.scale != config.scale
@@ -560,7 +560,7 @@ impl HarmonyState {
     /// chord again from the released notes. Thus the chord voices decay
     /// with the gain release. The other chord sources keep their chord
     /// preparation.
-    pub(crate) fn reset(&mut self) {
+    pub(crate) fn release_notes(&mut self) {
         self.midi_period.fill(Q6::ZERO);
         self.portamento_period.fill(Q6::ZERO);
         self.pending_gain.fill(Q12::ZERO);
@@ -569,6 +569,28 @@ impl HarmonyState {
         if self.config.source == HarmonySource::ChordViaMidi {
             self.setup_chord();
         }
+    }
+    /// Restores the envelopes, targets, MIDI slots and scale caches to their
+    /// initial values for the current configuration.
+    pub(crate) fn reset(&mut self) {
+        self.midi_note = [0; HARMONY_VOICES];
+        self.midi_period = [Q6::ZERO; HARMONY_VOICES];
+        self.midi_gain = [Q12::ZERO; HARMONY_VOICES];
+        self.midi_order = [0; HARMONY_VOICES];
+        self.portamento_period = [Q6::ZERO; HARMONY_VOICES];
+        self.current_ratio = [Q14::ONE; HARMONY_VOICES];
+        self.smoothed_gain = [Q12::ZERO; HARMONY_VOICES];
+        self.period_output = [Q6::ZERO; HARMONY_VOICES];
+        self.target_period = [Q6::ZERO; HARMONY_VOICES];
+        self.chord_period = [Q6::ZERO; HARMONY_VOICES];
+        self.chord_gain = [Q12::from_bits(-16_384); HARMONY_VOICES];
+        self.current_idx = [39; HARMONY_VOICES];
+        self.scale_target = [Q6::ZERO; HARMONY_VOICES];
+        self.scale_note = [0; HARMONY_VOICES];
+        self.pending_gain.fill(Q12::ZERO);
+        self.pending_order.fill(0);
+        self.event_counter = 0;
+        self.setup_chord();
     }
     /// Converts cents above C4 to a Q6 sample period. C4 is 900 cents below
     /// A4 at 440 Hz.
@@ -701,12 +723,12 @@ impl HarmonyState {
     /// the omni sources. The omni sources steal the oldest voice and resume
     /// the newest pending note. If two orders are equal, strict comparisons
     /// keep the lowest voice index or pitch. Each Note Off clears the pending
-    /// entry of its pitch. All Notes Off calls `reset` and returns `false`.
-    /// The gain releases occur at the next control steps.
+    /// entry of its pitch. All Notes Off calls `release_notes` and returns
+    /// `false`. The gain releases occur at the next control steps.
     pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent) -> bool {
         let (channel, note, velocity) = match event {
             MidiEvent::AllNotesOff => {
-                self.reset();
+                self.release_notes();
                 return false;
             }
             MidiEvent::NoteOn {

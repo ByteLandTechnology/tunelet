@@ -73,9 +73,10 @@
 //! successful process call, a successful configuration call or a reset
 //! cancels the drain.
 //!
-//! [`Processor::reset`] keeps the configuration and some controller state, for
-//! example the random stream. Its documentation lists the state that it keeps.
-//! If you need a fully new instance, make a new processor.
+//! [`Processor::reset`] restores the initial state for the current
+//! configuration without memory allocation. It clears the audio histories, the
+//! controllers, the held MIDI notes, the feedback and the frame count. The
+//! configuration and [`Telemetry::formant_generation`] do not change.
 //!
 //! # Execution model
 //!

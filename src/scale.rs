@@ -163,7 +163,8 @@ pub(crate) struct CorrectionTable {
     base_periods: [i32; 12],
     /// The held MIDI keys.
     ///
-    /// A reset keeps key 127, and mask creation excludes it.
+    /// All Notes Off keeps key 127, a full reset clears all keys, and mask
+    /// creation excludes key 127.
     pub keyboard: [bool; 128],
 }
 
@@ -222,8 +223,21 @@ impl CorrectionTable {
     /// Releases keys 0..=126, and keeps key 127 and the active target table.
     ///
     /// A later MIDI event builds the table again from the new keyboard state.
-    pub(crate) fn reset(&mut self) {
+    pub(crate) fn release_keys(&mut self) {
         self.keyboard[..127].fill(false);
+    }
+    /// Clears all 128 keys and loads `mask` with the initial sample-rate rule.
+    ///
+    /// Chromatic loads the 44.1 kHz periods first and updates `base_periods`
+    /// to `rate`. Other masks load the periods for `rate`.
+    pub(crate) fn reset(&mut self, rate: SampleRate, mask: NoteMask) {
+        self.keyboard.fill(false);
+        self.set_sample_rate(SampleRate::Hz44100);
+        self.set_notes(NoteMask::default());
+        self.set_sample_rate(rate);
+        if mask != NoteMask::default() {
+            self.set_notes(mask);
+        }
     }
     /// Applies an event whose MIDI ranges were already checked.
     pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent) {
@@ -232,10 +246,10 @@ impl CorrectionTable {
                 self.keyboard[note as usize] = velocity != 0
             }
             MidiEvent::NoteOff { note, .. } => self.keyboard[note as usize] = false,
-            MidiEvent::AllNotesOff => self.reset(),
+            MidiEvent::AllNotesOff => self.release_keys(),
         }
         let mut mask = [false; 12];
-        // Correction excludes key 127, and a reset keeps that key.
+        // Correction excludes key 127, and All Notes Off keeps that key.
         for i in 0..127 {
             mask[i % 12] |= self.keyboard[i];
         }

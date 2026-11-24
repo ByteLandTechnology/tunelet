@@ -286,8 +286,11 @@ sets the configuration cancels the drain. `reset()` also cancels the drain.
 
 ### Reset
 
-`reset()` keeps the configuration, the random stream and some controller and
-filter state. If you need a fully new state, construct a new processor.
+`reset()` restores the initial state for the current configuration without
+memory allocation. It clears the audio histories, the controllers, the held
+MIDI notes, the feedback and the frame count. It loads the configured
+correction notes again. It also starts the random stream from `random_seed`.
+The configuration and `formant_generation` in the telemetry do not change.
 
 ## Feedback and telemetry
 

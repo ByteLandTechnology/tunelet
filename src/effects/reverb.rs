@@ -39,9 +39,9 @@ pub enum ReverbMode {
 /// The reverb is disabled by default. In bypass, the stage returns the input
 /// and does not advance the delay network or the damping filters. If the
 /// stage is enabled and the mix is zero, the network still operates. A reset
-/// clears the delay buffer but keeps the memories of the damping filters. The
-/// mix, diffusion and decay controls are quantized to Q14. The function of
-/// each control changes with the network.
+/// clears the delay buffer, the write position and the memories of the
+/// damping filters. The mix, diffusion and decay controls are quantized to
+/// Q14. The function of each control changes with the network.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -209,11 +209,23 @@ impl Reverb {
     }
     /// Clears only the delay contents, and keeps the write cursor and the
     /// damping memories.
+    pub(crate) fn reset_delay(&mut self) {
+        if self.dirty {
+            self.delay.clear();
+            self.dirty = false;
+        }
+    }
+    /// Clears the delay contents, resets the write cursor to zero and clears
+    /// both damping filters.
     pub(crate) fn reset(&mut self) {
         if self.dirty {
             self.delay.reset();
             self.dirty = false;
+        } else {
+            self.delay.write = 0;
         }
+        self.lpf1.reset();
+        self.lpf2.reset();
     }
     /// Returns the largest absolute Q14 wet contribution since the last
     /// clear, as f32.
@@ -431,7 +443,7 @@ struct DelayLine {
     /// the Q14 audio scale.
     buffer: Vec<Q14>,
     /// The current frame position, always less than the buffer length. A
-    /// reset does not change it.
+    /// delay clear keeps it, and a full reset sets it to zero.
     write: usize,
 }
 impl DelayLine {
@@ -444,8 +456,13 @@ impl DelayLine {
         }
     }
     /// Clears the samples and does not move the current write position.
-    fn reset(&mut self) {
+    fn clear(&mut self) {
         self.buffer.fill(Q14::default());
+    }
+    /// Clears the samples and sets the write position to zero.
+    fn reset(&mut self) {
+        self.clear();
+        self.write = 0;
     }
     /// Maps a delay to a storage index with a maximum of one wrap.
     ///

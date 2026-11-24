@@ -70,13 +70,13 @@ pub enum MultiVoiceMode {
 ///
 /// Correction MIDI replaces the active note table. It does not change this
 /// configuration. A change to `notes` or to `enabled` loads the configured
-/// mask again. Reset releases the correction keys 0..=126. It keeps key 127
-/// and the active note table. Key 127 has no effect on the note table.
+/// mask again. Reset clears all 128 correction keys and loads the configured
+/// mask again. Key 127 has no effect on the note table.
 ///
-/// At construction, the chromatic table uses 44.1 kHz periods, also for a
-/// 48 kHz processor. Each of these events loads the periods for the prepared
-/// rate:
-/// - An initial mask that is not chromatic.
+/// At construction and after a reset, the chromatic table uses 44.1 kHz
+/// periods, also for a 48 kHz processor. Each of these events loads the
+/// periods for the prepared rate:
+/// - An initial or reset mask that is not chromatic.
 /// - A later change to the mask or to `enabled`.
 /// - A correction MIDI event.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,7 +97,8 @@ pub struct CorrectionConfig {
     /// [`NoteMask::CHROMATIC`].
     ///
     /// All boolean masks are valid. MIDI can replace the active table. This
-    /// replacement stays until this mask or `enabled` changes.
+    /// replacement stays until a reset or a change to this mask or to
+    /// `enabled`.
     pub notes: NoteMask,
     /// The half-life of the smoothing in milliseconds, 0..=400. The default
     /// is 0.
@@ -248,8 +249,8 @@ pub struct ResynthesisConfig {
     /// Only the low 32 bits select the sequence. If a configuration change
     /// gives a different 64-bit value, the processor starts the stream again
     /// from the low 32 bits. This is also true for a change to only the high
-    /// bits. Reset keeps the current position in the stream. The enabled
-    /// stages set the number of random values that the code reads.
+    /// bits. Reset also starts the stream again from the low 32 bits. The
+    /// enabled stages set the number of random values that the code reads.
     pub random_seed: u64,
 }
 
@@ -673,35 +674,40 @@ impl Resynthesis {
         if old.stereo_output != config.stereo_output {
             // A stereo change resets the audio state. The correction keyboard
             // keeps its held keys.
-            self.reset_audio();
+            self.reset_audio(false);
         }
     }
 
-    /// Releases the correction keys 0..=126 and resets the audio state.
-    ///
-    /// The active correction table, key 127 and the items that
-    /// `reset_audio` keeps do not change.
+    /// Restores the correction table, the audio histories and the voice
+    /// controllers to their initial state for the current configuration.
     pub(crate) fn reset(&mut self) {
-        self.scale.reset();
-        self.reset_audio();
+        self.scale.reset(self.rate, self.config.correction.notes);
+        self.reset_audio(true);
+        self.drift.fill(Q14::ZERO);
+        self.harmony_gains.fill(Q12::ZERO);
+        self.modulation_phase = Q14::ZERO;
+        self.scale_index = 0;
+        self.octave = 0;
+        self.control_counter = CONTROL_DUE;
     }
 
     /// Clears the audio and period histories, the tracker, the formant
     /// synthesis and the filter history. Then initializes the readers and
     /// the correction again.
     ///
-    /// These items do not change:
-    /// - The correction keyboard.
-    /// - The active note table.
-    /// - The random state that the caller holds.
-    /// - The choir drift.
-    /// - The modulation phase.
-    /// - The control counter.
+    /// If `full` is `false`, a stereo change keeps these items:
+    /// - The correction keyboard and the active note table.
+    /// - The previous usable period of the pitch tracker.
+    /// - The choir drift, the modulation phase and the control counter.
     /// - The harmony release envelopes and the last harmony gains.
-    fn reset_audio(&mut self) {
+    fn reset_audio(&mut self, full: bool) {
         let written = usize::from(self.written);
         self.written = 0;
-        self.pitch.reset();
+        if full {
+            self.pitch.reset();
+        } else {
+            self.pitch.reset_audio();
+        }
         if written == HISTORY {
             self.raw.fill(Q14::ZERO);
             self.filtered.fill(Q14::ZERO);
@@ -729,7 +735,11 @@ impl Resynthesis {
         }
         self.write = 0;
         self.formant.reset();
-        self.harmony.reset();
+        if full {
+            self.harmony.reset();
+        } else {
+            self.harmony.release_notes();
+        }
         if written >= OVERLAP_FRAMES {
             self.overlap.fill(Q14::ZERO);
         } else if written > 0 {

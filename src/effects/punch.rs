@@ -21,8 +21,7 @@ const TWO_OVER_PI: Q14 = Q14::from_bits(10430);
 /// its envelope and window state do not change.
 ///
 /// A gain change updates the cached drive at the next boundary of the peak
-/// window. A reset calculates that drive again immediately from the
-/// configured gain.
+/// window. A reset restores the default base drive until that boundary.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -160,14 +159,14 @@ impl Punch {
         self.gain = Q8::from_f64(db_to_gain(config.gain_db as f64));
         self.ceiling_gain = Q14::from_f64(db_to_gain(config.ceiling_db as f64));
     }
-    /// Clears both envelopes and the current window, then calculates the drive
-    /// again from the base drive and the input gain.
+    /// Clears both envelopes and the current window, and restores the base
+    /// drive.
     pub(crate) fn reset(&mut self) {
         self.slow = Q14::default();
         self.fast = Q14::default();
         self.counter = 0;
         self.peak = Q14::default();
-        self.drive = BASE_DRIVE.mul(self.gain);
+        self.drive = BASE_DRIVE;
     }
 
     /// Moves `current` toward `target` with a one-pole filter.

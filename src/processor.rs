@@ -490,7 +490,7 @@ impl Processor {
         }
         if self.config.resynthesis.stereo_output != config.resynthesis.stereo_output {
             // Resynthesis resets its histories if its stereo setting changes.
-            self.reset_post_resynthesis();
+            self.reset_post_resynthesis(false);
         }
         if self.config.resynthesis.random_seed != config.resynthesis.random_seed {
             self.numeric.random = RandomStream::new(config.resynthesis.random_seed as u32);
@@ -505,45 +505,46 @@ impl Processor {
         self.drain_remaining = None;
     }
 
-    /// Clears the audio histories, held notes, pitch feedback, peak and frame
-    /// count.
+    /// Restores the initial state for the current configuration without memory
+    /// allocation.
     ///
-    /// This method cancels an active drain. It also clears the correction
-    /// ratio, the Punch envelopes, the Warm filters, the Alien recording and
-    /// the reverb delays. It releases the harmony MIDI notes and, in
-    /// MIDI-chord mode, the chord voices. It keeps these items:
+    /// This method cancels an active drain. It clears all audio and filter
+    /// histories, the pitch tracker and the formant synthesis state. It also
+    /// clears the choir drift, the modulation phase and the harmony envelopes
+    /// and voices. The peak windows, the reported correction ratio and the
+    /// frame count reset to zero.
     ///
-    /// - the configuration
-    /// - the random stream and the arctangent lookup position of Punch
-    /// - the reverb low-pass memories and the reverb write position
-    /// - correction key 127 and the active correction note table
-    /// - the last usable period of the pitch tracker, which fills unvoiced
-    ///   gaps
-    /// - the harmony gain envelopes and the last voice ratios of the harmony
-    ///   controller
-    /// - the prepared chord targets of the named and degree chord sources
-    /// - the choir drift
-    /// - the control-step counter of Choir and Harmony
-    /// - the phase of the harmonic modulation.
+    /// The method releases all harmony MIDI notes and all 128 correction keys.
+    /// Then it loads the configured correction scale again, with the initial
+    /// sample-rate rule of [`crate::CorrectionConfig`]. It restores the
+    /// initial Punch drive and arctangent cursor. It also starts the random
+    /// stream again from the low 32 bits of `random_seed`.
     ///
-    /// When the method clears the held keys, it does not load the configured
-    /// scale again. For a fully new state, make a new processor.
+    /// The preparation, the active configuration and
+    /// [`Telemetry::formant_generation`] do not change.
     pub fn reset(&mut self) {
         self.punch.reset();
         self.warm.reset();
         self.resynthesis.reset();
-        self.reset_post_resynthesis();
+        self.reset_post_resynthesis(true);
+        self.numeric
+            .reset(self.config.resynthesis.random_seed as u32);
         self.frames = 0;
         self.drain_remaining = None;
     }
 
     /// Clears the stages, the peak windows and the ratio after resynthesis.
     ///
-    /// Both a full reset and a change of stereo output clear this state. The
-    /// frame count does not change here.
-    fn reset_post_resynthesis(&mut self) {
+    /// A full reset clears the reverb filters and write cursor. A change of
+    /// stereo output clears only the reverb delay buffer. The frame count does
+    /// not change here.
+    fn reset_post_resynthesis(&mut self, full: bool) {
         self.alien.reset();
-        self.reverb.reset();
+        if full {
+            self.reverb.reset();
+        } else {
+            self.reverb.reset_delay();
+        }
         self.peak = 0;
         self.clear_telemetry_peaks();
         self.last_resample_ratio = 0.0;

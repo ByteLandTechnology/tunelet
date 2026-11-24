@@ -150,7 +150,7 @@ impl PitchTracker {
     /// memories, and requests acquisition.
     /// The acquisition tables clear at the next decimated call. The previous
     /// usable period stays until another tracking update replaces it.
-    pub(crate) fn reset(&mut self) {
+    pub(crate) fn reset_audio(&mut self) {
         let written = usize::from(self.written);
         if written == HISTORY {
             self.raw.fill(0);
@@ -163,6 +163,14 @@ impl PitchTracker {
         for pre in &mut self.pre {
             pre.reset();
         }
+    }
+
+    /// Clears the audio state, the previous usable period and the last minimum
+    /// slot.
+    pub(crate) fn reset(&mut self) {
+        self.reset_audio();
+        self.previous_period = Q6::default();
+        self.best = 0;
     }
 
     /// Invalidates the current period and keeps the previous usable period.

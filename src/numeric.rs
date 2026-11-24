@@ -162,10 +162,10 @@ pub(crate) fn envelope_decay(milliseconds: f64, rate: f64, window: usize) -> f64
 /// The lookup cache and the pseudo-random state for all stages of one
 /// processor chain.
 ///
-/// An audio reset keeps this state.
+/// A stereo change keeps this state, and a processor reset restores it.
 #[derive(Debug)]
 pub(crate) struct NumericContext {
-    /// The lookup cursor for Punch. An audio reset keeps its position.
+    /// The lookup cursor for Punch.
     pub atan_q14: AtanQ14,
     /// The random stream for choir and aspiration. The order in which stages
     /// read values sets the random values that later stages get.
@@ -179,6 +179,12 @@ impl NumericContext {
             atan_q14: AtanQ14::default(),
             random: RandomStream::new(seed),
         }
+    }
+    /// Restores the initial arctangent lookup cursor and starts the random
+    /// stream again from `seed`.
+    pub(crate) fn reset(&mut self, seed: u32) {
+        self.atan_q14 = AtanQ14::default();
+        self.random = RandomStream::new(seed);
     }
 }
 /// The capacity in frames of the history for pitch and resynthesis. The

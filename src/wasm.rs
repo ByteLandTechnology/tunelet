@@ -467,11 +467,13 @@ impl WasmProcessor {
         Ok(valid)
     }
 
-    /// Resets the audio histories and feedback, as the native processor does.
+    /// Restores the initial state for the current configuration, as the native
+    /// processor does.
     ///
-    /// The configuration, the random stream and some controller and filter
-    /// state do not change. This method cancels any active drain. For a fully
-    /// new instance, construct a new `Tunelet`.
+    /// This method cancels any active drain. It clears the audio histories,
+    /// the controllers, the held MIDI notes, the feedback and the frame count.
+    /// The configuration and `formantGeneration` in the telemetry do not
+    /// change.
     pub fn reset(&mut self) {
         self.processor.reset();
     }
