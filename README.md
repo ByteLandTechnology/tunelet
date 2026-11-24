@@ -169,14 +169,20 @@ voice. It disables the effects and the formant stage.
 | Formant        | Changes the vocal tract with an LPC model and aspiration    | Disabled       | `resynthesis.formant`    |
 | Alien          | Plays recent audio in reverse loops                         | Disabled       | `alien`                  |
 | Reverb         | Echo, Schroeder, SmallRoom, Binaural, MediumHall, LargeHall | Disabled       | `reverb`                 |
-| Output gain    | Linear gain, 0..=64, before `-32767..=32767` clipping       | 1              | `output_gain`            |
+| Output gain    | Linear gain, 0..=64, before `-32767..=32767` wet clamp      | 1              | `output_gain`            |
+| Global mix     | Wet fraction, 0..=1, with 1,593-frame raw dry path          | 1              | `mix`                    |
+| Global bypass  | 200-frame crossfade to 1,593-frame raw dry path             | Disabled       | `bypass`                 |
 
 The internal Q14 stages use `i64` products and saturate at the `i32`
-limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
+limits. Decrease `output_gain` to prevent `-32767..=32767` saturation on
 multi-voice mixes.
 
-`resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+`punch.mix`, `warm.mix`, `alien.mix` and `reverb.mix` set the Q14 wet
+fraction of each effect stage, in `0..=1`. In Warm, the 50 Hz high-pass
+filter operates only on the wet path. `resynthesis.dry_mix` sets the dry
+fraction at the resynthesis stage. That dry path starts after Warm and has a
+delay of 1,593 frames. `mix` and `bypass` align to the raw input before
+Punch with the same 1,593-frame delay.
 
 ### Harmony sources
 
@@ -451,10 +457,12 @@ and show enums as string literals. To change the configuration, do these steps:
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+JavaScript `Error`. Optional `mix`, `punch.mix`, `warm.mix` and `alien.mix`
+default to 1 if they are absent. Optional `bypass` defaults to `false`, and
+optional `resynthesis.harmony.voices` defaults to 4. `defaultConfig()`
+returns an object that contains these optional fields with their defaults.
+The conversion ignores extra object properties. The generated declarations
+contain the parameter documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
@@ -463,8 +471,10 @@ telemetry use `bigint`. Frame offsets, block lengths and latency use
 ### Events
 
 The optional event argument is a `TimedEvent[]`. Controls use a `type`
-discriminant and a `value` payload. The reset control has no payload. For
-example, this event changes the final gain before the first frame:
+discriminant and a `value` payload (`configure`, `resynthesis`, `punch`,
+`warm`, `alien`, `reverb`, `outputGain`, `mix`, `bypass`, `midi` and
+`correctionMidi`). The `reset` control has no payload. For example, this
+event changes the final gain before the first frame:
 
 ```ts
 { offset: 0, event: { type: "outputGain", value: 0.5 } }

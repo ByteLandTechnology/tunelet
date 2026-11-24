@@ -1,6 +1,6 @@
 //! Controls for a block, which the processor validates before any change.
 
-use crate::config::validate_output_gain;
+use crate::config::{validate_mix, validate_output_gain};
 use crate::effects::alien::AlienConfig;
 use crate::effects::punch::PunchConfig;
 use crate::effects::reverb::ReverbConfig;
@@ -40,6 +40,16 @@ pub enum ControlEvent {
     /// The quantization and the mute behavior are the same as for
     /// [`ProcessorConfig::output_gain`]. The value must be finite.
     OutputGain(f32),
+    /// This event sets the global wet fraction, 0..=1.
+    ///
+    /// The quantization and the dry delay are the same as for
+    /// [`ProcessorConfig::mix`]. The value must be finite.
+    Mix(f32),
+    /// This event sets the global bypass state.
+    ///
+    /// If the value changes, the processor crossfades over 200 frames, as
+    /// [`ProcessorConfig::bypass`] describes.
+    Bypass(bool),
     /// This event sends a note control to the harmony source that
     /// [`crate::HarmonyConfig`] selects.
     ///
@@ -81,6 +91,8 @@ impl ControlEvent {
             Self::Alien(config) => config.validate(),
             Self::Reverb(config) => config.validate(),
             Self::OutputGain(gain) => validate_output_gain(gain),
+            Self::Mix(mix) => validate_mix(mix),
+            Self::Bypass(_) => Ok(()),
             Self::Midi(event) | Self::CorrectionMidi(event) => event.validate(),
             Self::Reset => Ok(()),
         }

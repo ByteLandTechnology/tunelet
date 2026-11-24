@@ -19,7 +19,9 @@
 //! - Field names use camelCase.
 //! - Enum values are strings.
 //! - Each object must contain all required fields.
-//! - The optional harmony `voices` field defaults to 4.
+//! - Optional `mix`, `punch.mix`, `warm.mix` and `alien.mix` default to 1.
+//! - Optional `bypass` defaults to `false`.
+//! - Optional `resynthesis.harmony.voices` defaults to 4.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
 //! `{ type, value }`, and the reset control has no `value`. MIDI messages use
@@ -62,10 +64,12 @@ pub struct BlockEvents(Vec<TimedEvent>);
 
 /// Returns a complete, independent default configuration for JavaScript.
 ///
-/// Change its fields and give it to `Tunelet` or to `setConfig`. The
-/// `randomSeed` field is a JavaScript `bigint`, so it keeps all 64 bits. After
-/// the binding decodes them, floating-point controls have the precision of the
-/// Rust `f32` type.
+/// The returned object includes all optional fields (`mix`, `bypass`,
+/// `punch.mix`, `warm.mix`, `alien.mix` and `resynthesis.harmony.voices`) with
+/// their default values. Change its fields and give it to `Tunelet` or to
+/// `setConfig`. The `randomSeed` field is a JavaScript `bigint`, so it keeps
+/// all 64 bits. After the binding decodes them, floating-point controls have
+/// the precision of the Rust `f32` type.
 ///
 /// # Errors
 ///
@@ -74,6 +78,11 @@ pub struct BlockEvents(Vec<TimedEvent>);
 #[wasm_bindgen(js_name = defaultConfig)]
 pub fn default_config() -> Result<Ts<ProcessorConfig>, JsError> {
     Ok(ProcessorConfig::default().into_ts()?)
+}
+
+/// Returns the default wet mix of 1.0 for optional JavaScript fields.
+pub(crate) fn default_mix() -> f32 {
+    1.0
 }
 
 /// A stateful PCM processor that JavaScript uses as the `Tunelet` class.
@@ -193,9 +202,9 @@ impl WasmProcessor {
 
     /// The nominal resynthesis latency: 1,593 frames at both sample rates.
     ///
-    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
-    /// and effects have their own timing. Thus, this value does not align all
-    /// paths.
+    /// The resynthesis dry path and the global `mix` and `bypass` dry path use
+    /// this 1,593-frame delay. Resampled voices, choir delays and effects have
+    /// their own timing. Thus, this value does not align all paths.
     #[wasm_bindgen(getter, js_name = latencyFrames)]
     pub fn latency_frames(&self) -> usize {
         self.processor.latency_frames()

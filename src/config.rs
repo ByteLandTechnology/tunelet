@@ -161,16 +161,41 @@ pub struct ProcessorConfig {
     pub reverb: ReverbConfig,
     /// The linear gain after all effects, 0..=64.
     ///
-    /// The default is 1 (unity). Zero mutes the output, but the internal
-    /// processing continues. The gain is quantized in steps of 1/256 before
-    /// the fixed-point multiplication and the final PCM clipping. Thus, a
-    /// positive value below 1/256 also mutes the output.
+    /// The default is 1 (unity). Zero mutes the wet output, while the internal
+    /// stages continue to advance. The gain is quantized in steps of 1/256
+    /// before the fixed-point multiplication and the `-32767..=32767` wet clamp.
+    /// Thus, a positive value below 1/256 also mutes the wet output.
     pub output_gain: f32,
+    /// The global wet fraction after `output_gain`, 0..=1.
+    ///
+    /// The default is 1. The dry weight is `1 - mix` in Q14. The dry path
+    /// reads the raw mono input before Punch, with a delay of 1,593 frames. All
+    /// internal stages continue to advance at all mix values. In JavaScript,
+    /// this field is optional and an absent value gives 1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "crate::wasm::default_mix"),
+        tsify(optional)
+    )]
+    pub mix: f32,
+    /// Selects the 1,593-frame delayed raw input instead of the mixed output.
+    ///
+    /// The default is `false`. If `bypass` changes after construction, the
+    /// processor crossfades over 200 frames in Q14 while all internal stages
+    /// continue to advance. In JavaScript, this field is optional and an
+    /// absent value gives `false`.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default),
+        tsify(optional)
+    )]
+    pub bypass: bool,
 }
 
 impl Default for ProcessorConfig {
     /// Returns chromatic correction with zero retune time, one choir voice,
-    /// disabled effects, disabled formants and unity gain.
+    /// disabled effects, disabled formants, unity gain, full wet mix and
+    /// disabled bypass.
     fn default() -> Self {
         Self {
             punch: PunchConfig::default(),
@@ -179,16 +204,19 @@ impl Default for ProcessorConfig {
             alien: AlienConfig::default(),
             reverb: ReverbConfig::default(),
             output_gain: 1.0,
+            mix: 1.0,
+            bypass: false,
         }
     }
 }
 
 impl ProcessorConfig {
-    /// Checks all stages and the final gain, and does not change state.
+    /// Checks all stages, the output gain and the global mix, and does not
+    /// change state.
     ///
     /// The validation uses the signal order: Punch, Warm, resynthesis, Alien,
-    /// reverb, then output gain. It includes disabled stages and the controls
-    /// of voice modes that are not active.
+    /// reverb, output gain, then global mix. It includes disabled stages and
+    /// the controls of voice modes that are not active.
     ///
     /// # Errors
     ///
@@ -201,7 +229,8 @@ impl ProcessorConfig {
         self.resynthesis.validate()?;
         self.alien.validate()?;
         self.reverb.validate()?;
-        validate_output_gain(self.output_gain)
+        validate_output_gain(self.output_gain)?;
+        validate_mix(self.mix)
     }
 }
 
@@ -210,4 +239,11 @@ impl ProcessorConfig {
 /// `ProcessorConfig` and `ControlEvent::OutputGain` use the same range.
 pub(crate) fn validate_output_gain(gain: f32) -> Result<(), Error> {
     check_range("output_gain", gain, 0.0, 64.0)
+}
+
+/// Checks the global wet mix range.
+///
+/// `ProcessorConfig` and `ControlEvent::Mix` use the same range.
+pub(crate) fn validate_mix(mix: f32) -> Result<(), Error> {
+    check_range("mix", mix, 0.0, 1.0)
 }

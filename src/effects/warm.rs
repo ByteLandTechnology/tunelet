@@ -9,10 +9,11 @@ use crate::{Error, SampleRate};
 /// The update interval of the peak follower, in frames.
 const WINDOW_FRAMES: usize = 100;
 
-/// Asymmetric input saturation, followed by a 50 Hz high-pass filter.
+/// Asymmetric input saturation, with a 50 Hz high-pass filter on the wet path.
 ///
 /// Warm operates after Punch and before pitch detection. Its adaptive
-/// normalization updates every 100 enabled frames. When Warm is disabled,
+/// normalization updates every 100 enabled frames. The 50 Hz high-pass filter
+/// applies only to the wet path, not to the dry path. When Warm is disabled,
 /// the envelope and filter histories do not change. When Warm is enabled
 /// again, they continue from their last state, unless the processor was
 /// reset.
@@ -30,28 +31,42 @@ pub struct WarmConfig {
     /// The output gain changes by -0.35 dB for each dB of drive. At 0 dB, the
     /// envelope normalization and the output high-pass filter still operate.
     pub drive_db: f32,
+    /// The wet fraction, 0..=1.
+    ///
+    /// The default is 1. The dry weight is `1 - mix` in Q14. The 50 Hz
+    /// high-pass filter applies only to the wet signal before the blend. If
+    /// Warm is enabled, a zero mix still advances the envelope and the filter.
+    /// In JavaScript, this field is optional and an absent value gives 1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "crate::wasm::default_mix"),
+        tsify(optional)
+    )]
+    pub mix: f32,
 }
 impl Default for WarmConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             drive_db: 3.0,
+            mix: 1.0,
         }
     }
 }
 impl WarmConfig {
     /// Validates all fields, also when Warm is disabled.
     ///
-    /// `drive_db` must be finite and in its documented inclusive range.
-    /// Validation does not clamp values. It does not change the processor
-    /// state.
+    /// The floating-point controls must be finite and in their documented
+    /// inclusive ranges. Validation does not clamp values. It does not change
+    /// the processor state.
     ///
     /// # Errors
     ///
     /// Returns the first [`Error::InvalidConfig`] with its dotted field path
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("warm.drive_db", self.drive_db, 0.0, 6.0)
+        check_range("warm.drive_db", self.drive_db, 0.0, 6.0)?;
+        check_range("warm.mix", self.mix, 0.0, 1.0)
     }
 }
 
@@ -77,6 +92,8 @@ pub(crate) struct Warm {
     drive: Q12,
     /// The Q14 compensation from the configured drive.
     output_gain: Q14,
+    /// The Q14 wet weight. The dry weight is `1 - mix`.
+    mix: Q14,
     /// The Q14 threshold of -30 dB. If the peak envelope is not above it, the
     /// normalization uses a fixed headroom.
     input_threshold: Q14,
@@ -84,8 +101,9 @@ pub(crate) struct Warm {
     output_headroom: Q8,
 }
 impl Warm {
-    /// Prepares the fixed high-pass filter and the initial normalization
-    /// state.
+    /// Prepares the fixed 50 Hz high-pass filter on the wet path and the
+    /// initial normalization state. The dry path does not go through this
+    /// filter.
     pub(crate) fn new(rate: SampleRate, config: WarmConfig) -> Self {
         let mut filter = Biquad::new();
         filter.set_design(Design::high_pass_one_pole(rate.hz(), 50.0));
@@ -98,6 +116,7 @@ impl Warm {
             smooth: Q14::from_f64(0.5_f64.powf(1.0 / (rate.hz() as f64 * 0.2 / 100.0))),
             drive: Q12::default(),
             output_gain: Q14::default(),
+            mix: Q14::ONE,
             input_threshold: Q14::from_f64(db_to_gain(-30.0)),
             output_headroom: Q8::from_f64(db_to_gain(30.0)),
         };
@@ -114,6 +133,7 @@ impl Warm {
     pub(crate) fn set_config(&mut self, config: WarmConfig) {
         self.drive = Q12::from_f64(db_to_gain(config.drive_db as f64));
         self.output_gain = Q14::from_f64(db_to_gain(-(config.drive_db as f64) * 0.35));
+        self.mix = Q14::from_f64((config.mix * 100.0) as f64 / 100.0);
     }
     /// Clears the filter memories, the peak windows and the normalization,
     /// and keeps the coefficients.
@@ -166,9 +186,15 @@ impl Warm {
         }
         sample = sample.div(self.compression);
         let output: Q14 = self.output_gain.mul::<14, 14>(sample) << 1;
-        self.filter
-            .process_sample(output)
-            .to_bits()
-            .clamp(-32767, 32767) as i16
+        let wet = i64::from(
+            self.filter
+                .process_sample(output)
+                .to_bits()
+                .clamp(-32767, 32767),
+        );
+        let dry = i64::from(input);
+        let wet_w = i64::from(self.mix.to_bits());
+        let dry_w = i64::from((Q14::ONE - self.mix).to_bits());
+        (((dry * dry_w + wet * wet_w) >> 14).clamp(-32767, 32767)) as i16
     }
 }

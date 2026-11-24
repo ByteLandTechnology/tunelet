@@ -5,10 +5,22 @@ use crate::effects::punch::{Punch, PunchConfig};
 use crate::effects::reverb::{self, Reverb};
 use crate::effects::warm::Warm;
 use crate::events::{ValidatedEvent, ValidatedEvents};
+use crate::numeric::fixed::{Fixed, Q14};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
 use crate::resynthesis::{self, Resynthesis};
 use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
+
+/// The length in frames of the global bypass crossfade.
+const BYPASS_FADE_FRAMES: u8 = 200;
+
+/// Allocates the 1,593-frame raw PCM delay buffer on the heap one time.
+fn prepare_dry() -> Box<[i16; resynthesis::LATENCY_FRAMES]> {
+    vec![0_i16; resynthesis::LATENCY_FRAMES]
+        .into_boxed_slice()
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("prepared dry buffer length"))
+}
 
 /// A prepared vocal processor with state, mono input and stereo synthesis.
 ///
@@ -31,6 +43,16 @@ pub struct Processor {
     ///
     /// The temporary aspiration mute of a drain is not stored here.
     config: ProcessorConfig,
+    /// The 1,593-frame raw PCM ring before Punch, for global `mix` and
+    /// `bypass`.
+    dry: Box<[i16; resynthesis::LATENCY_FRAMES]>,
+    /// The current frame slot in `dry`, always less than 1,593.
+    dry_index: usize,
+    /// The quantized Q14 global wet weight.
+    mix: Q14,
+    /// The bypass crossfade position in `0..=200`. Zero is active and 200 is
+    /// bypassed.
+    bypass_fade: u8,
     /// The input dynamics stage, which advances only while it is enabled.
     punch: Punch,
     /// The input saturation stage, which advances only while it is enabled.
@@ -109,6 +131,10 @@ impl Processor {
         Ok(Self {
             preparation,
             config,
+            dry: prepare_dry(),
+            dry_index: 0,
+            mix: Q14::from_f64((config.mix * 100.0) as f64 / 100.0),
+            bypass_fade: if config.bypass { BYPASS_FADE_FRAMES } else { 0 },
             punch,
             warm: Warm::new(rate, config.warm),
             resynthesis: Box::new(Resynthesis::new(rate, config.resynthesis)),
@@ -321,9 +347,9 @@ impl Processor {
 
     /// Returns the nominal resynthesis latency: 1,593 frames at both rates.
     ///
-    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
-    /// and effects have their own timing. Thus, this value does not align all
-    /// paths.
+    /// The resynthesis dry path and the global `mix` and `bypass` dry path use
+    /// this 1,593-frame delay. Resampled voices, choir delays and effects have
+    /// their own timing. Thus, this value does not align all paths.
     pub fn latency_frames(&self) -> usize {
         resynthesis::LATENCY_FRAMES
     }
@@ -501,6 +527,9 @@ impl Processor {
         if self.config.reverb != config.reverb {
             self.reverb.set_config(config.reverb);
         }
+        if self.config.mix != config.mix {
+            self.mix = Q14::from_f64((config.mix * 100.0) as f64 / 100.0);
+        }
         self.config = config;
         self.drain_remaining = None;
     }
@@ -508,9 +537,10 @@ impl Processor {
     /// Clears the audio histories, held notes, pitch feedback, peak and frame
     /// count.
     ///
-    /// This method cancels an active drain. It also clears the correction
-    /// ratio, the Punch envelopes, the Warm filters, the Alien recording and
-    /// the reverb delays. It releases the harmony MIDI notes and, in
+    /// This method cancels an active drain and settles the bypass crossfade.
+    /// It clears the global dry buffer, the correction ratio, the Punch
+    /// envelopes, the Warm filters, the Alien history and the reverb delays.
+    /// It releases the harmony MIDI notes and, in
     /// MIDI-chord mode, the chord voices. It keeps these items:
     ///
     /// - the configuration
@@ -529,6 +559,13 @@ impl Processor {
     /// When the method clears the held keys, it does not load the configured
     /// scale again. For a fully new state, make a new processor.
     pub fn reset(&mut self) {
+        self.dry.fill(0);
+        self.dry_index = 0;
+        self.bypass_fade = if self.config.bypass {
+            BYPASS_FADE_FRAMES
+        } else {
+            0
+        };
         self.punch.reset();
         self.warm.reset();
         self.resynthesis.reset();
@@ -587,6 +624,8 @@ impl Processor {
             ControlEvent::Alien(value) => config.alien = value,
             ControlEvent::Reverb(value) => config.reverb = value,
             ControlEvent::OutputGain(value) => config.output_gain = value,
+            ControlEvent::Mix(value) => config.mix = value,
+            ControlEvent::Bypass(value) => config.bypass = value,
             ControlEvent::Midi(event) => {
                 self.resynthesis.apply_midi(event);
                 return;
@@ -611,6 +650,12 @@ impl Processor {
     /// output.
     fn next(&mut self, mut input: i16) -> [i16; 2] {
         self.input_peak = self.input_peak.max((input as i32).abs());
+        let dry_sample = self.dry[self.dry_index];
+        self.dry[self.dry_index] = input;
+        self.dry_index += 1;
+        if self.dry_index == resynthesis::LATENCY_FRAMES {
+            self.dry_index = 0;
+        }
         if self.config.punch.enabled {
             input = self.punch.process_sample(input, &mut self.numeric);
         }
@@ -622,9 +667,30 @@ impl Processor {
         let alien = self.alien.process_sample(voice);
         let reverb = self.reverb.process_sample(alien);
         let gain = (self.config.output_gain as f64 * 256.0) as i64;
-        let result = reverb.map(|sample| {
-            (((i64::from(sample.to_bits()) * gain) >> 8) << 1).clamp(-32767, 32767) as i16
-        });
+        let wet = reverb
+            .map(|sample| (((i64::from(sample.to_bits()) * gain) >> 8) << 1).clamp(-32767, 32767));
+        let mix_wet = i64::from(self.mix.to_bits());
+        let mix_dry = i64::from((Q14::ONE - self.mix).to_bits());
+        let dry = i64::from(dry_sample);
+        let mixed = wet.map(|channel| (dry * mix_dry + channel * mix_wet) >> 14);
+        if self.config.bypass {
+            if self.bypass_fade < BYPASS_FADE_FRAMES {
+                self.bypass_fade += 1;
+            }
+        } else if self.bypass_fade > 0 {
+            self.bypass_fade -= 1;
+        }
+        let result = if self.bypass_fade == 0 {
+            mixed.map(|channel| channel.clamp(-32767, 32767) as i16)
+        } else {
+            let bypass_wet: Q14 = Fixed::<0>::from_bits(i32::from(self.bypass_fade))
+                .div(Fixed::<0>::from_bits(i32::from(BYPASS_FADE_FRAMES)));
+            let dry_w = i64::from(bypass_wet.to_bits());
+            let active_w = i64::from((Q14::ONE - bypass_wet).to_bits());
+            mixed.map(|channel| {
+                (((channel * active_w + dry * dry_w) >> 14).clamp(-32767, 32767)) as i16
+            })
+        };
         self.peak = self
             .peak
             .max((result[0] as i32).abs())

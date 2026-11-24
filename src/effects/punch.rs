@@ -54,6 +54,17 @@ pub struct PunchConfig {
     /// The default is 10 ms. The coefficients include the effect of the
     /// 100-frame update interval.
     pub attack_ms: f32,
+    /// The wet fraction, 0..=1.
+    ///
+    /// The default is 1. The dry weight is `1 - mix` in Q14. If Punch is
+    /// enabled, a zero mix still advances the envelopes and the drive. In
+    /// JavaScript, this field is optional and an absent value gives 1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "crate::wasm::default_mix"),
+        tsify(optional)
+    )]
+    pub mix: f32,
 }
 impl Default for PunchConfig {
     fn default() -> Self {
@@ -63,6 +74,7 @@ impl Default for PunchConfig {
             impact: 0.5,
             ceiling_db: -3.0,
             attack_ms: 10.0,
+            mix: 1.0,
         }
     }
 }
@@ -81,7 +93,8 @@ impl PunchConfig {
         check_range("punch.gain_db", self.gain_db, -96.0, 12.0)?;
         check_range("punch.impact", self.impact, 0.0, 1.0)?;
         check_range("punch.ceiling_db", self.ceiling_db, -96.0, 0.0)?;
-        check_range("punch.attack_ms", self.attack_ms, 0.01, 5000.0)
+        check_range("punch.attack_ms", self.attack_ms, 0.01, 5000.0)?;
+        check_range("punch.mix", self.mix, 0.0, 1.0)
     }
 }
 
@@ -110,6 +123,8 @@ pub(crate) struct Punch {
     gain: Q8,
     /// The linear output ceiling in Q14. It applies to the saturator angle.
     ceiling_gain: Q14,
+    /// The Q14 wet weight. The dry weight is `1 - mix`.
+    mix: Q14,
     /// The cached Q8 drive: base drive × envelope ratio × input gain.
     drive: Q8,
 }
@@ -128,6 +143,7 @@ impl Punch {
             attack_decay: Q14::default(),
             gain: Q8::ONE,
             ceiling_gain: Q14::default(),
+            mix: Q14::ONE,
             drive: BASE_DRIVE,
         };
         result.set_config(config);
@@ -159,6 +175,7 @@ impl Punch {
         self.attack_decay = decay(config.attack_ms as f64);
         self.gain = Q8::from_f64(db_to_gain(config.gain_db as f64));
         self.ceiling_gain = Q14::from_f64(db_to_gain(config.ceiling_db as f64));
+        self.mix = Q14::from_f64((config.mix * 100.0) as f64 / 100.0);
     }
     /// Clears both envelopes and the current window, then calculates the drive
     /// again from the base drive and the input gain.
@@ -208,6 +225,10 @@ impl Punch {
         let driven: Q8 = sample.mul(self.drive);
         let angle = Q14::from_bits(context.atan_q14.process(driven.to_bits(), 14 - 8));
         let output: Q14 = TWO_OVER_PI.mul(self.ceiling_gain.mul::<14, 14>(angle));
-        output.to_bits().wrapping_shl(1).clamp(-32767, 32767) as i16
+        let wet = i64::from(output.to_bits().wrapping_shl(1).clamp(-32767, 32767));
+        let dry = i64::from(input);
+        let wet_w = i64::from(self.mix.to_bits());
+        let dry_w = i64::from((Q14::ONE - self.mix).to_bits());
+        (((dry * dry_w + wet * wet_w) >> 14).clamp(-32767, 32767)) as i16
     }
 }

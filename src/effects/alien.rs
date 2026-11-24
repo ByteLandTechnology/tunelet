@@ -1,6 +1,7 @@
 //! Reverse-loop playback with a continuous input history and boundary fades.
 
-use crate::error::check_count;
+use crate::error::{check_count, check_range};
+use crate::numeric::clamp_i32;
 use crate::numeric::fixed::{Fixed, Q14};
 use crate::Error;
 
@@ -24,8 +25,9 @@ const FADE_FRAMES: usize = 200;
     serde(rename_all = "camelCase")
 )]
 pub struct AlienConfig {
-    /// Selects reversed playback instead of the direct input. The default is
-    /// `false`. The recording and the phase continue to advance in both
+    /// Enables reversed loop playback. The default is `false`.
+    ///
+    /// The history buffer and the loop phase continue to advance in both
     /// states.
     pub enabled: bool,
     /// The loop length in frames, 1..=96000. The default is 95,999.
@@ -33,27 +35,42 @@ pub struct AlienConfig {
     /// seconds changes with the sample rate. A short loop can be fully inside
     /// the fades.
     pub loop_frames: u32,
+    /// The wet fraction, 0..=1.
+    ///
+    /// The default is 1. The dry weight is `1 - mix` in Q14. While Alien is
+    /// enabled, a zero mix still advances the history buffer and the loop
+    /// phase. In JavaScript, this field is optional and an absent value gives
+    /// 1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default = "crate::wasm::default_mix"),
+        tsify(optional)
+    )]
+    pub mix: f32,
 }
 impl Default for AlienConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             loop_frames: 95_999,
+            mix: 1.0,
         }
     }
 }
 impl AlienConfig {
     /// Validates all fields, also when Alien is disabled.
     ///
-    /// `loop_frames` must be in its documented inclusive range. Validation
-    /// does not clamp values. It does not change the processor state.
+    /// `loop_frames` must be in its documented inclusive range. `mix` must be
+    /// finite and in its documented inclusive range. Validation does not clamp
+    /// values. It does not change the processor state.
     ///
     /// # Errors
     ///
     /// Returns the first [`Error::InvalidConfig`] with its dotted field path
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_count("alien.loop_frames", i64::from(self.loop_frames), 1, 96_000)
+        check_count("alien.loop_frames", i64::from(self.loop_frames), 1, 96_000)?;
+        check_range("alien.mix", self.mix, 0.0, 1.0)
     }
 }
 
@@ -63,11 +80,13 @@ impl AlienConfig {
 pub(crate) struct Alien {
     /// The validated controls, which include the selection of the wet output.
     config: AlienConfig,
+    /// The Q14 wet weight. The dry weight is `1 - mix`.
+    mix: Q14,
     /// 192,000 stereo Q14 frames, which are allocated one time at
     /// construction.
     buffer: Vec<[Q14; 2]>,
-    /// The current recording position. The position of the reverse reader
-    /// comes from this cursor.
+    /// The current write position. The position of the reverse reader comes
+    /// from this cursor.
     read: usize,
     /// The current frame in the loop. It is always less than `loop_len`.
     phase: usize,
@@ -82,6 +101,7 @@ impl Alien {
     pub(crate) fn new(config: AlienConfig) -> Self {
         Self {
             config,
+            mix: Q14::from_f64((config.mix * 100.0) as f64 / 100.0),
             buffer: vec![[Q14::default(); 2]; HISTORY_FRAMES],
             read: 0,
             phase: 0,
@@ -93,6 +113,7 @@ impl Alien {
     /// the phase into the new loop, which is not empty.
     pub(crate) fn set_config(&mut self, config: AlienConfig) {
         self.config = config;
+        self.mix = Q14::from_f64((config.mix * 100.0) as f64 / 100.0);
         self.loop_len = config.loop_frames as usize;
         self.phase = self.phase.min(self.loop_len - 1);
     }
@@ -134,6 +155,13 @@ impl Alien {
                 let gain: Q14 = Fixed::<0>::from_bits(distance as i32)
                     .div(Fixed::<0>::from_bits(FADE_FRAMES as i32));
                 result = result.map(|sample| sample.mul::<14, 14>(gain));
+            }
+            let wet_w = i64::from(self.mix.to_bits());
+            let dry_w = i64::from((Q14::ONE - self.mix).to_bits());
+            for (channel, sample) in result.iter_mut().enumerate() {
+                let dry = i64::from(input[channel].to_bits());
+                let wet = i64::from(sample.to_bits());
+                *sample = Q14::from_bits(clamp_i32((dry * dry_w + wet * wet_w) >> 14));
             }
             result
         } else {
