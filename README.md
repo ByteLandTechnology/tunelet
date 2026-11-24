@@ -304,14 +304,16 @@ These calls read the state of the processor. They do not change the audio.
 
 The telemetry includes these items:
 
-- The pitch ratio and the gain of each voice.
+- The pitch, the correction ratio and the frame count from the feedback.
+- The pitch ratio and the gain of each active voice.
 - The peaks of the input, of the two output channels and of the reverb wet
   signal.
 - The pitch clarity, which is a confidence score from 0 to 1.
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
-The peak windows of the telemetry are independent of the peak window of the
-feedback. The latency is nominal. Dry mixes, resampled voices and effects
+`active_voice_ratios()` and `active_voice_gains()` return slices for the active
+voices. The peak windows of the telemetry are independent of the peak window of
+the feedback. The latency is nominal. Dry mixes, resampled voices and effects
 have different timing.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
@@ -482,10 +484,12 @@ bindings.
 
 ### Feedback, telemetry and formant envelopes
 
-`telemetry()` and `takeTelemetry()` return a `Telemetry` object.
+`telemetry()` and `takeTelemetry()` return a `Telemetry` object. In
+`Telemetry`, `voiceRatios` and `voiceGains` are `Float32Array` values of length
+`voiceCount`.
 
-In feedback, `targetMidiNote` is `undefined` in these cases, which are also
-the cases where `voiced` is `false`:
+In feedback and telemetry, `targetMidiNote` is `undefined` in these cases,
+which are also the cases where `voiced` is `false`:
 
 - The kept pitch estimate is unvoiced. This includes the time before the
   first detection and after a reset or a drain completion.

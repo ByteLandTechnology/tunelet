@@ -56,12 +56,11 @@
 //! resynthesis delay. Voice delays, pitch changes and effects have their own
 //! timing.
 //!
-//! [`Processor::telemetry`] gives data for meters and displays: the ratio and
-//! the gain of each voice, the input and output peaks, the pitch clarity and
-//! the state of the effects. [`Processor::take_telemetry`] also clears the
-//! peak windows of the telemetry. [`Processor::formant_envelope`] writes the
-//! LPC envelopes before and after the formant controls. These calls do not
-//! change the audio.
+//! [`Processor::telemetry`] gives data for meters and displays. It includes
+//! the pitch, the voice ratios and gains, the peaks, the clarity and the
+//! effect state. [`Processor::take_telemetry`] also clears the peak windows of
+//! the telemetry. [`Processor::formant_envelope`] writes the LPC envelopes
+//! before and after the formant controls. These calls do not change the audio.
 //!
 //! After the last input block, call [`Processor::begin_drain`] one time. Then
 //! render drain blocks until a call returns zero. Each call fills the unused
