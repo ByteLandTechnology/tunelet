@@ -4,11 +4,13 @@
 //! the correction and control steps that are due. The raw input, the tracked
 //! periods and the correction ratios use the same history cursor.
 //!
-//! The source comes from a fixed overlap buffer. If formants are enabled,
-//! this buffer holds the output of the formant inverse analysis. If not,
-//! it holds the raw input. Voice readers read this source at fractional
-//! positions. If the shift is upward, prepared low-pass filters also
-//! change the source.
+//! The source comes from a fixed overlap buffer in [`LatencyMode::Standard`].
+//! If formants are enabled, this buffer holds the output of the formant
+//! inverse analysis. If not, it holds the raw input. In
+//! [`LatencyMode::LowLatency`], the source is the current input sample and
+//! the stage skips formant analysis and synthesis. Voice readers read this
+//! source at fractional positions. If the shift is upward, prepared low-pass
+//! filters also change the source.
 //!
 //! Choir renders the lead voice first. Then it makes delayed secondary voices
 //! with drift from the lead history. Harmony renders the lead voice and four
@@ -56,6 +58,23 @@ pub enum MultiVoiceMode {
     Choir,
     /// Voices that follow musical intervals, chords or MIDI notes.
     Harmony,
+}
+
+/// The latency mode of the resynthesis stage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(rename_all = "camelCase")
+)]
+pub enum LatencyMode {
+    /// This mode uses the 1,543-frame overlap buffer and supports LPC
+    /// formants (1,593 frames of nominal latency).
+    #[default]
+    Standard,
+    /// This mode skips the overlap buffer and LPC formants (50 frames of
+    /// nominal latency and zero dry delay).
+    LowLatency,
 }
 
 /// The controls for pitch-class correction, with target selection in the
@@ -149,14 +168,16 @@ impl CorrectionConfig {
 /// - No harmonic modulation.
 /// - No dry mix.
 /// - No stereo pan.
+/// - [`LatencyMode::Standard`].
 ///
 /// Validation applies to all controls, also when their stage or voice mode
 /// is not active.
 ///
-/// The dry path takes the audio after Punch and Warm and delays it by 1,543
-/// frames. The wet voice readers have more delay, which changes with the
-/// pitch. After this stage, the two paths go through Alien, reverb and the
-/// final output gain.
+/// The dry path takes the audio after Punch and Warm. It delays that audio by
+/// 1,543 frames in [`LatencyMode::Standard`] and by zero frames in
+/// [`LatencyMode::LowLatency`]. The wet voice readers have 50 nominal frames
+/// of lag, which changes with the pitch. After this stage, the two paths go
+/// through Alien, reverb and the final output gain.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -180,6 +201,9 @@ pub struct ResynthesisConfig {
     /// low-pass filters.
     pub pitch_ratio: f32,
     /// The vocal-tract changes and aspiration. They are disabled by default.
+    ///
+    /// [`LatencyMode::LowLatency`] validates these fields, but skips formant
+    /// analysis, synthesis and aspiration.
     pub formant: FormantConfig,
     /// The voice arrangement. The default is [`MultiVoiceMode::Choir`].
     ///
@@ -238,9 +262,10 @@ pub struct ResynthesisConfig {
     /// The dry fraction at the resynthesis stage, 0..=1. The default is 0.
     ///
     /// The code truncates this value to Q8. The wet weight is 1.0 minus the
-    /// Q8 dry weight. The dry path starts after Punch and Warm and has a
-    /// delay of 1,543 frames. Alien, reverb and the output gain still occur
-    /// after this stage.
+    /// Q8 dry weight. The dry path starts after Punch and Warm. It has a
+    /// delay of 1,543 frames in [`LatencyMode::Standard`] and zero frames in
+    /// [`LatencyMode::LowLatency`]. Alien, reverb and the output gain still
+    /// occur after this stage.
     pub dry_mix: f32,
     /// The seed for choir drift and aspiration, which use the same stream.
     /// The default is `0x1234_abcd`.
@@ -251,6 +276,13 @@ pub struct ResynthesisConfig {
     /// bits. Reset keeps the current position in the stream. The enabled
     /// stages set the number of random values that the code reads.
     pub random_seed: u64,
+    /// The latency mode of the resynthesis stage. The default is
+    /// [`LatencyMode::Standard`].
+    ///
+    /// [`LatencyMode::LowLatency`] skips the 1,543-frame overlap buffer and
+    /// LPC formants. A change to this value resets some audio histories and
+    /// the feedback. [`crate::Processor::set_config`] gives the details.
+    pub latency_mode: LatencyMode,
 }
 
 impl Default for ResynthesisConfig {
@@ -271,6 +303,7 @@ impl Default for ResynthesisConfig {
             harmonic_modulation: 0.0,
             dry_mix: 0.0,
             random_seed: 0x1234_abcd,
+            latency_mode: LatencyMode::Standard,
         }
     }
 }
@@ -329,11 +362,12 @@ const OVERLAP_FRAMES: usize = 1543;
 const FORMANT_OFFSET_FRAMES: i32 = (OVERLAP_FRAMES - ANALYSIS_FRAMES) as i32;
 /// The number of frames that a new reader stays behind the write position.
 const READER_LAG_FRAMES: i32 = 50;
-/// The nominal latency of resynthesis. Each reader moves with the pitch and
-/// the delay.
+/// The nominal latency of resynthesis in [`LatencyMode::Standard`].
 ///
 /// The dry path uses only `OVERLAP_FRAMES`.
 pub(crate) const LATENCY_FRAMES: usize = OVERLAP_FRAMES + READER_LAG_FRAMES as usize;
+/// The nominal latency of resynthesis in [`LatencyMode::LowLatency`].
+pub(crate) const LOW_LATENCY_FRAMES: usize = READER_LAG_FRAMES as usize;
 /// The counter value at which a control step runs. Usually, a step runs
 /// every 101 eligible frames.
 ///
@@ -471,6 +505,9 @@ pub(crate) struct Resynthesis {
     /// The Q14 weight of the new lead reader. After a jump, it increases
     /// toward 1.0.
     fade: Q14,
+    /// The Q6 input period from the latest frame, kept separate from the
+    /// Choir lead periods.
+    input_period: Q6,
     /// The Q6 period that the code selected last for a voice. The modulation
     /// uses it.
     current_output_period: Q6,
@@ -549,6 +586,7 @@ impl Resynthesis {
             dry_mix: Q8::ZERO,
             old_position: position_of(-READER_LAG_FRAMES),
             fade: Q14::ONE,
+            input_period: Q6::ZERO,
             current_output_period: Q6::ZERO,
             control_counter: CONTROL_DUE,
             drift_decay: Q14::ZERO,
@@ -670,9 +708,9 @@ impl Resynthesis {
             }
         }
         self.configure_coefficients();
-        if old.stereo_output != config.stereo_output {
-            // A stereo change resets the audio state. The correction keyboard
-            // keeps its held keys.
+        if old.stereo_output != config.stereo_output || old.latency_mode != config.latency_mode {
+            // A stereo or latency change resets the audio state. The
+            // correction keyboard keeps its held keys.
             self.reset_audio();
         }
     }
@@ -747,6 +785,7 @@ impl Resynthesis {
         self.harmony_ratios.fill(Q14::ONE);
         self.voice_ratios.fill(Q14::ONE);
         self.formant_position = 0;
+        self.input_period = Q6::ZERO;
         self.current_output_period = Q6::ZERO;
         self.correction = Q14::ONE;
         self.scale_initialized = false;
@@ -766,18 +805,26 @@ impl Resynthesis {
         self.scale_initialized = false;
     }
 
+    /// Returns the nominal resynthesis latency for the current mode.
+    pub(crate) fn latency_frames(&self) -> usize {
+        match self.config.latency_mode {
+            LatencyMode::Standard => LATENCY_FRAMES,
+            LatencyMode::LowLatency => LOW_LATENCY_FRAMES,
+        }
+    }
+
     /// Returns the finite number of frames for a drain of resynthesis.
     ///
     /// The number is the sum of these items:
     /// - Two full histories.
-    /// - Two seconds, if formants are enabled.
+    /// - Two seconds, if formants are enabled in [`LatencyMode::Standard`].
     /// - One second, if the global shift is upward.
     ///
     /// This is a configured limit for the truncation. It does not find
     /// actual silence.
     pub(crate) fn tail_frames(&self) -> usize {
         2 * HISTORY
-            + if self.config.formant.enabled {
+            + if self.config.formant.enabled && self.config.latency_mode == LatencyMode::Standard {
                 self.rate.as_u32() as usize * 2
             } else {
                 0
@@ -793,7 +840,7 @@ impl Resynthesis {
     ///
     /// The analysis does not advance, and the correction does not change.
     pub(crate) fn estimate(&self) -> PitchEstimate {
-        let period = (self.periods[self.write].to_bits() as f64 / 64.0) as f32;
+        let period = (self.input_period.to_bits() as f64 / 64.0) as f32;
         self.config.pitch.report(PitchEstimate {
             period_samples: period,
             frequency_hz: if period > 0.0 {
@@ -870,15 +917,17 @@ impl Resynthesis {
     /// Writes the formant envelopes of the model that the audio used for the
     /// last frame. Refer to `Formant::envelope`.
     ///
-    /// Returns `false` and fills the slices with zeros if the formant stage
-    /// is disabled or has no model. The slices must have the same length.
+    /// If the formant stage is disabled, `latency_mode` is
+    /// [`LatencyMode::LowLatency`] or no model is available, this method
+    /// returns `false` and fills the slices with zeros. The slices must have
+    /// the same length.
     pub(crate) fn formant_envelope(
         &self,
         max_frequency_hz: f32,
         input: &mut [f32],
         output: &mut [f32],
     ) -> bool {
-        if !self.config.formant.enabled {
+        if !self.config.formant.enabled || self.config.latency_mode == LatencyMode::LowLatency {
             input.fill(0.0);
             output.fill(0.0);
             return false;
@@ -1066,7 +1115,7 @@ impl Resynthesis {
             value = value.mul(self.fade) + old.mul(Q14::ONE - self.fade);
             self.fade = (self.fade + FADE_STEP).min(Q14::ONE);
         }
-        if self.config.formant.enabled {
+        if self.config.formant.enabled && self.config.latency_mode == LatencyMode::Standard {
             self.formant_position = center - FORMANT_OFFSET_FRAMES;
             value = Q14::from_bits(self.formant.forward(
                 value.to_bits(),
@@ -1129,7 +1178,7 @@ impl Resynthesis {
             self.correction = Q14::ONE;
             self.scale_initialized = false;
         }
-        if step.acquired {
+        if step.acquired && self.config.latency_mode == LatencyMode::Standard {
             self.formant.detection_mode_off();
         }
         if step.tracking_update {
@@ -1154,35 +1203,42 @@ impl Resynthesis {
                 self.drift_ratio[0] = Q14::ONE;
             }
         }
+        self.input_period = step.period;
         self.periods[write] = step.period;
         self.previous_periods[write] = step.previous_period;
         self.ratios[write] = self.correction;
-        self.overlap_index += 1;
-        if self.overlap_index == OVERLAP_FRAMES {
-            self.overlap_index = 0;
-        }
-        self.overlap[self.overlap_index] = if self.config.formant.enabled {
-            let previous = self.raw[ring(write as i32 - 1)];
-            Q14::from_bits(self.formant.process_analysis(
-                sample.to_bits(),
-                previous.to_bits(),
-                self.periods.as_slice(),
-                write,
-                step.previous_period.to_bits(),
-            ))
+        let (mut filtered, delayed) = if self.config.latency_mode == LatencyMode::LowLatency {
+            (sample, write)
         } else {
-            self.raw[ring(write as i32 - ANALYSIS_FRAMES as i32)]
+            self.overlap_index += 1;
+            if self.overlap_index == OVERLAP_FRAMES {
+                self.overlap_index = 0;
+            }
+            self.overlap[self.overlap_index] = if self.config.formant.enabled {
+                let previous = self.raw[ring(write as i32 - 1)];
+                Q14::from_bits(self.formant.process_analysis(
+                    sample.to_bits(),
+                    previous.to_bits(),
+                    self.periods.as_slice(),
+                    write,
+                    step.previous_period.to_bits(),
+                ))
+            } else {
+                self.raw[ring(write as i32 - ANALYSIS_FRAMES as i32)]
+            };
+            // The inverse analysis adds a delay of ANALYSIS_FRAMES. Read ahead by
+            // the same number of frames in the overlap ring. Then the total delay
+            // of the source is OVERLAP_FRAMES in the two formant modes.
+            let overlap_read = (self.overlap_index + ANALYSIS_FRAMES) % OVERLAP_FRAMES;
+            (
+                self.overlap[overlap_read],
+                ring(write as i32 - OVERLAP_FRAMES as i32),
+            )
         };
-        // The inverse analysis adds a delay of ANALYSIS_FRAMES. Read ahead by
-        // the same number of frames in the overlap ring. Then the total delay
-        // of the source is OVERLAP_FRAMES in the two formant modes.
-        let overlap_read = (self.overlap_index + ANALYSIS_FRAMES) % OVERLAP_FRAMES;
-        let mut filtered = self.overlap[overlap_read];
         for filter in &mut self.post {
             filtered = filter.process_sample(filtered);
         }
         self.filtered[write] = filtered;
-        let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
         let dry = self.raw[delayed];
         let mut mix = [Q14::ZERO; 2];
         let mut final_ratio = Q14::ONE;
@@ -1319,7 +1375,7 @@ impl Resynthesis {
                         };
                 }
             }
-            if self.config.formant.enabled {
+            if self.config.formant.enabled && self.config.latency_mode == LatencyMode::Standard {
                 self.formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
                 mix = self
                     .formant

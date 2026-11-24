@@ -52,9 +52,11 @@
 //! accumulated stereo peak and the frame count.
 //! [`Processor::take_feedback`] also clears the peak window. The pitch
 //! reporting bounds change only the reports. They do not change the detection
-//! or the audio signal. [`Processor::latency_frames`] gives a nominal
-//! resynthesis delay. Voice delays, pitch changes and effects have their own
-//! timing.
+//! or the audio signal. [`Processor::latency_frames`] gives the nominal
+//! resynthesis delay: 1,593 frames in [`LatencyMode::Standard`] and 50 frames
+//! in [`LatencyMode::LowLatency`]. [`LatencyMode::LowLatency`] skips the
+//! overlap buffer and LPC formants. Voice delays, pitch changes and effects
+//! have their own timing.
 //!
 //! [`Processor::telemetry`] gives data for meters and displays: the ratio and
 //! the gain of each voice, the input and output peaks, the pitch clarity and
@@ -135,5 +137,5 @@ pub use harmony::{
 pub use midi::MidiEvent;
 pub use pitch::PitchConfig;
 pub use processor::{Feedback, Processor, Telemetry};
-pub use resynthesis::{CorrectionConfig, MultiVoiceMode, ResynthesisConfig};
+pub use resynthesis::{CorrectionConfig, LatencyMode, MultiVoiceMode, ResynthesisConfig};
 pub use scale::{CorrectionScale, NoteMask, PitchClass};

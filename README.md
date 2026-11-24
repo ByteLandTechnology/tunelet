@@ -175,8 +175,13 @@ The internal Q14 stages use `i64` products and saturate at the `i32`
 limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
 multi-voice mixes.
 
+`resynthesis.latency_mode` selects `Standard` (default, 1,593 frames of
+nominal latency) or `LowLatency` (50 frames of nominal latency). `LowLatency`
+skips the 1,543-frame overlap buffer and the formant stage.
+
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+dry path starts after Warm. It has a delay of 1,543 frames in `Standard` and
+zero frames in `LowLatency`.
 
 ### Harmony sources
 
@@ -299,7 +304,7 @@ These calls read the state of the processor. They do not change the audio.
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
-| `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
+| `latency_frames()`   | 1,593 frames (`Standard`) or 50 frames (`LowLatency`) of latency  |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
 
 The telemetry includes these items:
@@ -320,8 +325,8 @@ have different timing.
 - The envelope after the width and stretch controls.
 
 The values are linear and have no absolute level. The formant stage must be
-enabled. The envelopes are those of the model that the audio used for the
-last frame. The method returns `Result<bool, Error>`:
+enabled in `Standard` latency mode. The envelopes are those of the model that
+the audio used for the last frame. The method returns `Result<bool, Error>`:
 
 | Result      | Description                                                      |
 | ----------- | ---------------------------------------------------------------- |
@@ -419,7 +424,7 @@ page that opens the JavaScript.
 | Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
 | In-place mono downmix             | `processMono(audio, events?)`                            |
 | Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
-| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
+| Preparation and latency           | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
 | Feedback                          | `feedback()`, `takeFeedback()`                           |
 | Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
 | Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`         |

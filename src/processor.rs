@@ -7,7 +7,7 @@ use crate::effects::warm::Warm;
 use crate::events::{ValidatedEvent, ValidatedEvents};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
-use crate::resynthesis::{self, Resynthesis};
+use crate::resynthesis::Resynthesis;
 use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
 
 /// A prepared vocal processor with state, mono input and stereo synthesis.
@@ -58,7 +58,7 @@ pub struct Processor {
     /// The last ratio from correction only.
     ///
     /// It is zero before the first `process` call, after a reset or after a
-    /// change of stereo output.
+    /// change of stereo output or latency mode.
     last_resample_ratio: f32,
     /// The count of rendered frames since reset, with drain frames included.
     ///
@@ -319,13 +319,17 @@ impl Processor {
         self.config
     }
 
-    /// Returns the nominal resynthesis latency: 1,593 frames at both rates.
+    /// Returns the nominal resynthesis latency: 1,593 frames in
+    /// [`crate::LatencyMode::Standard`] and 50 frames in
+    /// [`crate::LatencyMode::LowLatency`], at both rates.
     ///
-    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
-    /// and effects have their own timing. Thus, this value does not align all
+    /// The dry path has a delay of 1,543 frames in
+    /// [`crate::LatencyMode::Standard`] and zero frames in
+    /// [`crate::LatencyMode::LowLatency`]. Resampled voices, choir delays and
+    /// effects have their own timing. Thus, this value does not align all
     /// paths.
     pub fn latency_frames(&self) -> usize {
-        resynthesis::LATENCY_FRAMES
+        self.resynthesis.latency_frames()
     }
 
     /// Returns the pitch, stereo peak and frame count, and does not clear them.
@@ -423,6 +427,8 @@ impl Processor {
     /// fills the two slices with zeros in these cases:
     ///
     /// - [`crate::FormantConfig::enabled`] is `false`.
+    /// - [`crate::ResynthesisConfig::latency_mode`] is
+    ///   [`crate::LatencyMode::LowLatency`].
     /// - The current model has no synthesis filter. This occurs before the
     ///   first analysis and after an analysis that fails.
     ///
@@ -454,12 +460,12 @@ impl Processor {
     /// Validates all configuration fields and applies them.
     ///
     /// The validation also examines the fields of disabled stages. A stage
-    /// that does not change keeps its state. A change of `stereo_output`
-    /// resets the resynthesis audio state, Alien, the reverb delays, the peak
-    /// and the reported ratio. It also releases the harmony MIDI notes. It
-    /// keeps Punch, Warm, the correction keys, the random stream, the reverb
-    /// low-pass memories and the frame count. A change of `random_seed` starts
-    /// the random stream again.
+    /// that does not change keeps its state. A change of `stereo_output` or
+    /// `latency_mode` resets the resynthesis audio state, Alien, the reverb
+    /// delays, the peak and the reported ratio. It also releases the harmony
+    /// MIDI notes. It keeps Punch, Warm, the correction keys, the random
+    /// stream, the reverb low-pass memories and the frame count. A change of
+    /// `random_seed` starts the random stream again.
     ///
     /// Each successful call cancels a drain, also for an identical
     /// configuration. A change of reverb mode keeps the delay contents. If you
@@ -488,8 +494,11 @@ impl Processor {
         if self.config.resynthesis != config.resynthesis {
             self.resynthesis.apply_config(config.resynthesis);
         }
-        if self.config.resynthesis.stereo_output != config.resynthesis.stereo_output {
-            // Resynthesis resets its histories if its stereo setting changes.
+        if self.config.resynthesis.stereo_output != config.resynthesis.stereo_output
+            || self.config.resynthesis.latency_mode != config.resynthesis.latency_mode
+        {
+            // If stereo_output or latency_mode changes, resynthesis resets its
+            // histories.
             self.reset_post_resynthesis();
         }
         if self.config.resynthesis.random_seed != config.resynthesis.random_seed {
@@ -539,8 +548,8 @@ impl Processor {
 
     /// Clears the stages, the peak windows and the ratio after resynthesis.
     ///
-    /// Both a full reset and a change of stereo output clear this state. The
-    /// frame count does not change here.
+    /// A full reset and a change of stereo output or latency mode clear this
+    /// state. The frame count does not change here.
     fn reset_post_resynthesis(&mut self) {
         self.alien.reset();
         self.reverb.reset();
@@ -720,8 +729,8 @@ pub struct Feedback {
     /// unity.
     ///
     /// It does not include the configured pitch shift or the ratios of
-    /// individual voices. It is zero before processing, after a reset or after
-    /// a change of stereo output.
+    /// individual voices. It is zero before the first process call, after a
+    /// reset or after a change of stereo output or latency mode.
     pub resample_ratio: f32,
     /// The reported input pitch period in samples, with fractional samples.
     ///
@@ -761,9 +770,10 @@ pub struct Feedback {
     /// The largest absolute clipped stereo sample, divided by 32768.
     ///
     /// The peak window starts at construction, at a reset, at a change of
-    /// stereo output or at a call to [`Processor::take_feedback`]. The value
-    /// is in 0..=32767/32768. The mono downmix occurs after this measurement.
-    /// [`Processor::feedback`] does not clear the value.
+    /// stereo output or latency mode, or at a call to
+    /// [`Processor::take_feedback`]. The value is in 0..=32767/32768. The mono
+    /// downmix occurs after this measurement. [`Processor::feedback`] does not
+    /// clear the value.
     pub peak_level: f32,
     /// The number of frames processed since construction or the last reset,
     /// with drain frames included.
@@ -788,9 +798,9 @@ pub struct Feedback {
 /// `Default` gives a snapshot with all zeros.
 ///
 /// The three peak fields measure a window. The window starts at
-/// construction, at a reset, at a change of stereo output or at a call to
-/// [`Processor::take_telemetry`]. This window is independent of the peak
-/// window of [`Feedback`].
+/// construction, at a reset, at a change of stereo output or latency mode, or
+/// at a call to [`Processor::take_telemetry`]. This window is independent of
+/// the peak window of [`Feedback`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -880,7 +890,7 @@ pub struct Telemetry {
     /// The wrapping count of formant analyses since construction.
     ///
     /// The count increases every 441 frames while the formant stage is
-    /// enabled. Compare two values to find if
-    /// [`Processor::formant_envelope`] can give a new result.
+    /// enabled in [`crate::LatencyMode::Standard`]. Compare two values to find
+    /// if [`Processor::formant_envelope`] can give a new result.
     pub formant_generation: u32,
 }

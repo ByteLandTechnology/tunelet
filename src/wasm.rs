@@ -191,10 +191,12 @@ impl WasmProcessor {
         self.input.len()
     }
 
-    /// The nominal resynthesis latency: 1,593 frames at both sample rates.
+    /// The nominal resynthesis latency: 1,593 frames in `"standard"` mode and
+    /// 50 frames in `"lowLatency"` mode, at both sample rates.
     ///
-    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
-    /// and effects have their own timing. Thus, this value does not align all
+    /// The dry path has a delay of 1,543 frames in `"standard"` mode and zero
+    /// frames in `"lowLatency"` mode. Resampled voices, choir delays and
+    /// effects have their own timing. Thus, this value does not align all
     /// paths.
     #[wasm_bindgen(getter, js_name = latencyFrames)]
     pub fn latency_frames(&self) -> usize {
@@ -434,10 +436,10 @@ impl WasmProcessor {
     /// `maxFrequencyHz` must be finite, more than zero and not more than half
     /// of the sample rate.
     ///
-    /// The method returns `true` if the envelopes are valid. It returns
-    /// `false` and fills the two arrays with zeros if the formant stage is
-    /// disabled or if the current model has no synthesis filter. The audio
-    /// does not change.
+    /// If the envelopes are valid, the method returns `true`. If the formant
+    /// stage is disabled, `latencyMode` is `"lowLatency"` or the current
+    /// model has no synthesis filter, it returns `false` and fills the two
+    /// arrays with zeros. The audio does not change.
     ///
     /// The class keeps a buffer for the points. Only the first call and a
     /// call with more points than before reserve memory.
