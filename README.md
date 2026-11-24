@@ -50,8 +50,9 @@ browsers and Node.js.
 - **No dependencies**: The default Rust build has no dependencies and uses
   only safe Rust.
 
-The input is mono signed 16-bit PCM at 44.1 kHz or 48 kHz. The output is
-stereo or mono 16-bit PCM.
+The input is mono signed 16-bit PCM or normalized 32-bit floating-point audio
+at 44.1 kHz or 48 kHz. The output is stereo or mono in 16-bit PCM or 32-bit
+floating-point form.
 
 ## Installation
 
@@ -216,11 +217,18 @@ processor.
 
 Select the process function for your output layout:
 
-| Output layout                  | Function for input      | Function for the tail |
-| ------------------------------ | ----------------------- | --------------------- |
-| `[[i16; 2]]` stereo frames     | `process`               | `drain`               |
-| Separate left and right slices | `process_planar`        | `drain_planar`        |
-| Mono slice                     | `process_mono_in_place` | `drain_mono`          |
+| Output layout                        | Function for input          | Function for the tail |
+| ------------------------------------ | --------------------------- | --------------------- |
+| `[[i16; 2]]` stereo frames           | `process`                   | `drain`               |
+| Separate `i16` left and right slices | `process_planar`            | `drain_planar`        |
+| Mono `i16` slice                     | `process_mono_in_place`     | `drain_mono`          |
+| `[[f32; 2]]` stereo frames           | `process_f32`               | `drain_f32`           |
+| Separate `f32` left and right slices | `process_planar_f32`        | `drain_planar_f32`    |
+| Mono `f32` slice                     | `process_mono_in_place_f32` | `drain_mono_f32`      |
+
+The `f32` methods convert `NaN` input samples to `0`. They clamp other input
+values to `-1.0..=1.0`, multiply by `32767.0` and round to `i16`. They divide
+each `i16` output sample by `32768.0` and fill unused tail frames with `0.0`.
 
 These rules apply to each call:
 
@@ -276,7 +284,7 @@ The drain gives the tail of the reverb and the voices after the last input
 block. To get the tail, do these steps:
 
 1. Call `begin_drain()` one time.
-2. Call `drain`, `drain_planar` or `drain_mono` until the call returns zero.
+2. Call the drain method for your layout until the call returns zero.
 3. From each drain call, use only the frames that the call returns.
 
 The drain fills the unused output with zeros. The drain has a finite budget,
@@ -413,33 +421,72 @@ page that opens the JavaScript.
 
 ### TypeScript API
 
-| Operation                         | TypeScript API                                           |
-| --------------------------------- | -------------------------------------------------------- |
-| Shared initialization             | `loadTunelet(source?)`                                   |
-| Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
-| In-place mono downmix             | `processMono(audio, events?)`                            |
-| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
-| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
-| Feedback                          | `feedback()`, `takeFeedback()`                           |
-| Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
-| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`         |
-| Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)` |
-| Configured tail budget            | `tailFrames()`                                           |
-| Reset or release memory           | `reset()`, `free()`                                      |
+| Operation                         | TypeScript API                                                         |
+| --------------------------------- | ---------------------------------------------------------------------- |
+| Shared initialization             | `loadTunelet(source?)`                                                 |
+| Mono PCM to planar stereo         | `process(input, left, right, events?)`                                 |
+| In-place mono PCM downmix         | `processMono(audio, events?)`                                          |
+| Fixed `Float32` buffer offsets    | `inputF32Ptr`, `leftF32Ptr`, `rightF32Ptr`                             |
+| Cached `Float32` memory views     | `new TuneletAudioViews(memory, processor)`                             |
+| In-place `Float32` stereo         | `processF32InPlace(frames, events?)`                                   |
+| In-place `Float32` mono downmix   | `processMonoF32InPlace(frames, events?)`                               |
+| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`                     |
+| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`                        |
+| Feedback                          | `feedback()`, `takeFeedback()`                                         |
+| Telemetry                         | `telemetry()`, `takeTelemetry()`                                       |
+| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`                       |
+| Finite PCM tail                   | `beginDrain()`, `drain(left, right)`, `drainMono(audio)`               |
+| Finite `Float32` tail             | `beginDrain()`, `drainF32InPlace(frames)`, `drainMonoF32InPlace(frames)` |
+| Configured tail budget            | `tailFrames()`                                                         |
+| Reset or release memory           | `reset()`, `free()`, `views.dispose()`                                 |
 
 ### Audio buffers
 
-All audio buffers are `Int16Array` buffers, and they must fit in the prepared
-frame limit. These rules apply:
+The package offers copied `Int16Array` calls and in-place `Float32` calls. All
+blocks must fit in `maxBlockFrames`. This package does not install an
+AudioWorklet or an integration with an audio device.
+
+For `process`, `processMono`, `drain` and `drainMono`, pass `Int16Array`
+buffers. These rules apply:
 
 - Stereo output arrays must not overlap.
 - The input can overlap an output, because the binding copies the input
   first.
 - Buffers must stay attached during each call.
 
-Web Audio uses Float32 samples, which you must convert to and from 16-bit
-PCM. This package does not install an AudioWorklet or an integration with an
-audio device.
+For Web Audio and zero-copy blocks, bind `TuneletAudioViews` to
+`InitOutput.memory` and a `Tunelet` instance:
+
+```ts
+const wasm = await loadTunelet();
+const processor = new Tunelet(48000, 128);
+const views = new TuneletAudioViews(wasm.memory, processor);
+
+views.input.set(monoChunk); // monoChunk.length <= 128
+processor.processF32InPlace(monoChunk.length);
+const left = views.left;
+const right = views.right;
+
+views.dispose();
+processor.free();
+```
+
+`inputF32Ptr`, `leftF32Ptr` and `rightF32Ptr` stay at fixed byte offsets until
+`processor.free()`. Mono in-place calls read and write `views.input`. Stereo
+in-place calls read `views.input` and write `views.left` and `views.right`.
+The quantization and the output scale match the native `f32` methods.
+
+These lifetime rules apply to `Float32` views:
+
+- A new `Tunelet`, `setConfig`, `events`, feedback, telemetry or
+  `formantEnvelope` can grow Wasm memory and detach `memory.buffer`.
+- Read `views.input` before each input write so `TuneletAudioViews` checks
+  `memory.buffer` and refreshes detached views.
+- If an in-place call supplies `events`, read `views.left` and `views.right`
+  (or `views.input` for mono) again after that call.
+- When you finish with the views, call `views.dispose()`.
+- Do not read or write the views or pointers of an instance after
+  `processor.free()`, because `free()` returns those buffers to the allocator.
 
 ### Configuration objects
 
@@ -502,21 +549,26 @@ call with more points than before reserve memory.
 
 ### Memory allocation
 
-The constructor allocates reusable PCM buffers. A successful call that
-processes audio without events does not allocate new Rust PCM storage.
-However, the call copies the audio across the boundary between JavaScript and
-Wasm. These items can allocate:
+The constructor allocates reusable `i16` and `f32` buffers of length
+`maxBlockFrames`. `processF32InPlace`, `processMonoF32InPlace`,
+`drainF32InPlace` and `drainMonoF32InPlace` without `events` do not allocate
+Rust storage, make JavaScript views or call JavaScript imports. If Wasm memory
+does not grow, `TuneletAudioViews` also allocates no new `Float32Array` views
+after construction.
 
-- Object conversion.
+`Int16Array` audio calls copy samples across the boundary and make temporary
+views in the generated glue. These operations can also allocate and grow Wasm
+memory:
+
+- A new `Tunelet` instance.
+- Configuration conversion.
 - Supplied events.
 - Errors.
 - Feedback and telemetry.
-- The formant envelopes.
+- Formant envelopes with more points than before.
 
-The generated glue can also make temporary views. This binding is for general
-use, and it does not guarantee hard real-time behavior for allocation or
-scheduling. Drain completion and reset keep the same state as the equivalent
-Rust functions.
+Drain completion and reset keep the same state as the equivalent Rust
+functions.
 
 ## Build from source
 
