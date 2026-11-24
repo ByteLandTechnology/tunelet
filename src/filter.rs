@@ -174,4 +174,21 @@ impl Biquad {
         self.y[0] = output;
         output
     }
+    /// Filters one sample with a first-order section and updates the first
+    /// delay slot.
+    ///
+    /// Callers must prepare the filter with `b[2] == Q14::ZERO` and
+    /// `a[1] == Q14::ZERO`, as in [`Design::low_pass_one_pole`]. The three Q28
+    /// products accumulate in `i64` before one signed half-unit shift and an
+    /// `i32` clamp.
+    #[inline(always)]
+    pub(crate) fn process_one_pole(&mut self, input: Q14) -> Q14 {
+        let sum = (i64::from(self.b[0].to_bits()) * i64::from(input.to_bits()))
+            .saturating_add(i64::from(self.b[1].to_bits()) * i64::from(self.x[0].to_bits()))
+            .saturating_sub(i64::from(self.a[0].to_bits()) * i64::from(self.y[0].to_bits()));
+        let output = Q14::from_bits(round_q14(sum));
+        self.x[0] = input;
+        self.y[0] = output;
+        output
+    }
 }
