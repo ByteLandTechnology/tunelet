@@ -216,11 +216,11 @@ processor.
 
 Select the process function for your output layout:
 
-| Output layout                  | Function for input      | Function for the tail |
-| ------------------------------ | ----------------------- | --------------------- |
-| `[[i16; 2]]` stereo frames     | `process`               | `drain`               |
-| Separate left and right slices | `process_planar`        | `drain_planar`        |
-| Mono slice                     | `process_mono_in_place` | `drain_mono`          |
+| Output layout                  | Function for input      | Function for packed MIDI          | Function for the tail |
+| ------------------------------ | ----------------------- | --------------------------------- | --------------------- |
+| `[[i16; 2]]` stereo frames     | `process`               | `process_with_midi`               | `drain`               |
+| Separate left and right slices | `process_planar`        | `process_planar_with_midi`        | `drain_planar`        |
+| Mono slice                     | `process_mono_in_place` | `process_mono_in_place_with_midi` | `drain_mono`          |
 
 These rules apply to each call:
 
@@ -260,6 +260,14 @@ let events = [TimedEvent {
 }];
 processor.process(&input, &mut output, &events)?;
 ```
+
+For blocks that carry only three-byte MIDI messages, give `PackedMidiEvent`
+records to `process_with_midi`, `process_planar_with_midi` or
+`process_mono_in_place_with_midi`. Each record pairs `offset` with `bus` (`0`
+for harmony MIDI, `1` for correction MIDI) and three MIDI bytes in
+`[status, data1, data2]`. `MidiEvent::from_bytes` decodes the bytes without
+heap allocation. If `MidiEvent::from_bytes` returns `Ok(None)`, the processor
+ignores that message after the offset checks succeed.
 
 ## Lifecycle
 
@@ -417,7 +425,9 @@ page that opens the JavaScript.
 | --------------------------------- | -------------------------------------------------------- |
 | Shared initialization             | `loadTunelet(source?)`                                   |
 | Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
+| Planar stereo with packed MIDI    | `processWithMidi(input, left, right, midi)`              |
 | In-place mono downmix             | `processMono(audio, events?)`                            |
+| Mono downmix with packed MIDI     | `processMonoWithMidi(audio, midi)`                       |
 | Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
 | Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
 | Feedback                          | `feedback()`, `takeFeedback()`                           |
@@ -480,6 +490,35 @@ Use `correctionMidi` for the separate correction keyboard. The native rules
 for event order and for the validation of the whole block also apply to these
 bindings.
 
+For Web MIDI and `AudioWorklet` hosts, `processWithMidi` and
+`processMonoWithMidi` accept packed three-byte MIDI messages in a
+`Uint32Array`. The array contains `(offset, packedMessage)` word pairs, so
+`midi.length` must be even. Word `2 * i` is the zero-based frame `offset` in
+`0..frames`, and offsets must not decrease.
+
+Word `2 * i + 1` packs the bus and the three MIDI bytes as
+`(bus << 24) | (status << 16) | (data1 << 8) | data2`:
+
+| Bits      | Field    | Valid range   | Description                                   |
+| --------- | -------- | ------------- | --------------------------------------------- |
+| `24..=31` | `bus`    | `0..=1`       | `0` for harmony MIDI, `1` for correction MIDI |
+| `16..=23` | `status` | `0x80..=0xff` | MIDI status byte with channel `status & 0x0f` |
+| `8..=15`  | `data1`  | `0..=127`     | Note number or controller number              |
+| `0..=7`   | `data2`  | `0..=127`     | Velocity or controller value                  |
+
+```ts
+const midi = new Uint32Array(2);
+midi[0] = 0;
+midi[1] = (0 << 24) | (0x90 << 16) | (60 << 8) | 100;
+processor.processWithMidi(input, left, right, midi);
+```
+
+Supported messages are Note On, Note On with zero velocity, Note Off and
+controller 123 (All Notes Off). The processor ignores other three-byte
+messages with valid byte ranges after the offset checks succeed. If
+`midi.length` is odd, a bus is unknown or an offset or MIDI byte is not valid,
+the call rejects the full block. State and output then do not change.
+
 ### Feedback, telemetry and formant envelopes
 
 `telemetry()` and `takeTelemetry()` return a `Telemetry` object.
@@ -502,16 +541,21 @@ call with more points than before reserve memory.
 
 ### Memory allocation
 
-The constructor allocates reusable PCM buffers. A successful call that
-processes audio without events does not allocate new Rust PCM storage.
-However, the call copies the audio across the boundary between JavaScript and
-Wasm. These items can allocate:
+The constructor allocates reusable PCM buffers. `Tunelet` also keeps reusable
+vectors for decoded `TimedEvent` controls, packed `u32` MIDI words and formant
+envelope points. Each vector reserves exact capacity on its first use or when a
+call needs more entries than before, and keeps that capacity across calls.
+
+`processWithMidi` and `processMonoWithMidi` copy the `Uint32Array` in one
+`copy_to` call and create no JavaScript event objects. After the `u32` buffer
+reserves enough capacity, packed MIDI calls do not allocate new Rust vector
+storage. These items can allocate:
 
 - Object conversion.
-- Supplied events.
+- Supplied `TimedEvent[]` arrays and initial growth of reusable buffers.
 - Errors.
 - Feedback and telemetry.
-- The formant envelopes.
+- The formant envelopes on first growth.
 
 The generated glue can also make temporary views. This binding is for general
 use, and it does not guarantee hard real-time behavior for allocation or

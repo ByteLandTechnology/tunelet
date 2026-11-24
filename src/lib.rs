@@ -43,8 +43,12 @@
 //! empty block accepts no events.
 //!
 //! [`ControlEvent::Midi`] controls harmony. [`ControlEvent::CorrectionMidi`]
-//! selects the correction pitch classes independently. The processor does not
-//! keep MIDI controls in a queue after the current call.
+//! selects the correction pitch classes independently. For blocks that carry
+//! only three-byte MIDI messages, [`PackedMidiEvent`] and
+//! [`Processor::process_with_midi`], [`Processor::process_planar_with_midi`]
+//! and [`Processor::process_mono_in_place_with_midi`] decode messages directly
+//! through [`MidiEvent::from_bytes`]. The processor does not keep MIDI
+//! controls in a queue after the current call.
 //!
 //! # Feedback, latency and lifecycle
 //!
@@ -92,9 +96,11 @@
 //!
 //! To export JavaScript bindings and generated TypeScript definitions, enable
 //! the optional `wasm` feature for `wasm32-unknown-unknown`. The binding owns
-//! PCM buffers that it uses again. Configuration conversion, event conversion,
-//! feedback objects and errors cause more allocation at the JavaScript
-//! boundary.
+//! PCM, event and packed MIDI buffers that it uses again. Configuration
+//! conversion, `TimedEvent` conversion, feedback objects and errors cause more
+//! allocation at the JavaScript boundary. Packed MIDI calls copy a
+//! `Uint32Array` in one call and do not allocate after the buffer reserves
+//! enough capacity.
 //! Refer to the README for how to build the shared package for browsers and
 //! Node.js.
 
@@ -127,7 +133,7 @@ pub use effects::punch::PunchConfig;
 pub use effects::reverb::{ReverbConfig, ReverbMode};
 pub use effects::warm::WarmConfig;
 pub use error::{ConfigProblem, Error, EventProblem};
-pub use events::{ControlEvent, TimedEvent};
+pub use events::{ControlEvent, PackedMidiEvent, TimedEvent};
 pub use formant::FormantConfig;
 pub use harmony::{
     ChordDegree, ChordName, HarmonyConfig, HarmonyScale, HarmonySource, Inversion, HARMONY_VOICES,

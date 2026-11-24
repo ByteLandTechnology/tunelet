@@ -4,11 +4,11 @@ use crate::effects::alien::{self, Alien};
 use crate::effects::punch::{Punch, PunchConfig};
 use crate::effects::reverb::{self, Reverb};
 use crate::effects::warm::Warm;
-use crate::events::{ValidatedEvent, ValidatedEvents};
+use crate::events::{PackedMidiRecord, ValidatedEvent, ValidatedEvents, ValidatedPackedMidi};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
 use crate::resynthesis::{self, Resynthesis};
-use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
+use crate::{ControlEvent, Error, PackedMidiEvent, PrepareConfig, ProcessorConfig, TimedEvent};
 
 /// A prepared vocal processor with state, mono input and stereo synthesis.
 ///
@@ -203,6 +203,124 @@ impl Processor {
         events: &[TimedEvent],
     ) -> Result<(), Error> {
         self.process_into(audio.len(), events, |processor, index| {
+            let output = processor.next(audio[index]);
+            audio[index] = downmix(output);
+        })
+    }
+
+    /// Processes mono PCM into `[left, right]` stereo frames with packed
+    /// three-byte MIDI controls.
+    ///
+    /// Each entry in `midi` pairs a zero-based frame `offset` with `bus` and
+    /// three MIDI bytes. `bus` is `0` for [`ControlEvent::Midi`] or `1` for
+    /// [`ControlEvent::CorrectionMidi`]. [`crate::MidiEvent::from_bytes`]
+    /// decodes `bytes`. If `MidiEvent::from_bytes` returns `Ok(None)`, the
+    /// processor ignores that message after the offset checks succeed.
+    ///
+    /// The buffer lengths, the block limit, the offset order, empty blocks and
+    /// drain cancellation obey the same rules as [`process`](Self::process).
+    /// This method does not allocate memory.
+    ///
+    /// # Errors
+    ///
+    /// The call checks [`Error::BufferLength`] first and
+    /// [`Error::BlockTooLarge`] second. Then it checks [`Error::InvalidEvent`]
+    /// for the first event with an invalid offset, an unknown bus or invalid
+    /// MIDI bytes. All checks finish before the state or the output changes.
+    pub fn process_with_midi(
+        &mut self,
+        input: &[i16],
+        output: &mut [[i16; 2]],
+        midi: &[PackedMidiEvent],
+    ) -> Result<(), Error> {
+        Error::check_length(input.len(), output.len())?;
+        self.process_midi_into(input.len(), midi, |processor, index| {
+            output[index] = processor.next(input[index]);
+        })
+    }
+
+    /// Processes mono PCM into separate left and right slices with packed
+    /// three-byte MIDI controls.
+    ///
+    /// The three slices must have equal frame counts. The decode of MIDI, the
+    /// offset order, empty blocks and drain cancellation are the same as for
+    /// [`process_with_midi`](Self::process_with_midi). If the call succeeds, it
+    /// writes all output samples. This method does not allocate memory.
+    ///
+    /// # Errors
+    ///
+    /// The call checks [`Error::BufferLength`] for the left channel, then for
+    /// the right channel. Next, it checks [`Error::BlockTooLarge`], then
+    /// [`Error::InvalidEvent`]. If an error occurs, the two output buffers and
+    /// all processor state do not change.
+    pub fn process_planar_with_midi(
+        &mut self,
+        input: &[i16],
+        left: &mut [i16],
+        right: &mut [i16],
+        midi: &[PackedMidiEvent],
+    ) -> Result<(), Error> {
+        Error::check_length(input.len(), left.len())?;
+        Error::check_length(input.len(), right.len())?;
+        self.process_midi_into(input.len(), midi, |processor, index| {
+            let frame = processor.next(input[index]);
+            left[index] = frame[0];
+            right[index] = frame[1];
+        })
+    }
+
+    /// Replaces mono PCM with the stereo downmix and applies packed three-byte
+    /// MIDI controls.
+    ///
+    /// The in-place read order, the downmix and the peak measurement are the
+    /// same as for [`process_mono_in_place`](Self::process_mono_in_place). The
+    /// decode of MIDI, the offset rules and drain cancellation are the same as
+    /// for [`process_with_midi`](Self::process_with_midi). This method does not
+    /// allocate memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BlockTooLarge`] for a slice that is too large. Returns
+    /// [`Error::InvalidEvent`] for the first event with an invalid offset, an
+    /// unknown bus or invalid MIDI bytes. All checks finish before the audio
+    /// slice or the processor state changes.
+    pub fn process_mono_in_place_with_midi(
+        &mut self,
+        audio: &mut [i16],
+        midi: &[PackedMidiEvent],
+    ) -> Result<(), Error> {
+        self.process_midi_into(audio.len(), midi, |processor, index| {
+            let output = processor.next(audio[index]);
+            audio[index] = downmix(output);
+        })
+    }
+
+    /// Processes planar stereo audio for Wasm `(offset, packedMessage)` word
+    /// pairs.
+    #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+    pub(crate) fn process_planar_midi_words(
+        &mut self,
+        input: &[i16],
+        left: &mut [i16],
+        right: &mut [i16],
+        midi_words: &[[u32; 2]],
+    ) -> Result<(), Error> {
+        self.process_midi_into(input.len(), midi_words, |processor, index| {
+            let frame = processor.next(input[index]);
+            left[index] = frame[0];
+            right[index] = frame[1];
+        })
+    }
+
+    /// Processes in-place mono audio for Wasm `(offset, packedMessage)` word
+    /// pairs.
+    #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+    pub(crate) fn process_mono_midi_words(
+        &mut self,
+        audio: &mut [i16],
+        midi_words: &[[u32; 2]],
+    ) -> Result<(), Error> {
+        self.process_midi_into(audio.len(), midi_words, |processor, index| {
             let output = processor.next(audio[index]);
             audio[index] = downmix(output);
         })
@@ -578,15 +696,33 @@ impl Processor {
     /// configuration. MIDI and reset events act directly. A reset does not
     /// discard later events in the block.
     fn apply(&mut self, event: ValidatedEvent) {
-        let mut config = self.config;
+        let mut config;
         match event.into_inner() {
             ControlEvent::Configure(value) => config = value,
-            ControlEvent::Resynthesis(value) => config.resynthesis = value,
-            ControlEvent::Punch(value) => config.punch = value,
-            ControlEvent::Warm(value) => config.warm = value,
-            ControlEvent::Alien(value) => config.alien = value,
-            ControlEvent::Reverb(value) => config.reverb = value,
-            ControlEvent::OutputGain(value) => config.output_gain = value,
+            ControlEvent::Resynthesis(value) => {
+                config = self.config;
+                config.resynthesis = value;
+            }
+            ControlEvent::Punch(value) => {
+                config = self.config;
+                config.punch = value;
+            }
+            ControlEvent::Warm(value) => {
+                config = self.config;
+                config.warm = value;
+            }
+            ControlEvent::Alien(value) => {
+                config = self.config;
+                config.alien = value;
+            }
+            ControlEvent::Reverb(value) => {
+                config = self.config;
+                config.reverb = value;
+            }
+            ControlEvent::OutputGain(value) => {
+                config = self.config;
+                config.output_gain = value;
+            }
             ControlEvent::Midi(event) => {
                 self.resynthesis.apply_midi(event);
                 return;
@@ -651,6 +787,26 @@ impl Processor {
         self.drain_remaining = None;
         for index in 0..frames {
             while let Some(event) = events.next_at(index) {
+                self.apply(event);
+            }
+            render(self, index);
+        }
+        Ok(())
+    }
+
+    /// Checks the block and packed MIDI controls, applies MIDI events at each
+    /// offset and renders each frame.
+    fn process_midi_into<T: PackedMidiRecord>(
+        &mut self,
+        frames: usize,
+        midi: &[T],
+        mut render: impl FnMut(&mut Self, usize),
+    ) -> Result<(), Error> {
+        self.check_block(frames)?;
+        let mut midi = ValidatedPackedMidi::new(midi, frames)?;
+        self.drain_remaining = None;
+        for index in 0..frames {
+            while let Some(event) = midi.next_at(index) {
                 self.apply(event);
             }
             render(self, index);

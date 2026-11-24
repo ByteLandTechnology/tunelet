@@ -110,6 +110,11 @@ pub enum EventProblem {
         /// The problem with the field.
         problem: ConfigProblem,
     },
+    /// The packed MIDI event selects an unknown bus.
+    MidiBus {
+        /// The unsupported MIDI bus selector.
+        bus: u8,
+    },
     /// The event has a MIDI message that is not valid.
     Midi,
 }
@@ -183,6 +188,7 @@ impl fmt::Display for EventProblem {
             Self::OffsetOutsideBlock => f.write_str("offset is outside the block"),
             Self::OffsetDecreasing => f.write_str("offset is below the previous event's offset"),
             Self::Config { field, problem } => write!(f, "{field} {problem}"),
+            Self::MidiBus { bus } => write!(f, "MIDI bus {bus} must be 0 or 1"),
             Self::Midi => f.write_str("MIDI message is not valid"),
         }
     }
