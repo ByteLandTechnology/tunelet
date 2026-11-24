@@ -103,7 +103,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --target wasm32-unknown-
 If you change the Wasm or TypeScript code, also run these commands.
 `npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
 `npm run build` compiles `src/wasm.rs` and `src/index.ts`.
-`npm run verify:pack` runs `npm run build` and checks the archives:
+`npm run verify:pack` runs `npm run build` one time and checks the `tunelet`
+and `@bytelandtechnology/tunelet` archives:
 
 ```sh
 npm ci
@@ -137,9 +138,12 @@ npm run verify:pack
 - Releases: release-please sets the versions and writes `CHANGELOG.md`.
   Do not change the version in `Cargo.toml`, `Cargo.lock`,
   `package.json`, `package-lock.json` or `.release-please-manifest.json`
-  by hand. The commit types and the `!` mark set the next version. The
-  release workflow is `.github/workflows/release.yml`. It publishes to
-  npm and crates.io through trusted publishing, so do not rename it.
+  by hand. The commit types and the `!` mark set the next version. In
+  `.github/workflows/release.yml`, `build-wasm` builds, checks and
+  uploads both `.tgz` archives and `SHA256SUMS.txt`. Then `publish-npm`
+  and `publish-github` verify `SHA256SUMS.txt` and publish those exact
+  `.tgz` archives. The OIDC policies on npm and crates.io name
+  `release.yml`, so do not rename that file.
 
 ## Prohibited changes
 
