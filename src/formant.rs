@@ -241,19 +241,25 @@ pub(crate) struct Formant {
 /// Multiplies `coefficients` with the samples before `index` in `ring`.
 ///
 /// If the span crosses index zero, the function splits `ring` into two
-/// slices. The function adds each `i64` product with saturation in tap order.
+/// slices. The function adds the `i64` products of each slice. Then it adds
+/// the two sums.
 #[inline]
 fn ring_sum(ring: &[i32], index: usize, coefficients: &[i32]) -> i64 {
     let (head, tail) = ring.split_at(index);
     let (first, second) = coefficients.split_at(coefficients.len().min(head.len()));
-    let mut sum = 0_i64;
-    for (&sample, &coefficient) in head.iter().rev().zip(first) {
-        sum = sum.saturating_add(i64::from(sample) * i64::from(coefficient));
-    }
-    for (&sample, &coefficient) in tail.iter().rev().zip(second) {
-        sum = sum.saturating_add(i64::from(sample) * i64::from(coefficient));
-    }
-    sum
+    let first_sum: i64 = head
+        .iter()
+        .rev()
+        .zip(first)
+        .map(|(&sample, &coefficient)| i64::from(sample) * i64::from(coefficient))
+        .sum();
+    let second_sum: i64 = tail
+        .iter()
+        .rev()
+        .zip(second)
+        .map(|(&sample, &coefficient)| i64::from(sample) * i64::from(coefficient))
+        .sum();
+    first_sum + second_sum
 }
 
 impl Formant {
