@@ -33,11 +33,31 @@ jobs:
       issues: write
       pull-requests: write
     outputs:
+      prs_created: ${{ steps.release.outputs.prs_created }}
+      pr_branch: ${{ steps.release.outputs.prs_created == 'true' && steps.release.outputs.pr != '' && fromJSON(steps.release.outputs.pr).number > 0 && fromJSON(steps.release.outputs.pr).headBranchName || '' }}
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+
+  # release-please uses GITHUB_TOKEN, so its pull_request event does not run
+  # CI jobs and stays visible as an unapproved run. If release-please creates
+  # or updates a pull request, dispatch-ci starts ci.yml on the release branch
+  # through workflow_dispatch. That workflow_dispatch run checks the branch tip
+  # (head_sha), not the merge ref.
+  dispatch-ci:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.prs_created == 'true' && needs.release-please.outputs.pr_branch != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - run: gh workflow run ci.yml --repo="$GITHUB_REPOSITORY" --ref="$RELEASE_BRANCH"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_BRANCH: ${{ needs.release-please.outputs.pr_branch }}
 
   build-wasm:
     needs: release-please

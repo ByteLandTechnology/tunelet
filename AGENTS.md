@@ -111,8 +111,8 @@ RUSTDOCFLAGS="-D warnings" npm run check:wasm
 npm run verify:pack
 ```
 
-- `.github/workflows/ci.yml` runs these checks on each pull request and each
-  push to `main`.
+- `.github/workflows/ci.yml` runs these checks on each pull request, each
+  push to `main` and each `workflow_dispatch` run.
 - Make sure that there are no new warnings. This includes broken
   rustdoc links.
 - The crate has no tests (`test = false`). Do not add tests or test
@@ -139,7 +139,9 @@ npm run verify:pack
   `package.json`, `package-lock.json` or `.release-please-manifest.json`
   by hand. The commit types and the `!` mark set the next version. The
   release workflow is `.github/workflows/release.yml`. It publishes to
-  npm and crates.io through trusted publishing, so do not rename it.
+  npm and crates.io through trusted publishing, so do not rename it. If
+  release-please creates or updates a pull request, `release.yml` starts
+  `ci.yml` on the release branch through `workflow_dispatch`.
 
 ## Prohibited changes
 
