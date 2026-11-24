@@ -522,10 +522,15 @@ Rust functions.
 
 ### Rust crate
 
+`rust-toolchain.toml` selects Rust `1.100.0` with `rustfmt`, `clippy` and
+the `wasm32-unknown-unknown` target. The minimum Rust version
+(`rust-version` in `Cargo.toml`) is `1.88`.
+
 To build the crate and check the format, the lints and the documentation,
 run these commands:
 
 ```sh
+rustup toolchain install
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
@@ -536,9 +541,17 @@ To check the `wasm` feature for `wasm32-unknown-unknown` with Cargo, run
 these commands:
 
 ```sh
-rustup target add wasm32-unknown-unknown
 cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
 cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
+```
+
+To check the `1.88` minimum Rust version on the crate and the `wasm`
+target, run these commands:
+
+```sh
+rustup toolchain install 1.88 --target wasm32-unknown-unknown
+cargo +1.88 build --locked --lib
+cargo +1.88 build --locked --lib --target wasm32-unknown-unknown --features wasm
 ```
 
 Native Rust builds and these Wasm checks use Cargo and do not need Node.js
@@ -546,12 +559,16 @@ or npm.
 
 ### npm package
 
-Install Node.js and `wasm-pack`. Then add the `wasm32-unknown-unknown`
-target, install the dependencies, check the Wasm bindings and make the
+`.nvmrc` pins Node.js `24.22.3`. `package.json` requires Node.js `24.0.0`
+or later, npm `11.5.1` or later and `packageManager` `npm@12.2.3`.
+
+Select Node.js `24.22.3`, install `npm@12.2.3` and install `wasm-pack`.
+Then install the dependencies, check the Wasm bindings and make the
 archive:
 
 ```sh
-rustup target add wasm32-unknown-unknown
+nvm use
+npm install --global --ignore-scripts npm@12.2.3
 npm ci
 npm run check:wasm
 npm pack
@@ -559,8 +576,10 @@ npm pack
 
 `npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
 `npm pack` builds the Wasm bindings and the TypeScript entry point. Then it
-creates `tunelet-<version>.tgz`. To use this archive in a browser project or
-a Node.js project, install it with this command:
+creates `tunelet-<version>.tgz`. `npm run verify:pack` builds the package
+and checks the archive files, the Node.js load and the TypeScript
+declarations. To use the archive in a browser project or a Node.js
+project, install it with this command:
 
 ```sh
 npm install /path/to/tunelet-<version>.tgz
@@ -581,6 +600,19 @@ The `build:wasm` script builds the crate in release mode with LTO and one
 codegen unit. Then `wasm-pack` runs Binaryen `wasm-opt` on
 `pkg/tunelet_bg.wasm`. The TypeScript and Node.js type declarations are only
 development dependencies.
+
+### Update toolchains
+
+- To update the pinned Rust compiler, change `channel` in
+  `rust-toolchain.toml` and run the Rust and Wasm checks.
+- To update the minimum Rust version, change `rust-version` in
+  `Cargo.toml` and run the MSRV build for both targets.
+- To update Node.js, change `.nvmrc` and `engines.node` in
+  `package.json`, and run `npm ci` and `npm run verify:pack`.
+- To update npm, change `packageManager` and `engines.npm` in
+  `package.json` to `11.5.1` or later, and run `npm run verify:pack`.
+- After a version change, update the version numbers in this section and
+  in `AGENTS.md`.
 
 ## License
 

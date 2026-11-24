@@ -17,6 +17,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -25,11 +28,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
+      # Install the Rust version, components and target from rust-toolchain.toml.
+      - run: rustup toolchain install --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-bin: "false"
@@ -45,8 +45,12 @@ jobs:
           echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version-file: ".nvmrc"
           cache: "npm"
+      # Install the npm version from packageManager in package.json.
+      - run: |
+          npm_spec="$(node --input-type=module -e "import fs from 'node:fs'; const pm = JSON.parse(fs.readFileSync('package.json', 'utf8')).packageManager; if (!/^npm@\d+\.\d+\.\d+$/.test(pm)) throw new Error('Invalid packageManager: ' + pm); process.stdout.write(pm);")"
+          npm install --global --ignore-scripts "$npm_spec"
       - run: cargo fmt --check
       - run: cargo clippy --locked --lib -- -D warnings
       - run: cargo build --locked --release
@@ -59,3 +63,25 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
       - run: npm run verify:pack
+
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Install rust-version from Cargo.toml and override rust-toolchain.toml.
+      - run: |
+          msrv="$(sed -n 's/^rust-version = "\([0-9][0-9.]*\)"$/\1/p' Cargo.toml)"
+          if [ -z "$msrv" ]; then
+            echo "Cargo.toml does not set rust-version" >&2
+            exit 1
+          fi
+          rustup toolchain install "$msrv" --profile minimal --no-self-update --target wasm32-unknown-unknown
+          echo "RUSTUP_TOOLCHAIN=$msrv" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-bin: "false"
+      - run: cargo build --locked --lib
+      - run: cargo build --locked --lib --target wasm32-unknown-unknown --features wasm
