@@ -6,10 +6,11 @@
     "lib": ["ES2020", "ESNext.Disposable", "DOM"],
     "types": ["node"],
     "strict": true,
+    "exactOptionalPropertyTypes": true,
     "declaration": true,
     "noEmitOnError": true,
     "rootDir": "src",
     "outDir": "dist"
   },
-  "include": ["src/index.ts"]
+  "include": ["src/index.ts", "src/types.ts", "src/wasm.ts"]
 }

@@ -382,16 +382,16 @@ and you can try again. A Node.js file error goes to the caller.
 For a custom asset location, give one of these sources to
 `loadTunelet(source)`:
 
-- A URL.
-- A fetch Response.
+- A URL or a URL string.
+- A fetch Request or Response.
 - A byte buffer.
 - A compiled `WebAssembly.Module`.
 - A promise for one of these.
 
-For a Node.js `file:` source, use a URL object. A string source obeys fetch
-rules. The first concurrent call selects the source. Later arguments do not
-replace an initialized module. A custom binary must match the generated
-bindings.
+In Node.js, `loadTunelet` reads `file:` URL strings and `file:` URL objects
+from disk. Other string sources obey fetch rules. The first concurrent call
+selects the source. Later arguments do not replace an initialized module. A
+custom binary must match the generated bindings.
 
 The package root also exports `loadTunelet` as its default export. For direct
 control of Wasm initialization, `tunelet/wasm` gives the generated default

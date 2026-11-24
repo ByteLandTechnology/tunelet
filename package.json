@@ -16,9 +16,11 @@
       "import": "./dist/index.js"
     },
     "./wasm": {
-      "types": "./pkg/tunelet.d.ts",
-      "import": "./pkg/tunelet.js"
-    }
+      "types": "./dist/wasm.d.ts",
+      "import": "./dist/wasm.js"
+    },
+    "./pkg/tunelet_bg.wasm": "./pkg/tunelet_bg.wasm",
+    "./tunelet_bg.wasm": "./pkg/tunelet_bg.wasm"
   },
   "files": [
     "dist",
@@ -37,6 +39,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
+    "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
   }
 }

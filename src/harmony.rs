@@ -320,12 +320,12 @@ pub struct HarmonyConfig {
     /// The default is 4. [`HarmonySource::FixedInterval`] and
     /// [`HarmonySource::SmartInterval`] use the first `voices` voices. The
     /// other voices release with the usual gain envelope. The chord and MIDI
-    /// sources ignore this field. In JavaScript, the field is optional and
-    /// a missing value gives the default.
+    /// sources ignore this field. In JavaScript, the field is optional. If it
+    /// is absent or `undefined`, the value is 4.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(default = "default_voices"),
-        tsify(optional)
+        serde(default = "default_voices", deserialize_with = "deserialize_voices"),
+        tsify(optional, type = "number | undefined")
     )]
     pub voices: u8,
 }
@@ -334,6 +334,15 @@ pub struct HarmonyConfig {
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 fn default_voices() -> u8 {
     HARMONY_VOICES as u8
+}
+
+/// Decodes an optional count of interval voices and maps `undefined` to 4.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn deserialize_voices<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+    Ok(
+        <Option<u8> as serde::Deserialize>::deserialize(deserializer)?
+            .unwrap_or_else(default_voices),
+    )
 }
 
 impl Default for HarmonyConfig {
