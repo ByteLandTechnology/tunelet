@@ -382,22 +382,26 @@ and you can try again. A Node.js file error goes to the caller.
 For a custom asset location, give one of these sources to
 `loadTunelet(source)`:
 
-- A URL.
+- A URL or URL string.
 - A fetch Response.
 - A byte buffer.
 - A compiled `WebAssembly.Module`.
 - A promise for one of these.
 
-For a Node.js `file:` source, use a URL object. A string source obeys fetch
-rules. The first concurrent call selects the source. Later arguments do not
-replace an initialized module. A custom binary must match the generated
-bindings.
+In Node.js, `loadTunelet` reads `file:` `URL` objects and `"file:"` URL strings
+from disk. Other URLs and string sources obey fetch rules. The first concurrent
+call selects the source. Later arguments do not replace an initialized module.
+A custom binary must match the generated bindings.
 
 The package root also exports `loadTunelet` as its default export. For direct
 control of Wasm initialization, `tunelet/wasm` gives the generated default
-initializer and `initSync`. The package root re-exports `initSync` too. Use
-only one initialization entry point for each module instance. The package
-gives only ESM exports. CommonJS applications can use `await import("tunelet")`.
+initializer and `initSync`. The package root re-exports `initSync` too. The
+package exports the Wasm binary at `tunelet/pkg/tunelet_bg.wasm` and
+`tunelet/tunelet_bg.wasm`. Use only one initialization entry point for each
+module instance.
+
+The package gives only ESM exports. CommonJS applications can use
+`await import("tunelet")`.
 
 ### Deployment
 
@@ -452,9 +456,9 @@ and show enums as string literals. To change the configuration, do these steps:
 
 If a required field is absent or a value is not valid, the call throws a
 JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+to 4 if it is absent or `undefined`. The conversion ignores extra object
+properties. The generated declarations contain the parameter documentation from
+the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
