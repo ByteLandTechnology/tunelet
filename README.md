@@ -359,12 +359,13 @@ For `wasm32-unknown-unknown`, the optional `wasm` feature of the crate gives
 JavaScript bindings and generated TypeScript declarations. The npm package
 contains these bindings.
 
-The npm package is one ES module for both browsers and Node.js. It contains
-these items:
+The npm package gives conditional ES module entries for Node.js and browsers.
+It contains these items:
 
 - One Wasm binary.
 - The generated bindings.
-- A shared `loadTunelet` entry point.
+- Conditional `node` (`dist/node.js`) and `default` (`dist/browser.js`)
+  `loadTunelet` entries with the same API.
 
 ### Load the module
 
@@ -372,41 +373,46 @@ Both environments use the same imports and the same initialization call. An
 import of the package does not load the binary. Call `loadTunelet()` before
 you use `Tunelet` or `defaultConfig()`.
 
-- Node.js reads the packaged binary from a file URL relative to the module.
-- Browsers fetch the served Wasm asset.
+- Node.js reads `../pkg/tunelet_bg.wasm` relative to `dist/node.js`. If a
+  bundler moves the entry, Node.js resolves `pkg/tunelet_bg.wasm` from the
+  installed package.
+- Browsers use `dist/browser.js` and fetch the served Wasm asset without
+  Node.js imports.
 
 Concurrent calls share one initialization promise. The package keeps the
 result of a successful initialization. If a load fails, the promise rejects,
-and you can try again. A Node.js file error goes to the caller.
+and you can try again. File, network and Wasm errors go to the caller.
 
 For a custom asset location, give one of these sources to
 `loadTunelet(source)`:
 
-- A URL.
-- A fetch Response.
+- A URL or URL string.
+- A fetch Request or Response.
 - A byte buffer.
 - A compiled `WebAssembly.Module`.
 - A promise for one of these.
 
-For a Node.js `file:` source, use a URL object. A string source obeys fetch
-rules. The first concurrent call selects the source. Later arguments do not
-replace an initialized module. A custom binary must match the generated
-bindings.
+In Node.js, `loadTunelet(source)` reads `file:` URL objects and `file:` URL
+strings from disk. Other string sources obey fetch rules. The first concurrent
+call selects the source. Later arguments do not replace an initialized module.
+A custom binary must match the generated bindings.
 
 The package root also exports `loadTunelet` as its default export. For direct
 control of Wasm initialization, `tunelet/wasm` gives the generated default
-initializer and `initSync`. The package root re-exports `initSync` too. Use
-only one initialization entry point for each module instance. The package
-gives only ESM exports. CommonJS applications can use `await import("tunelet")`.
+initializer and `initSync`. The package also exports
+`tunelet/pkg/tunelet_bg.wasm` and `tunelet/tunelet_bg.wasm` for asset
+resolution. The package root re-exports `initSync` too. Use only one
+initialization entry point for each module instance. The package gives only
+ESM exports. CommonJS applications can use `await import("tunelet")`.
 
 ### Deployment
 
 Browser bundlers must keep or emit the Wasm asset that
-`new URL(..., import.meta.url)` refers to. For a browser deployment without a
-bundler, do these steps:
+`new URL(..., import.meta.url)` refers to, or resolve `tunelet/tunelet_bg.wasm`.
+For a browser deployment without a bundler, do these steps:
 
 1. Serve `dist/` and `pkg/`, and keep their relative layout.
-2. Map the `tunelet` import to `dist/index.js`, or import that URL directly.
+2. Map the `tunelet` import to `dist/browser.js`, or import that URL directly.
 
 Serve the assets over HTTP(S). The package does not support a local `file:`
 page that opens the JavaScript.
@@ -452,9 +458,9 @@ and show enums as string literals. To change the configuration, do these steps:
 
 If a required field is absent or a value is not valid, the call throws a
 JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+to 4 if it is absent or `undefined`. The conversion ignores extra object
+properties. The generated declarations contain the parameter documentation
+from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
@@ -558,7 +564,7 @@ npm pack
 ```
 
 `npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
-`npm pack` builds the Wasm bindings and the TypeScript entry point. Then it
+`npm pack` builds the Wasm bindings and the TypeScript entries. Then it
 creates `tunelet-<version>.tgz`. To use this archive in a browser project or
 a Node.js project, install it with this command:
 
@@ -567,10 +573,10 @@ npm install /path/to/tunelet-<version>.tgz
 ```
 
 To build without an archive, run `npm run build`. The build writes one
-`web`-target binding into `pkg/` and the shared entry into `dist/`. Git
+`web`-target binding into `pkg/` and the package entries into `dist/`. Git
 ignores both directories. The archive contains only these items:
 
-- The runtime entry.
+- The runtime entries.
 - The declarations.
 - The bindings.
 - The binary.

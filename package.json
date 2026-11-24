@@ -8,17 +8,25 @@
     "url": "git+https://github.com/ByteLandTechnology/tunelet.git"
   },
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/browser.js",
+  "types": "./dist/browser.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "node": {
+        "types": "./dist/node.d.ts",
+        "default": "./dist/node.js"
+      },
+      "default": {
+        "types": "./dist/browser.d.ts",
+        "default": "./dist/browser.js"
+      }
     },
     "./wasm": {
       "types": "./pkg/tunelet.d.ts",
       "import": "./pkg/tunelet.js"
-    }
+    },
+    "./pkg/tunelet_bg.wasm": "./pkg/tunelet_bg.wasm",
+    "./tunelet_bg.wasm": "./pkg/tunelet_bg.wasm"
   },
   "files": [
     "dist",
@@ -29,8 +37,8 @@
   "sideEffects": false,
   "scripts": {
     "build": "npm run build:wasm && npm run build:ts",
-    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node --input-type=module -e \"import fs from 'node:fs'; fs.rmSync('pkg/.gitignore', { force: true })\"",
-    "build:ts": "tsc",
+    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node scripts/postbuild-wasm.mjs",
+    "build:ts": "node --input-type=module -e \"import fs from 'node:fs'; fs.rmSync('dist', { recursive: true, force: true })\" && tsc",
     "check:wasm": "cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings && cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm",
     "prepack": "npm run build",
     "verify:pack": "node scripts/verify-pack.mjs"

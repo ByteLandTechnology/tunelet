@@ -3,13 +3,14 @@
     "target": "ES2020",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["ES2020", "ESNext.Disposable", "DOM"],
+    "lib": ["ES2020"],
     "types": ["node"],
     "strict": true,
+    "exactOptionalPropertyTypes": true,
     "declaration": true,
     "noEmitOnError": true,
     "rootDir": "src",
     "outDir": "dist"
   },
-  "include": ["src/index.ts"]
+  "include": ["src/browser.ts", "src/node.ts", "src/shared.ts"]
 }
