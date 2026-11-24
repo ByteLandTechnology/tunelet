@@ -393,6 +393,184 @@ impl HarmonyConfig {
     }
 }
 
+/// Optional changes to [`HarmonyConfig`].
+///
+/// Each `None` field keeps its active value on the processor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct HarmonyConfigPatch {
+    /// The pitch source (`HarmonySource`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub source: Option<HarmonySource>,
+    /// The pitch class of the tonic (`PitchClass`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub key: Option<PitchClass>,
+    /// The scale for smart intervals and degree chords (`HarmonyScale`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub scale: Option<HarmonyScale>,
+    /// Four fixed semitone offsets, each in -24..=24.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "[number, number, number, number]")
+    )]
+    pub chromatic_intervals: Option<[i8; HARMONY_VOICES]>,
+    /// Four offsets in scale steps, each in -14..=14.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "[number, number, number, number]")
+    )]
+    pub diatonic_intervals: Option<[i8; HARMONY_VOICES]>,
+    /// The named chord for [`HarmonySource::ChordByName`] (`ChordName`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub chord: Option<ChordName>,
+    /// The chord on a scale degree for [`HarmonySource::ChordByDegree`]
+    /// (`ChordDegree`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub degree: Option<ChordDegree>,
+    /// The inversion for named chords and degree chords (`Inversion`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub inversion: Option<Inversion>,
+    /// The chord register from low to high, 0..=100%.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub register_percent: Option<f32>,
+    /// The chord spread from close to open, 0..=100%.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub voicing_spread_percent: Option<f32>,
+    /// The half-life of the target period in milliseconds, 0..=10000.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub portamento_ms: Option<f32>,
+    /// The number of voices that sound in the interval sources, 0..=4.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub voices: Option<u8>,
+}
+
+impl HarmonyConfigPatch {
+    /// Checks all supplied fields and does not change the processor state.
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        if let Some(chromatic_intervals) = self.chromatic_intervals {
+            for interval in chromatic_intervals {
+                let field = "resynthesis.harmony.chromatic_intervals";
+                check_count(field, i64::from(interval), -24, 24)?;
+            }
+        }
+        if let Some(diatonic_intervals) = self.diatonic_intervals {
+            for interval in diatonic_intervals {
+                let field = "resynthesis.harmony.diatonic_intervals";
+                check_count(field, i64::from(interval), -14, 14)?;
+            }
+        }
+        if let Some(voices) = self.voices {
+            let field = "resynthesis.harmony.voices";
+            check_count(field, i64::from(voices), 0, HARMONY_VOICES as i64)?;
+        }
+        if let Some(register_percent) = self.register_percent {
+            let field = "resynthesis.harmony.register_percent";
+            check_range(field, register_percent, 0.0, 100.0)?;
+        }
+        if let Some(voicing_spread_percent) = self.voicing_spread_percent {
+            let field = "resynthesis.harmony.voicing_spread_percent";
+            check_range(field, voicing_spread_percent, 0.0, 100.0)?;
+        }
+        if let Some(portamento_ms) = self.portamento_ms {
+            check_range(
+                "resynthesis.harmony.portamento_ms",
+                portamento_ms,
+                0.0,
+                10_000.0,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Validates all supplied fields and writes them into `config`.
+    pub(crate) fn apply_to(self, config: &mut HarmonyConfig) -> Result<(), Error> {
+        self.validate()?;
+        if let Some(source) = self.source {
+            config.source = source;
+        }
+        if let Some(key) = self.key {
+            config.key = key;
+        }
+        if let Some(scale) = self.scale {
+            config.scale = scale;
+        }
+        if let Some(chromatic_intervals) = self.chromatic_intervals {
+            config.chromatic_intervals = chromatic_intervals;
+        }
+        if let Some(diatonic_intervals) = self.diatonic_intervals {
+            config.diatonic_intervals = diatonic_intervals;
+        }
+        if let Some(chord) = self.chord {
+            config.chord = chord;
+        }
+        if let Some(degree) = self.degree {
+            config.degree = degree;
+        }
+        if let Some(inversion) = self.inversion {
+            config.inversion = inversion;
+        }
+        if let Some(register_percent) = self.register_percent {
+            config.register_percent = register_percent;
+        }
+        if let Some(voicing_spread_percent) = self.voicing_spread_percent {
+            config.voicing_spread_percent = voicing_spread_percent;
+        }
+        if let Some(portamento_ms) = self.portamento_ms {
+            config.portamento_ms = portamento_ms;
+        }
+        if let Some(voices) = self.voices {
+            config.voices = voices;
+        }
+        Ok(())
+    }
+}
+
 /// The prepared controller of periods and gains, and the MIDI allocator, for
 /// four voices.
 ///

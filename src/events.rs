@@ -6,16 +6,16 @@ use crate::effects::punch::PunchConfig;
 use crate::effects::reverb::ReverbConfig;
 use crate::effects::warm::WarmConfig;
 use crate::midi::MidiEvent;
-use crate::{Error, EventProblem, ProcessorConfig, ResynthesisConfig};
+use crate::{Error, EventProblem, ProcessorConfig, ProcessorConfigPatch, ResynthesisConfig};
 
 /// A configuration or MIDI control that applies before a frame in the block.
 ///
 /// Give controls to a process call as [`TimedEvent`] values. The call borrows
 /// the slice only for that call. There is no heap allocation and no deferred
-/// queue. A stage event replaces all settings of that stage. To change one
-/// field, start from the current configuration of the processor.
-/// Configuration changes have the same effects on state as
-/// [`crate::Processor::set_config`].
+/// queue. A stage event replaces all settings of that stage. To change
+/// selected fields, use [`Self::Patch`], or start from the current
+/// configuration of the processor. Configuration changes have the same effects
+/// on state as [`crate::Processor::set_config`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -25,6 +25,8 @@ use crate::{Error, EventProblem, ProcessorConfig, ResynthesisConfig};
 pub enum ControlEvent {
     /// This event replaces the full configuration.
     Configure(ProcessorConfig),
+    /// This event merges supplied fields into the active configuration.
+    Patch(ProcessorConfigPatch),
     /// This event replaces the resynthesis configuration.
     Resynthesis(ResynthesisConfig),
     /// This event replaces the Punch configuration.
@@ -66,6 +68,10 @@ impl ControlEvent {
     /// Checks the configuration or MIDI ranges of the event, and does not
     /// apply the event.
     ///
+    /// For [`Self::Patch`], this method checks all supplied fields, and checks
+    /// the pitch frequency order if the patch gives both bounds. A process
+    /// call also checks a single pitch bound against the active configuration.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfig`] for an invalid configuration or gain.
@@ -75,6 +81,7 @@ impl ControlEvent {
     pub fn validate(self) -> Result<(), Error> {
         match self {
             Self::Configure(config) => config.validate(),
+            Self::Patch(patch) => patch.validate(),
             Self::Resynthesis(config) => config.validate(),
             Self::Punch(config) => config.validate(),
             Self::Warm(config) => config.validate(),
@@ -140,7 +147,11 @@ impl<'a> ValidatedEvents<'a> {
     /// first invalid event. The offset bounds have priority over the order.
     /// The order has priority over the payload validation. The function gives
     /// no tokens unless the full slice passes.
-    pub(crate) fn new(events: &'a [TimedEvent], frames: usize) -> Result<Self, Error> {
+    pub(crate) fn new(
+        events: &'a [TimedEvent],
+        frames: usize,
+        mut config: ProcessorConfig,
+    ) -> Result<Self, Error> {
         let mut previous = 0;
         for (index, event) in events.iter().enumerate() {
             let problem = if event.offset >= frames {
@@ -148,7 +159,7 @@ impl<'a> ValidatedEvents<'a> {
             } else if event.offset < previous {
                 Some(EventProblem::OffsetDecreasing)
             } else {
-                match event.event.validate() {
+                match validate_in_sequence(event.event, &mut config) {
                     Ok(()) => None,
                     Err(Error::InvalidConfig { field, problem }) => {
                         Some(EventProblem::Config { field, problem })
@@ -177,5 +188,49 @@ impl<'a> ValidatedEvents<'a> {
         }
         self.remaining = remaining;
         Some(ValidatedEvent(event.event))
+    }
+}
+
+/// Validates one event and advances the stack configuration copy.
+fn validate_in_sequence(event: ControlEvent, config: &mut ProcessorConfig) -> Result<(), Error> {
+    match event {
+        ControlEvent::Configure(value) => {
+            value.validate()?;
+            *config = value;
+            Ok(())
+        }
+        ControlEvent::Patch(patch) => patch.apply_to(config),
+        ControlEvent::Resynthesis(value) => {
+            value.validate()?;
+            config.resynthesis = value;
+            Ok(())
+        }
+        ControlEvent::Punch(value) => {
+            value.validate()?;
+            config.punch = value;
+            Ok(())
+        }
+        ControlEvent::Warm(value) => {
+            value.validate()?;
+            config.warm = value;
+            Ok(())
+        }
+        ControlEvent::Alien(value) => {
+            value.validate()?;
+            config.alien = value;
+            Ok(())
+        }
+        ControlEvent::Reverb(value) => {
+            value.validate()?;
+            config.reverb = value;
+            Ok(())
+        }
+        ControlEvent::OutputGain(gain) => {
+            validate_output_gain(gain)?;
+            config.output_gain = gain;
+            Ok(())
+        }
+        ControlEvent::Midi(midi) | ControlEvent::CorrectionMidi(midi) => midi.validate(),
+        ControlEvent::Reset => Ok(()),
     }
 }

@@ -80,15 +80,109 @@ impl PitchConfig {
     /// `resynthesis.pitch.max_frequency_hz`.
     pub fn validate(self) -> Result<(), Error> {
         check_range("resynthesis.pitch.threshold", self.threshold, 0.002, 0.2)?;
-        let (min, max) = (
-            "resynthesis.pitch.min_frequency_hz",
-            "resynthesis.pitch.max_frequency_hz",
-        );
-        check_range(min, self.min_frequency_hz, 40.0, 2000.0)?;
-        check_range(max, self.max_frequency_hz, 40.0, 2000.0)?;
-        if self.min_frequency_hz >= self.max_frequency_hz {
-            return Err(Error::config(min, ConfigProblem::Unordered { other: max }));
+        check_range(MIN_FIELD, self.min_frequency_hz, 40.0, 2000.0)?;
+        check_range(MAX_FIELD, self.max_frequency_hz, 40.0, 2000.0)?;
+        check_frequency_order(self.min_frequency_hz, self.max_frequency_hz)
+    }
+}
+
+/// The dotted field path of the lower pitch bound.
+const MIN_FIELD: &str = "resynthesis.pitch.min_frequency_hz";
+/// The dotted field path of the upper pitch bound.
+const MAX_FIELD: &str = "resynthesis.pitch.max_frequency_hz";
+
+/// Checks that `min_frequency_hz` is strictly below `max_frequency_hz`.
+fn check_frequency_order(min_frequency_hz: f32, max_frequency_hz: f32) -> Result<(), Error> {
+    if min_frequency_hz >= max_frequency_hz {
+        return Err(Error::config(
+            MIN_FIELD,
+            ConfigProblem::Unordered { other: MAX_FIELD },
+        ));
+    }
+    Ok(())
+}
+
+/// Optional changes to [`PitchConfig`].
+///
+/// Each `None` field keeps its active value on the processor. After a merge,
+/// `min_frequency_hz` must stay strictly below `max_frequency_hz`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct PitchConfigPatch {
+    /// The normalized cycle-difference threshold for acquisition, 0.002..=0.2.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub threshold: Option<f32>,
+    /// The lower bound of the feedback in hertz (inclusive), 40..=2000.
+    ///
+    /// It must stay strictly below `max_frequency_hz`.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub min_frequency_hz: Option<f32>,
+    /// The upper bound of the feedback in hertz (inclusive), 40..=2000.
+    ///
+    /// It must stay strictly above `min_frequency_hz`.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub max_frequency_hz: Option<f32>,
+}
+
+impl PitchConfigPatch {
+    /// Checks all supplied fields, and checks their order if both bounds are
+    /// present.
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        if let Some(threshold) = self.threshold {
+            check_range("resynthesis.pitch.threshold", threshold, 0.002, 0.2)?;
         }
+        if let Some(min_frequency_hz) = self.min_frequency_hz {
+            check_range(MIN_FIELD, min_frequency_hz, 40.0, 2000.0)?;
+        }
+        if let Some(max_frequency_hz) = self.max_frequency_hz {
+            check_range(MAX_FIELD, max_frequency_hz, 40.0, 2000.0)?;
+        }
+        if let (Some(min_frequency_hz), Some(max_frequency_hz)) =
+            (self.min_frequency_hz, self.max_frequency_hz)
+        {
+            check_frequency_order(min_frequency_hz, max_frequency_hz)?;
+        }
+        Ok(())
+    }
+
+    /// Validates all supplied fields, checks the frequency order against
+    /// `config` and writes the fields into `config`.
+    pub(crate) fn apply_to(self, config: &mut PitchConfig) -> Result<(), Error> {
+        if let Some(threshold) = self.threshold {
+            check_range("resynthesis.pitch.threshold", threshold, 0.002, 0.2)?;
+        }
+        if let Some(min_frequency_hz) = self.min_frequency_hz {
+            check_range(MIN_FIELD, min_frequency_hz, 40.0, 2000.0)?;
+        }
+        if let Some(max_frequency_hz) = self.max_frequency_hz {
+            check_range(MAX_FIELD, max_frequency_hz, 40.0, 2000.0)?;
+        }
+        let min_frequency_hz = self.min_frequency_hz.unwrap_or(config.min_frequency_hz);
+        let max_frequency_hz = self.max_frequency_hz.unwrap_or(config.max_frequency_hz);
+        if self.min_frequency_hz.is_some() || self.max_frequency_hz.is_some() {
+            check_frequency_order(min_frequency_hz, max_frequency_hz)?;
+        }
+        if let Some(threshold) = self.threshold {
+            config.threshold = threshold;
+        }
+        config.min_frequency_hz = min_frequency_hz;
+        config.max_frequency_hz = max_frequency_hz;
         Ok(())
     }
 }

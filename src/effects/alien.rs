@@ -57,6 +57,55 @@ impl AlienConfig {
     }
 }
 
+/// Optional changes to [`AlienConfig`].
+///
+/// Each `None` field keeps its active value on the processor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct AlienConfigPatch {
+    /// Selects reversed playback instead of the direct input (`true` or
+    /// `false`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub enabled: Option<bool>,
+    /// The loop length in frames, 1..=96000.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub loop_frames: Option<u32>,
+}
+
+impl AlienConfigPatch {
+    /// Checks all supplied fields and does not change the processor state.
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        if let Some(loop_frames) = self.loop_frames {
+            check_count("alien.loop_frames", i64::from(loop_frames), 1, 96_000)?;
+        }
+        Ok(())
+    }
+
+    /// Validates all supplied fields and writes them into `config`.
+    pub(crate) fn apply_to(self, config: &mut AlienConfig) -> Result<(), Error> {
+        self.validate()?;
+        if let Some(enabled) = self.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(loop_frames) = self.loop_frames {
+            config.loop_frames = loop_frames;
+        }
+        Ok(())
+    }
+}
+
 /// A stereo ring recorder with a reverse reader and an independent loop
 /// phase.
 #[derive(Debug)]

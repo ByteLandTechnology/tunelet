@@ -104,6 +104,95 @@ impl FormantConfig {
     }
 }
 
+/// Optional changes to [`FormantConfig`].
+///
+/// Each `None` field keeps its active value on the processor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct FormantConfigPatch {
+    /// Enables formant analysis and synthesis (`true` or `false`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub enabled: Option<bool>,
+    /// The vocal-tract width factor, 0.5..=2.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub width: Option<f32>,
+    /// The vocal-tract length factor, 0.5..=2.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub stretch: Option<f32>,
+    /// The aspiration level, 0..=1, without a unit.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub aspiration_mix: Option<f32>,
+    /// The high-pass cutoff for aspiration in hertz, 500..=10000.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional)
+    )]
+    pub aspiration_cutoff_hz: Option<f32>,
+}
+
+impl FormantConfigPatch {
+    /// Checks all supplied fields and does not change the processor state.
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        if let Some(width) = self.width {
+            check_range("resynthesis.formant.width", width, 0.5, 2.0)?;
+        }
+        if let Some(stretch) = self.stretch {
+            check_range("resynthesis.formant.stretch", stretch, 0.5, 2.0)?;
+        }
+        if let Some(aspiration_mix) = self.aspiration_mix {
+            let field = "resynthesis.formant.aspiration_mix";
+            check_range(field, aspiration_mix, 0.0, 1.0)?;
+        }
+        if let Some(aspiration_cutoff_hz) = self.aspiration_cutoff_hz {
+            let field = "resynthesis.formant.aspiration_cutoff_hz";
+            check_range(field, aspiration_cutoff_hz, 500.0, 10000.0)?;
+        }
+        Ok(())
+    }
+
+    /// Validates all supplied fields and writes them into `config`.
+    pub(crate) fn apply_to(self, config: &mut FormantConfig) -> Result<(), Error> {
+        self.validate()?;
+        if let Some(enabled) = self.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(width) = self.width {
+            config.width = width;
+        }
+        if let Some(stretch) = self.stretch {
+            config.stretch = stretch;
+        }
+        if let Some(aspiration_mix) = self.aspiration_mix {
+            config.aspiration_mix = aspiration_mix;
+        }
+        if let Some(aspiration_cutoff_hz) = self.aspiration_cutoff_hz {
+            config.aspiration_cutoff_hz = aspiration_cutoff_hz;
+        }
+        Ok(())
+    }
+}
+
 /// The number of frames of input history for analysis and synthesis. The
 /// value is equal to the resynthesis history length.
 pub(crate) const HISTORY_FRAMES: usize = 11568;

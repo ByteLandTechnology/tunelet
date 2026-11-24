@@ -11,6 +11,18 @@ import init from "../pkg/tunelet.js";
 import type { InitInput, InitOutput } from "../pkg/tunelet.js";
 
 export * from "../pkg/tunelet.js";
+export type {
+  AlienConfigPatch,
+  CorrectionConfigPatch,
+  FormantConfigPatch,
+  HarmonyConfigPatch,
+  PitchConfigPatch,
+  ProcessorConfigPatch,
+  PunchConfigPatch,
+  ResynthesisConfigPatch,
+  ReverbConfigPatch,
+  WarmConfigPatch,
+} from "../pkg/tunelet.js";
 
 /** The shared initialization promise, which a failure clears. */
 let initialization: Promise<InitOutput> | undefined;

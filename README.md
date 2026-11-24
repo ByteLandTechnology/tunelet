@@ -244,8 +244,8 @@ These rules apply to the offsets:
 - An offset must not be less than the offset before it.
 
 Events with equal offsets execute in slice order. An empty block accepts no
-events. A stage event replaces all settings of that stage. To change one
-field, start from `processor.config()`.
+events. A stage event replaces all settings of that stage. To change selected
+fields, use `ControlEvent::Patch`, or start from `processor.config()`.
 
 Harmony MIDI uses `ControlEvent::Midi`. MIDI for the correction keyboard uses
 `ControlEvent::CorrectionMidi`. For example, this event starts a harmony note
@@ -418,7 +418,7 @@ page that opens the JavaScript.
 | Shared initialization             | `loadTunelet(source?)`                                   |
 | Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
 | In-place mono downmix             | `processMono(audio, events?)`                            |
-| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
+| Configuration                     | `config()`, `setConfig(config)`, `patchConfig(patch)`, `defaultConfig()` |
 | Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
 | Feedback                          | `feedback()`, `takeFeedback()`                           |
 | Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
@@ -456,6 +456,13 @@ to 4 if it is absent. The conversion ignores extra object properties. The
 generated declarations contain the parameter documentation from the Rust
 types.
 
+To change selected fields without a full configuration copy, give a
+`ProcessorConfigPatch` object to `patchConfig(patch)`. All fields in
+`ProcessorConfigPatch` and the stage patches are optional. Omitted fields keep
+their active values on the processor. `patchConfig()` validates the supplied
+fields and the pitch bounds before any state changes. Each successful call
+cancels an active drain, also for an empty `{}` patch.
+
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
 `number`.
@@ -468,6 +475,13 @@ example, this event changes the final gain before the first frame:
 
 ```ts
 { offset: 0, event: { type: "outputGain", value: 0.5 } }
+```
+
+To merge selected configuration fields before a frame, use
+`ControlEvent::Patch` (`type: "patch"`):
+
+```ts
+{ offset: 0, event: { type: "patch", value: { resynthesis: { dryMix: 0.2 } } } }
 ```
 
 A harmony Note On event has this form:

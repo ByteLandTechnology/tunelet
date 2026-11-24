@@ -19,7 +19,8 @@
 //! that are not active.
 //!
 //! A configuration value is a copy. If you change it, the processor does not
-//! change until [`Processor::set_config`] or a configuration event applies it.
+//! change until [`Processor::set_config`], [`Processor::patch_config`] or a
+//! configuration event applies it.
 //! You can change settings between blocks, or at a frame offset with a
 //! [`TimedEvent`]. To change the sample rate or the block limit, you
 //! must make a new processor.
@@ -121,19 +122,23 @@ mod scale;
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub mod wasm;
 
-pub use config::{PrepareConfig, ProcessorConfig, SampleRate};
-pub use effects::alien::AlienConfig;
-pub use effects::punch::PunchConfig;
-pub use effects::reverb::{ReverbConfig, ReverbMode};
-pub use effects::warm::WarmConfig;
+pub use config::{PrepareConfig, ProcessorConfig, ProcessorConfigPatch, SampleRate};
+pub use effects::alien::{AlienConfig, AlienConfigPatch};
+pub use effects::punch::{PunchConfig, PunchConfigPatch};
+pub use effects::reverb::{ReverbConfig, ReverbConfigPatch, ReverbMode};
+pub use effects::warm::{WarmConfig, WarmConfigPatch};
 pub use error::{ConfigProblem, Error, EventProblem};
 pub use events::{ControlEvent, TimedEvent};
-pub use formant::FormantConfig;
+pub use formant::{FormantConfig, FormantConfigPatch};
 pub use harmony::{
-    ChordDegree, ChordName, HarmonyConfig, HarmonyScale, HarmonySource, Inversion, HARMONY_VOICES,
+    ChordDegree, ChordName, HarmonyConfig, HarmonyConfigPatch, HarmonyScale, HarmonySource,
+    Inversion, HARMONY_VOICES,
 };
 pub use midi::MidiEvent;
-pub use pitch::PitchConfig;
+pub use pitch::{PitchConfig, PitchConfigPatch};
 pub use processor::{Feedback, Processor, Telemetry};
-pub use resynthesis::{CorrectionConfig, MultiVoiceMode, ResynthesisConfig};
+pub use resynthesis::{
+    CorrectionConfig, CorrectionConfigPatch, MultiVoiceMode, ResynthesisConfig,
+    ResynthesisConfigPatch,
+};
 pub use scale::{CorrectionScale, NoteMask, PitchClass};

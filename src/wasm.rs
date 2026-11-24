@@ -18,8 +18,10 @@
 //!
 //! - Field names use camelCase.
 //! - Enum values are strings.
-//! - Each object must contain all required fields.
+//! - Each object for `setConfig` must contain all required fields.
 //! - The optional harmony `voices` field defaults to 4.
+//! - Patch objects in `ProcessorConfigPatch` can omit fields that do not
+//!   change.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
 //! `{ type, value }`, and the reset control has no `value`. MIDI messages use
@@ -42,7 +44,8 @@
 //! `free()` method.
 
 use crate::{
-    Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
+    Error, Feedback, PrepareConfig, Processor, ProcessorConfig, ProcessorConfigPatch, SampleRate,
+    Telemetry, TimedEvent,
 };
 use js_sys::{Float32Array, Int16Array};
 use serde::{Deserialize, Serialize};
@@ -203,8 +206,8 @@ impl WasmProcessor {
 
     /// Returns a copy of the active configuration as a new JavaScript object.
     ///
-    /// A change to the object has no effect until `setConfig` or a timed event
-    /// applies it.
+    /// A change to the object has no effect until `setConfig`, `patchConfig`
+    /// or a timed event applies it.
     ///
     /// # Errors
     ///
@@ -226,6 +229,25 @@ impl WasmProcessor {
     #[wasm_bindgen(js_name = setConfig)]
     pub fn set_config(&mut self, config: Ts<ProcessorConfig>) -> Result<(), JsError> {
         self.processor.set_config(config.to_rust()?)?;
+        Ok(())
+    }
+
+    /// Decodes and validates a partial configuration, then merges its supplied
+    /// fields into the active configuration.
+    ///
+    /// Omitted fields keep their active values. State retention and drain
+    /// cancellation are the same as for `setConfig`. An empty object also
+    /// cancels an active drain. The conversion ignores additional properties of
+    /// the JavaScript object.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if an object, a supplied value or the pitch bound
+    /// order is not valid. After an error, all processor state and any active
+    /// drain stay the same.
+    #[wasm_bindgen(js_name = patchConfig)]
+    pub fn patch_config(&mut self, patch: Ts<ProcessorConfigPatch>) -> Result<(), JsError> {
+        self.processor.patch_config(patch.to_rust()?)?;
         Ok(())
     }
 
