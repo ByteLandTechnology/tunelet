@@ -1,0 +1,88 @@
+# Reusable workflow to install the Wasm tools, run optional Rust checks and
+# verify the npm archive.
+name: Wasm Verify
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "The Git reference to fetch. An empty value uses the event commit."
+        required: false
+        type: string
+        default: ""
+      run-rust-checks:
+        description: "Install rustfmt and clippy and run the Cargo and wasm32 checks."
+        required: false
+        type: boolean
+        default: false
+      upload-artifact:
+        description: "Upload the wasm-package-dist artifact for the publish jobs."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          components: ${{ inputs.run-rust-checks && 'rustfmt, clippy' || '' }}
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-bin: "false"
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: wasm-pack@0.15.1
+          checksum: true
+      # Install Binaryen wasm-opt 133 and verify its SHA-256 checksum.
+      - run: |
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz
+          echo "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  $RUNNER_TEMP/binaryen.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ".node-version"
+          cache: "npm"
+      - if: ${{ inputs.run-rust-checks }}
+        run: cargo fmt --check
+      - if: ${{ inputs.run-rust-checks }}
+        run: cargo clippy --locked --lib -- -D warnings
+      - if: ${{ inputs.run-rust-checks }}
+        run: cargo build --locked --release
+      - if: ${{ inputs.run-rust-checks }}
+        run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+      - if: ${{ inputs.run-rust-checks }}
+        run: cargo package --list --locked
+      - run: npm ci
+      - if: ${{ inputs.run-rust-checks }}
+        run: npm run check:wasm
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+      # Check the archive files and loadTunelet() before upload.
+      - run: npm run verify:pack
+      # Upload the built dist/ and pkg/ files for the publish jobs.
+      - if: ${{ inputs.upload-artifact }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm-package-dist
+          path: |
+            dist/
+            pkg/tunelet.js
+            pkg/tunelet.d.ts
+            pkg/tunelet_bg.wasm
+          retention-days: 1
+          if-no-files-found: error

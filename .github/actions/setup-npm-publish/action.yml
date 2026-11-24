@@ -1,0 +1,26 @@
+# Download the verified Wasm distribution and configure Node.js for npm publish.
+name: Prepare npm publish
+description: "Download the wasm-package-dist artifact and configure Node.js for an npm registry."
+
+inputs:
+  registry-url:
+    description: "The npm registry URL."
+    required: true
+  scope:
+    description: "An optional package scope for the npm registry."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: wasm-package-dist
+        path: .
+        digest-mismatch: error
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version-file: ".node-version"
+        registry-url: ${{ inputs.registry-url }}
+        scope: ${{ inputs.scope }}
