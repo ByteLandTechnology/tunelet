@@ -27,7 +27,8 @@ const GAIN_ATTACK: Q12 = Q12::from_bits(163);
 /// The Q12 step that decreases the gain envelope of a voice toward a lower
 /// target gain (release).
 ///
-/// The step applies one time at each voiced control step. From a gain of 1.0
+/// The step applies one time at each control step toward a lower target,
+/// also on unvoiced steps after the period becomes zero. From a gain of 1.0
 /// to zero, the release takes 51 steps. The period portamento does not use
 /// this value.
 const GAIN_RELEASE: Q12 = Q12::from_bits(81);
@@ -251,8 +252,9 @@ pub enum Inversion {
 ///
 /// The gain attack, the gain release and the period portamento advance at
 /// the controller cadence. This cadence is usually every 101 frames. A MIDI
-/// event can make the next control step occur sooner. The envelopes and the
-/// portamento advance only while the input is voiced.
+/// event can make the next control step occur sooner. The attack and the
+/// portamento advance only while the input is voiced. If the kept period is
+/// zero, the gain envelopes release toward zero.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -423,8 +425,8 @@ pub(crate) struct HarmonyState {
     /// The last usable Q14 ratio of the input period to the smoothed target
     /// period for each voice.
     current_ratio: [Q14; HARMONY_VOICES],
-    /// The Q12 attack and release envelope. A MIDI release or a reset does
-    /// not clear it.
+    /// The Q12 attack and release envelope. A MIDI release keeps it, and an
+    /// audio reset clears it.
     smoothed_gain: [Q12; HARMONY_VOICES],
     /// The last active Q6 target. It is kept while the gain of a released
     /// voice decreases to zero.
@@ -569,6 +571,14 @@ impl HarmonyState {
         if self.config.source == HarmonySource::ChordViaMidi {
             self.setup_chord();
         }
+    }
+    /// Clears the gain envelopes, the output periods and the voice ratios at
+    /// an audio reset.
+    pub(crate) fn clear_envelopes(&mut self) {
+        self.smoothed_gain.fill(Q12::ZERO);
+        self.period_output.fill(Q6::ZERO);
+        self.target_period.fill(Q6::ZERO);
+        self.current_ratio.fill(Q14::ONE);
     }
     /// Converts cents above C4 to a Q6 sample period. C4 is 900 cents below
     /// A4 at 440 Hz.
@@ -817,17 +827,20 @@ impl HarmonyState {
     /// Advances one voice from the Q6 tracked input period to a Q14 ratio and
     /// a Q12 gain.
     /// The voice index must be less than `HARMONY_VOICES`. If the input is
-    /// unvoiced (zero), the function returns a unity ratio and silence. It
-    /// also clears the portamento start state and keeps the gain envelope.
+    /// unvoiced (zero), the function decreases the gain envelope by
+    /// `GAIN_RELEASE` and clears the portamento start state. Then it returns a
+    /// unity ratio and the new gain.
     /// If the input is voiced, the function advances the gain envelope. It
     /// keeps the target of a released voice until the gain is zero. Then, in
     /// the same step, it applies portamento in the period domain.
     pub(crate) fn advance_voice(&mut self, period: Q6, voice: usize) -> (Q14, Q12) {
-        if period == Q6::ZERO {
+        let target_gain = if period == Q6::ZERO {
+            self.target_period[voice] = Q6::ZERO;
             self.portamento_period[voice] = Q6::ZERO;
-            return (Q14::ONE, Q12::ZERO);
-        }
-        let target_gain = self.select_target(period, voice);
+            Q12::ZERO
+        } else {
+            self.select_target(period, voice)
+        };
         if self.smoothed_gain[voice] < target_gain {
             self.smoothed_gain[voice] = (self.smoothed_gain[voice] + GAIN_ATTACK).min(target_gain);
         } else if self.smoothed_gain[voice] > target_gain {
@@ -838,6 +851,12 @@ impl HarmonyState {
         } else if self.smoothed_gain[voice] == Q12::ZERO {
             self.period_output[voice] = Q6::ZERO;
             self.portamento_period[voice] = Q6::ZERO;
+        }
+        if period == Q6::ZERO {
+            if self.smoothed_gain[voice] == Q12::ZERO {
+                self.current_ratio[voice] = Q14::ONE;
+            }
+            return (Q14::ONE, self.smoothed_gain[voice]);
         }
         if self.period_output[voice] > Q6::ZERO {
             self.portamento_period[voice] = if self.portamento_period[voice] == Q6::ZERO {

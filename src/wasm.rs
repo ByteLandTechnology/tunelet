@@ -366,8 +366,8 @@ impl WasmProcessor {
     ///
     /// - The kept pitch estimate is unvoiced. This includes the time before
     ///   the first detection and after a reset or a drain completion.
-    /// - The estimated frequency is outside the inclusive reporting bounds
-    ///   `minFrequencyHz` and `maxFrequencyHz` of the pitch configuration.
+    /// - The estimated period is outside the active `vocalRange` preset or the
+    ///   custom `minFrequencyHz` and `maxFrequencyHz` bounds.
     ///
     /// # Errors
     ///

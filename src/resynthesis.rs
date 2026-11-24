@@ -166,7 +166,7 @@ impl CorrectionConfig {
     tsify(large_number_types_as_bigints)
 )]
 pub struct ResynthesisConfig {
-    /// The acquisition sensitivity and the reporting bounds. The
+    /// The vocal range, acquisition sensitivity and frequency bounds. The
     /// default is [`PitchConfig::default`].
     pub pitch: PitchConfig,
     /// The target notes and the retune time. The default is enabled
@@ -394,8 +394,8 @@ pub(crate) struct Resynthesis {
     /// replace a delayed entry with its resampled output period. This aligns
     /// the secondary voices.
     periods: Box<[Q6; HISTORY]>,
-    /// The last usable Q6 tracker periods. The code keeps them through
-    /// unvoiced gaps.
+    /// The last usable Q6 tracker periods. Each period stays for 20 ms across
+    /// short unvoiced gaps, then becomes zero.
     previous_periods: Box<[Q6; HISTORY]>,
     /// The Q14 ratios of the correction only, aligned to each recorded input
     /// frame.
@@ -427,7 +427,7 @@ pub(crate) struct Resynthesis {
     /// The last Q14 target ratios from the harmony controller.
     harmony_ratios: [Q14; HARMONY_VOICES],
     /// The last Q12 gain envelopes from the harmony controller. An audio
-    /// reset keeps them.
+    /// reset clears them.
     harmony_gains: [Q12; HARMONY_VOICES],
     /// The effective Q14 ratios of the lead and the four harmony readers from
     /// the last frame. In Choir mode, only the lead slot changes. Only the
@@ -649,7 +649,10 @@ impl Resynthesis {
     pub(crate) fn apply_config(&mut self, config: ResynthesisConfig) {
         let old = self.config;
         self.config = config;
-        self.pitch.set_config(config.pitch);
+        if self.pitch.set_config(config.pitch) {
+            self.correction = Q14::ONE;
+            self.scale_initialized = false;
+        }
         self.formant.set_config(config.formant);
         self.harmony.apply_config(config.harmony);
         if old.correction.notes != config.correction.notes
@@ -697,7 +700,6 @@ impl Resynthesis {
     /// - The choir drift.
     /// - The modulation phase.
     /// - The control counter.
-    /// - The harmony release envelopes and the last harmony gains.
     fn reset_audio(&mut self) {
         let written = usize::from(self.written);
         self.written = 0;
@@ -730,6 +732,7 @@ impl Resynthesis {
         self.write = 0;
         self.formant.reset();
         self.harmony.reset();
+        self.harmony.clear_envelopes();
         if written >= OVERLAP_FRAMES {
             self.overlap.fill(Q14::ZERO);
         } else if written > 0 {
@@ -745,6 +748,7 @@ impl Resynthesis {
         self.old_position = self.positions[0];
         self.fade = Q14::ONE;
         self.harmony_ratios.fill(Q14::ONE);
+        self.harmony_gains.fill(Q12::ZERO);
         self.voice_ratios.fill(Q14::ONE);
         self.formant_position = 0;
         self.current_output_period = Q6::ZERO;
@@ -789,20 +793,25 @@ impl Resynthesis {
             }
     }
     /// Converts the latest period to samples and hertz and applies the
-    /// current report limits.
+    /// active vocal range limits.
     ///
     /// The analysis does not advance, and the correction does not change.
     pub(crate) fn estimate(&self) -> PitchEstimate {
-        let period = (self.periods[self.write].to_bits() as f64 / 64.0) as f32;
-        self.config.pitch.report(PitchEstimate {
-            period_samples: period,
-            frequency_hz: if period > 0.0 {
-                self.rate.hz() / period
-            } else {
-                0.0
+        let raw_period = self.periods[self.write];
+        let period = (raw_period.to_bits() as f64 / 64.0) as f32;
+        self.config.pitch.report(
+            self.rate,
+            raw_period,
+            PitchEstimate {
+                period_samples: period,
+                frequency_hz: if period > 0.0 {
+                    self.rate.hz() / period
+                } else {
+                    0.0
+                },
+                voiced: period > 0.0,
             },
-            voiced: period > 0.0,
-        })
+        )
     }
     /// Returns the current Q14 correction factor as f32. The result does not
     /// include other ratios.
@@ -848,9 +857,13 @@ impl Resynthesis {
         gains[0] = 1.0;
         if self.config.mode == MultiVoiceMode::Choir {
             let count = self.config.choir_voices as usize;
+            let unvoiced = self.current_output_period == Q6::ZERO;
             for voice in 1..count {
-                ratios[voice] =
-                    (lead as f64 * self.drift_ratio[voice].to_bits() as f64 / 16384.0) as f32;
+                ratios[voice] = if unvoiced {
+                    1.0
+                } else {
+                    (lead as f64 * self.drift_ratio[voice].to_bits() as f64 / 16384.0) as f32
+                };
                 gains[voice] = 1.0;
             }
             count as u8
@@ -1213,7 +1226,11 @@ impl Resynthesis {
                         let delay = ring(delayed as i32 - self.delays[current_voice]);
                         let (period, _) = self.period_for(delay, write);
                         self.current_output_period = period;
-                        let ratio = self.drift_ratio[current_voice];
+                        let ratio = if period == Q6::ZERO {
+                            Q14::ONE
+                        } else {
+                            self.drift_ratio[current_voice]
+                        };
                         final_ratio = ratio;
                         *position = self.move_reader(
                             current_voice,
@@ -1245,7 +1262,11 @@ impl Resynthesis {
                     let delay = ring(delayed as i32 - self.delays[voice]);
                     let (period, _) = self.period_for(delay, write);
                     self.current_output_period = period;
-                    let ratio = self.drift_ratio[voice];
+                    let ratio = if period == Q6::ZERO {
+                        Q14::ONE
+                    } else {
+                        self.drift_ratio[voice]
+                    };
                     final_ratio = ratio;
                     let position =
                         self.move_reader(voice, ratio, period, self.delays[voice], false);

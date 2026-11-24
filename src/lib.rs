@@ -50,11 +50,10 @@
 //!
 //! [`Processor::feedback`] gives the pitch, the correction ratio, the
 //! accumulated stereo peak and the frame count.
-//! [`Processor::take_feedback`] also clears the peak window. The pitch
-//! reporting bounds change only the reports. They do not change the detection
-//! or the audio signal. [`Processor::latency_frames`] gives a nominal
-//! resynthesis delay. Voice delays, pitch changes and effects have their own
-//! timing.
+//! [`Processor::take_feedback`] also clears the peak window. The active vocal
+//! range limits acquisition, tracking and feedback reports.
+//! [`Processor::latency_frames`] gives a nominal resynthesis delay. Voice
+//! delays, pitch changes and effects have their own timing.
 //!
 //! [`Processor::telemetry`] gives data for meters and displays: the ratio and
 //! the gain of each voice, the input and output peaks, the pitch clarity and
@@ -133,7 +132,7 @@ pub use harmony::{
     ChordDegree, ChordName, HarmonyConfig, HarmonyScale, HarmonySource, Inversion, HARMONY_VOICES,
 };
 pub use midi::MidiEvent;
-pub use pitch::PitchConfig;
+pub use pitch::{PitchConfig, VocalRange};
 pub use processor::{Feedback, Processor, Telemetry};
 pub use resynthesis::{CorrectionConfig, MultiVoiceMode, ResynthesisConfig};
 pub use scale::{CorrectionScale, NoteMask, PitchClass};
