@@ -537,8 +537,8 @@ these commands:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
-cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
+cargo clippy --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+cargo doc --locked --release --no-deps --target wasm32-unknown-unknown --features wasm
 ```
 
 Native Rust builds and these Wasm checks use Cargo and do not need Node.js
@@ -557,10 +557,11 @@ npm run check:wasm
 npm pack
 ```
 
-`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
-`npm pack` builds the Wasm bindings and the TypeScript entry point. Then it
-creates `tunelet-<version>.tgz`. To use this archive in a browser project or
-a Node.js project, install it with this command:
+`npm run check:wasm` runs Clippy and rustdoc in release mode for
+`wasm32-unknown-unknown`. `npm pack` builds the Wasm bindings and the
+TypeScript entry point. Then it creates `tunelet-<version>.tgz`. To use
+this archive in a browser project or a Node.js project, install it with
+this command:
 
 ```sh
 npm install /path/to/tunelet-<version>.tgz

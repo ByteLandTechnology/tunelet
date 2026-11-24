@@ -1,6 +1,6 @@
 /**
- * This script packs the npm archive, checks its eight files, runs
- * `loadTunelet()` and checks the TypeScript declarations.
+ * This script builds stale outputs, packs the npm archive, checks its eight
+ * files, runs `loadTunelet()` and checks the TypeScript declarations.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -43,15 +43,30 @@ function readPackageName() {
   return packageName;
 }
 
-/** Run `npm pack` without a shell and return the relative archive path. */
-function packArchive(packDir) {
+const BUILD_INPUT_PATHS = [
+  "src",
+  "Cargo.toml",
+  "Cargo.lock",
+  "package.json",
+  "tsconfig.json",
+];
+
+const BUILD_OUTPUT_PATHS = [
+  "dist/index.d.ts",
+  "dist/index.js",
+  "pkg/tunelet.d.ts",
+  "pkg/tunelet.js",
+  "pkg/tunelet_bg.wasm",
+];
+
+/** Run an npm command without a shell. */
+function runNpm(args) {
   const npmExecPath = process.env.npm_execpath;
   if (npmExecPath) {
-    execFileSync(
-      process.execPath,
-      [npmExecPath, "pack", "--pack-destination", packDir],
-      { cwd: repoRoot, stdio: "inherit" },
-    );
+    execFileSync(process.execPath, [npmExecPath, ...args], {
+      cwd: repoRoot,
+      stdio: "inherit",
+    });
   } else if (process.platform === "win32") {
     const npmCliPath = path.join(
       path.dirname(process.execPath),
@@ -63,17 +78,69 @@ function packArchive(packDir) {
     if (!fs.existsSync(npmCliPath)) {
       throw new Error(`npm-cli.js was not found at ${npmCliPath}`);
     }
-    execFileSync(
-      process.execPath,
-      [npmCliPath, "pack", "--pack-destination", packDir],
-      { cwd: repoRoot, stdio: "inherit" },
-    );
+    execFileSync(process.execPath, [npmCliPath, ...args], {
+      cwd: repoRoot,
+      stdio: "inherit",
+    });
   } else {
-    execFileSync("npm", ["pack", "--pack-destination", packDir], {
+    execFileSync("npm", args, {
       cwd: repoRoot,
       stdio: "inherit",
     });
   }
+}
+
+/** Return the newest modification time in a file or a directory tree. */
+function latestMtimeMs(entryPath) {
+  const stat = fs.statSync(entryPath);
+  let newestMtimeMs = stat.mtimeMs;
+  if (stat.isDirectory()) {
+    for (const entry of fs.readdirSync(entryPath)) {
+      const childMtimeMs = latestMtimeMs(path.join(entryPath, entry));
+      if (childMtimeMs > newestMtimeMs) {
+        newestMtimeMs = childMtimeMs;
+      }
+    }
+  }
+  return newestMtimeMs;
+}
+
+/** Check if a build output in `dist/` or `pkg/` is absent or stale. */
+function outputsNeedBuild() {
+  if (fs.existsSync(path.join(repoRoot, "pkg", ".gitignore"))) {
+    return true;
+  }
+
+  let oldestOutputMtimeMs = Infinity;
+  for (const outputPath of BUILD_OUTPUT_PATHS) {
+    const stat = fs.statSync(path.join(repoRoot, outputPath), {
+      throwIfNoEntry: false,
+    });
+    if (!stat || !stat.isFile() || stat.size === 0) {
+      return true;
+    }
+    if (stat.mtimeMs < oldestOutputMtimeMs) {
+      oldestOutputMtimeMs = stat.mtimeMs;
+    }
+  }
+
+  let newestInputMtimeMs = 0;
+  for (const inputPath of BUILD_INPUT_PATHS) {
+    const inputMtimeMs = latestMtimeMs(path.join(repoRoot, inputPath));
+    if (inputMtimeMs > newestInputMtimeMs) {
+      newestInputMtimeMs = inputMtimeMs;
+    }
+  }
+
+  return oldestOutputMtimeMs < newestInputMtimeMs;
+}
+
+/** Run `npm pack --ignore-scripts` without a shell and return the archive path. */
+function packArchive(packDir) {
+  if (outputsNeedBuild()) {
+    runNpm(["run", "build"]);
+  }
+  runNpm(["pack", "--ignore-scripts", "--pack-destination", packDir]);
 
   const archives = fs
     .readdirSync(packDir)

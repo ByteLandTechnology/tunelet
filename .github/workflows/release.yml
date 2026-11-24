@@ -58,16 +58,43 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-bin: "false"
-      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+      # Read the wasm-bindgen version from Cargo.lock for the cache key.
+      - id: wasm-bindgen
+        run: |
+          version=$(awk '
+            $0 == "[[package]]" { in_pkg = 0 }
+            $0 == "name = \"wasm-bindgen\"" { in_pkg = 1; next }
+            in_pkg && /^version = "/ {
+              sub(/^version = "/, "")
+              sub(/"$/, "")
+              print
+              exit
+            }
+          ' Cargo.lock)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - id: wasm-tools-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/wasm-tools/bin
+            ~/.cache/.wasm-pack
+          key: wasm-tools-${{ runner.os }}-${{ runner.arch }}-wasm-pack-0.15.1-binaryen-133-wasm-bindgen-${{ steps.wasm-bindgen.outputs.version }}
+      - if: ${{ steps.wasm-tools-cache.outputs.cache-hit != 'true' }}
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: wasm-pack@0.15.1
           checksum: true
-      # Install Binaryen wasm-opt 133 and verify its SHA-256 checksum.
-      - run: |
+      # Copy wasm-pack and extract Binaryen wasm-opt 133 into the cache.
+      - if: ${{ steps.wasm-tools-cache.outputs.cache-hit != 'true' }}
+        run: |
+          mkdir -p "$HOME/.cache/wasm-tools/bin"
+          cp "$(command -v wasm-pack)" "$HOME/.cache/wasm-tools/bin/wasm-pack"
           curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz
           echo "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  $RUNNER_TEMP/binaryen.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
+          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$HOME/.cache/wasm-tools/bin" --strip-components=2 binaryen-version_133/bin/wasm-opt
+          rm -f "$RUNNER_TEMP/binaryen.tar.gz"
+      - run: echo "$HOME/.cache/wasm-tools/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
