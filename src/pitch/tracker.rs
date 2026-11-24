@@ -8,10 +8,9 @@
 //! resolution of the period.
 //!
 //! The 40-lag window moves to keep the minimum near its center. If the
-//! minimum is at a boundary or the curvature is not usable, acquisition
-//! starts again. The last usable period stays available as a fallback for
-//! resynthesis. The public frequency bounds apply only to feedback reports.
-//! They do not change the size of these windows.
+//! minimum is at a boundary, out of range or not periodic, acquisition
+//! starts again. The last usable period fills short unvoiced gaps and clears
+//! on reset or unvoiced expiry. Both stages enforce the active vocal range.
 
 use super::search::{tracking_minimum, TRACKING_LAGS};
 use crate::filter::{Biquad, Design};
@@ -44,13 +43,25 @@ pub(crate) struct PitchStep {
 }
 
 /// The number of lags that acquisition compares.
-const ACQUISITION_LAGS: usize = 137;
+const ACQUISITION_LAGS: usize = 305;
+/// The decimated unvoiced steps before the fallback period expires.
+const UNVOICED_EXPIRY_STEPS: u16 = 64;
+/// The Q6 tolerance for coarse decimated candidates before full-rate tracking.
+const COARSE_MARGIN: Q6 = Q6::from_bits(20 << 6);
+/// The Q6 boundary tolerance that prevents restarts from window ripple.
+const BOUND_SNAP: Q6 = Q6::from_bits(24);
+/// The maximum Q14 normalized cycle difference for full-rate tracking.
+const TRACKING_MAX_DIFF: i64 = 6226;
 
 /// The two-stage pitch tracker.
 ///
 /// The audio history and the filtered samples are Q14 words. The acquisition
 /// energies and cross terms are plain wrapping words.
 pub(crate) struct PitchTracker {
+    /// The fixed sample rate for period bounds and prefilter cutoffs.
+    rate: SampleRate,
+    /// The active frequency bounds in hertz, cached for configuration updates.
+    bounds_hz: (f32, f32),
     /// Two low-pass sections before the 8:1 decimation for acquisition.
     ///
     /// Full-rate tracking uses the raw audio.
@@ -92,9 +103,16 @@ pub(crate) struct PitchTracker {
     tracking_counter: i32,
     /// The latest refined Q6 period. A restart of acquisition sets it to zero.
     period: Q6,
-    /// The last refined Q6 period. A restart or an audio reset does not clear
-    /// it.
+    /// The last refined Q6 period. A reset or unvoiced expiry sets it to zero.
     previous_period: Q6,
+    /// The shortest permitted Q6 period from the upper frequency limit.
+    min_period: Q6,
+    /// The longest permitted Q6 period from the lower frequency limit.
+    max_period: Q6,
+    /// The largest decimated lag index for the active lower frequency limit.
+    max_detection_lag: usize,
+    /// The count of consecutive unvoiced decimated steps.
+    unvoiced_count: u16,
     /// The Q14 threshold of the normalized difference. It applies only to the
     /// acceptance of acquisition minima.
     threshold: Q14,
@@ -106,15 +124,13 @@ pub(crate) struct PitchTracker {
 impl PitchTracker {
     /// Prepares the acquisition filters and allocates the silent full-rate
     /// history.
-    /// The two supported rates use low-pass cutoffs at rate/32 and at 1.5
-    /// times that cutoff. The validated sensitivity is quantized to Q14.
+    /// The prefilters and period bounds match the active vocal range. The
+    /// validated sensitivity is quantized to Q14.
     pub(crate) fn new(rate: SampleRate, config: PitchConfig) -> Self {
-        let mut pre = [Biquad::new(), Biquad::new()];
-        let cutoff = rate.hz() / 16.0 / 2.0;
-        pre[0].set_design(Design::low_pass(rate.hz(), cutoff, 0.707));
-        pre[1].set_design(Design::low_pass(rate.hz(), cutoff * 1.5, 0.707));
-        Self {
-            pre,
+        let mut tracker = Self {
+            rate,
+            bounds_hz: (0.0, 0.0),
+            pre: [Biquad::new(), Biquad::new()],
             raw: vec![0; HISTORY]
                 .into_boxed_slice()
                 .try_into()
@@ -134,22 +150,58 @@ impl PitchTracker {
             tracking_counter: 0,
             period: Q6::default(),
             previous_period: Q6::default(),
+            min_period: Q6::default(),
+            max_period: Q6::default(),
+            max_detection_lag: ACQUISITION_LAGS - 1,
+            unvoiced_count: 0,
             threshold: Q14::from_f64(config.threshold as f64),
             best: 0,
+        };
+        tracker.configure_bounds(config.bounds());
+        tracker
+    }
+
+    /// Updates the prefilters and the Q6 period bounds for `bounds`.
+    fn configure_bounds(&mut self, bounds: (f32, f32)) {
+        if self.bounds_hz == bounds {
+            return;
+        }
+        self.bounds_hz = bounds;
+        let (min_hz, max_hz) = bounds;
+        let rate_hz = self.rate.hz();
+        let cutoff = (max_hz * 1.1).clamp(320.0, rate_hz / 32.0);
+        let second_cutoff = (cutoff * 1.5).min(rate_hz / 16.0 * 0.85);
+        self.pre[0].set_design(Design::low_pass(rate_hz, cutoff, 0.707));
+        self.pre[1].set_design(Design::low_pass(rate_hz, second_cutoff, 0.707));
+        let min_bits = ((rate_hz as f64 / max_hz as f64) * 64.0).ceil() as i32;
+        let max_bits = ((rate_hz as f64 / min_hz as f64) * 64.0).floor() as i32;
+        self.min_period = Q6::from_bits(min_bits.max(1));
+        self.max_period = Q6::from_bits(max_bits.max(min_bits));
+        let max_samples = ((self.max_period.to_bits() + 63) >> 6) as usize;
+        let max_dec = max_samples.div_ceil(8);
+        self.max_detection_lag = (2 * max_dec + 6).clamp(16, ACQUISITION_LAGS - 1);
+    }
+
+    /// Updates the acquisition sensitivity and the active vocal range bounds.
+    /// If the tracked period or fallback period is outside the new bounds,
+    /// the tracker restarts acquisition and clears the fallback period.
+    pub(crate) fn set_config(&mut self, config: PitchConfig) {
+        self.threshold = Q14::from_f64(config.threshold as f64);
+        self.configure_bounds(config.bounds());
+        if !self.detecting && (self.period < self.min_period || self.period > self.max_period) {
+            self.restart();
+            self.previous_period = Q6::ZERO;
+        }
+        if self.previous_period != Q6::ZERO
+            && (self.previous_period < self.min_period || self.previous_period > self.max_period)
+        {
+            self.previous_period = Q6::ZERO;
         }
     }
 
-    /// Updates only the acquisition sensitivity.
-    /// The reporting bounds apply outside the tracker. A change of the
-    /// sensitivity does not reset a tracked period.
-    pub(crate) fn set_config(&mut self, config: PitchConfig) {
-        self.threshold = Q14::from_f64(config.threshold as f64);
-    }
-
-    /// Clears the full-rate audio, the current period and the prefilter
-    /// memories, and requests acquisition.
-    /// The acquisition tables clear at the next decimated call. The previous
-    /// usable period stays until another tracking update replaces it.
+    /// Clears the full-rate audio, both periods and the prefilter memories,
+    /// and requests acquisition.
+    /// The acquisition tables clear at the next decimated call.
     pub(crate) fn reset(&mut self) {
         let written = usize::from(self.written);
         if written == HISTORY {
@@ -159,6 +211,8 @@ impl PitchTracker {
         }
         self.written = 0;
         self.write = 0;
+        self.previous_period = Q6::ZERO;
+        self.unvoiced_count = 0;
         self.restart();
         for pre in &mut self.pre {
             pre.reset();
@@ -321,7 +375,7 @@ impl PitchTracker {
                 &mut self.cross[lag..end],
             );
             index1 = if count == index1 + 1 {
-                273
+                2 * ACQUISITION_LAGS - 1
             } else {
                 index1 - count
             };
@@ -334,9 +388,13 @@ impl PitchTracker {
         }
         self.detection_count = self.detection_count.wrapping_add(1);
         if self.detection_count <= 10 {
+            self.unvoiced_count = self.unvoiced_count.saturating_add(1);
+            if self.unvoiced_count >= UNVOICED_EXPIRY_STEPS {
+                self.previous_period = Q6::ZERO;
+            }
             return 0;
         }
-        let maximum = ((self.detection_count - 6) / 2).min(ACQUISITION_LAGS as i32 - 1) as usize;
+        let maximum = ((self.detection_count - 6) / 2).min(self.max_detection_lag as i32) as usize;
         let mut normalized = [0_i32; ACQUISITION_LAGS];
         #[allow(
             clippy::needless_range_loop,
@@ -421,10 +479,23 @@ impl PitchTracker {
                 best = a.wrapping_add(b) >> 1;
             }
         }
+        if best != 0 {
+            let coarse = Q6::from_bits(best.wrapping_add(2) >> 2);
+            if coarse + COARSE_MARGIN < self.min_period || coarse - COARSE_MARGIN > self.max_period
+            {
+                self.previous_period = Q6::ZERO;
+                best = 0;
+            }
+        }
         if best == 0 {
+            self.unvoiced_count = self.unvoiced_count.saturating_add(1);
+            if self.unvoiced_count >= UNVOICED_EXPIRY_STEPS {
+                self.previous_period = Q6::ZERO;
+            }
             0
         } else {
-            ((128_i32.wrapping_add(best)) >> 8).wrapping_sub(20)
+            self.unvoiced_count = 0;
+            ((128_i32.wrapping_add(best)) >> 8).wrapping_sub(20).max(1)
         }
     }
 
@@ -630,7 +701,14 @@ impl PitchTracker {
                 let mut best = tracking_minimum(|lag| {
                     (self.tracking_energy[lag] >> 1).wrapping_sub(self.tracking_cross[lag])
                 });
-                if best == TRACKING_LAGS - 1 || best == 0 || self.base + best as i32 <= 19 {
+                let best_energy = self.tracking_energy[best];
+                let best_diff = (best_energy >> 1).wrapping_sub(self.tracking_cross[best]);
+                if best == TRACKING_LAGS - 1
+                    || best == 0
+                    || self.base + best as i32 <= 19
+                    || best_energy <= 0
+                    || i64::from(best_diff) * 16_384 > i64::from(best_energy) * TRACKING_MAX_DIFF
+                {
                     self.restart();
                     step.restarted = true;
                 } else {
@@ -688,11 +766,27 @@ impl PitchTracker {
                             // The lag in Q8 plus the parabolic fraction
                             // (Q14 >> 6), rounded to Q6.
                             let lag = self.base.wrapping_add(best as i32).wrapping_shl(8);
-                            self.period =
+                            let mut refined =
                                 Q6::from_bits(lag.wrapping_add(fraction >> 6).wrapping_add(2) >> 2);
-                            self.previous_period = self.period;
-                            self.best = best;
-                            step.tracking_update = true;
+                            if refined < self.min_period && self.min_period - refined <= BOUND_SNAP
+                            {
+                                refined = self.min_period;
+                            } else if refined > self.max_period
+                                && refined - self.max_period <= BOUND_SNAP
+                            {
+                                refined = self.max_period;
+                            }
+                            if refined < self.min_period || refined > self.max_period {
+                                self.restart();
+                                self.previous_period = Q6::ZERO;
+                                step.restarted = true;
+                            } else {
+                                self.period = refined;
+                                self.previous_period = refined;
+                                self.unvoiced_count = 0;
+                                self.best = best;
+                                step.tracking_update = true;
+                            }
                         }
                     }
                 }

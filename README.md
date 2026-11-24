@@ -178,6 +178,15 @@ multi-voice mixes.
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
 dry path starts after Warm and has a delay of 1,543 frames.
 
+`resynthesis.pitch.vocal_range` selects a frequency preset (`Auto`, `Soprano`,
+`AltoTenor`, `BaritoneBass` or `Custom`). `Auto` is the default (`40..=1100`
+Hz). `Custom` uses `min_frequency_hz` and `max_frequency_hz`. Both pitch
+tracking and `feedback()` enforce the active limits.
+
+`resynthesis.pitch.sibilant_bypass` is `true` by default. Active sibilants
+split at 3.5 kHz, and the high band bypasses pitch shift and harmony voices
+at unity pitch with a delay of 1,593 frames.
+
 ### Harmony sources
 
 Set `resynthesis.mode` to `Harmony`. Then select the source of the voices
@@ -489,8 +498,9 @@ the cases where `voiced` is `false`:
 
 - The kept pitch estimate is unvoiced. This includes the time before the
   first detection and after a reset or a drain completion.
-- The estimated frequency is outside the inclusive reporting bounds
-  `resynthesis.pitch.minFrequencyHz` and `resynthesis.pitch.maxFrequencyHz`.
+- The estimated frequency is outside the active bounds of
+  `resynthesis.pitch.vocalRange` (or `resynthesis.pitch.minFrequencyHz` and
+  `resynthesis.pitch.maxFrequencyHz` for `"custom"`).
 
 `formantEnvelope(maxFrequencyHz, input, output)` fills two `Float32Array`
 buffers of equal length and returns `false` if no envelope is available.

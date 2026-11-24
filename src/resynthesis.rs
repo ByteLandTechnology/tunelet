@@ -166,8 +166,8 @@ impl CorrectionConfig {
     tsify(large_number_types_as_bigints)
 )]
 pub struct ResynthesisConfig {
-    /// The acquisition sensitivity and the reporting bounds. The
-    /// default is [`PitchConfig::default`].
+    /// The acquisition sensitivity, vocal range, custom bounds and sibilant
+    /// bypass. The default is [`PitchConfig::default`].
     pub pitch: PitchConfig,
     /// The target notes and the retune time. The default is enabled
     /// chromatic correction with a retune time of zero.
@@ -345,6 +345,22 @@ const CONTROL_DUE: i32 = 100;
 const DRIFT_LIMIT: Q14 = Q14::from_bits(3276);
 /// The step for each frame of the crossfade after a reader jump.
 const FADE_STEP: Q14 = Q14::from_bits(0x333);
+/// The crossover frequency in hertz between the voiced low band and the
+/// unshifted sibilant high band.
+const SIBILANT_CROSSOVER_HZ: f32 = 3500.0;
+/// The quality factor of each Butterworth section in the fourth-order
+/// Linkwitz-Riley crossover.
+const SIBILANT_CROSSOVER_Q: f32 = std::f32::consts::FRAC_1_SQRT_2;
+/// The per-frame Q14 attack step for the sibilant crossover blend.
+const SIBILANT_ATTACK: Q14 = Q14::from_bits(256);
+/// The per-frame Q14 release step for the sibilant crossover blend.
+const SIBILANT_RELEASE: Q14 = Q14::from_bits(128);
+/// The minimum Q14 high-band envelope share that activates sibilant split.
+const SIBILANT_RATIO_MIN: Q14 = Q14::from_bits(1638);
+/// The minimum high-band zero-cross count in a 64-frame window.
+const SIBILANT_ZCR_MIN: u32 = 9;
+/// The minimum Q20 high-band rectified level that activates sibilant split.
+const SIBILANT_HIGH_FLOOR: i32 = 8 << 6;
 
 /// Returns the reader position at the start of the history frame `frame`.
 #[inline]
@@ -486,6 +502,34 @@ pub(crate) struct Resynthesis {
     /// The previous Q14 synthesized output for each channel. The glottal
     /// envelope uses it.
     previous_output: [Q14; 2],
+    /// Two 3.5 kHz low-pass sections for the voiced crossover branch.
+    sibilant_low: [Biquad; 2],
+    /// Two 3.5 kHz high-pass sections for the unshifted sibilant branch.
+    sibilant_high: [Biquad; 2],
+    /// The Q20 rectified amplitude follower of the low crossover band.
+    sibilant_low_env: i32,
+    /// The Q20 rectified amplitude follower of the high crossover band.
+    sibilant_high_env: i32,
+    /// The last 64 high-band zero-cross flags.
+    sibilant_zcr_high: u64,
+    /// The last 64 full-band zero-cross flags.
+    sibilant_zcr_full: u64,
+    /// The previous full-band Q14 input sample for zero-cross detection.
+    sibilant_prev_sample: Q14,
+    /// The previous high-band Q14 sample for zero-cross detection.
+    sibilant_prev_high: Q14,
+    /// The smoothed Q14 crossover weight, from 0 (full band) to 1 (split).
+    sibilant_mix: Q14,
+    /// The 441-frame delay for the voiced branch when formants are disabled.
+    voiced_delay: [Q14; ANALYSIS_FRAMES],
+    /// The next slot in `voiced_delay`.
+    voiced_index: usize,
+    /// The previous Q14 sample of the voiced branch for formant pre-emphasis.
+    prev_voiced: Q14,
+    /// The 1,593-frame delay that aligns the high band to `LATENCY_FRAMES`.
+    sibilant_delay: [Q14; LATENCY_FRAMES],
+    /// The next slot in `sibilant_delay`.
+    sibilant_index: usize,
 }
 
 impl Resynthesis {
@@ -554,6 +598,34 @@ impl Resynthesis {
             drift_decay: Q14::ZERO,
             drift_amount: Q14::ZERO,
             previous_output: [Q14::ZERO; 2],
+            sibilant_low: {
+                let mut filters = [Biquad::new(), Biquad::new()];
+                let design =
+                    Design::low_pass(rate.hz(), SIBILANT_CROSSOVER_HZ, SIBILANT_CROSSOVER_Q);
+                filters[0].set_design(design);
+                filters[1].set_design(design);
+                filters
+            },
+            sibilant_high: {
+                let mut filters = [Biquad::new(), Biquad::new()];
+                let design =
+                    Design::high_pass(rate.hz(), SIBILANT_CROSSOVER_HZ, SIBILANT_CROSSOVER_Q);
+                filters[0].set_design(design);
+                filters[1].set_design(design);
+                filters
+            },
+            sibilant_low_env: 0,
+            sibilant_high_env: 0,
+            sibilant_zcr_high: 0,
+            sibilant_zcr_full: 0,
+            sibilant_prev_sample: Q14::ZERO,
+            sibilant_prev_high: Q14::ZERO,
+            sibilant_mix: Q14::ZERO,
+            voiced_delay: [Q14::ZERO; ANALYSIS_FRAMES],
+            voiced_index: 0,
+            prev_voiced: Q14::ZERO,
+            sibilant_delay: [Q14::ZERO; LATENCY_FRAMES],
+            sibilant_index: 0,
         };
         result.configure_coefficients();
         result.configure_shift_filters();
@@ -740,6 +812,32 @@ impl Resynthesis {
         for filter in &mut self.post {
             filter.reset();
         }
+        for filter in &mut self.sibilant_low {
+            filter.reset();
+        }
+        for filter in &mut self.sibilant_high {
+            filter.reset();
+        }
+        if written >= ANALYSIS_FRAMES {
+            self.voiced_delay.fill(Q14::ZERO);
+        } else if written > 0 {
+            self.voiced_delay[..written].fill(Q14::ZERO);
+        }
+        self.voiced_index = 0;
+        self.prev_voiced = Q14::ZERO;
+        if written >= LATENCY_FRAMES {
+            self.sibilant_delay.fill(Q14::ZERO);
+        } else if written > 0 {
+            self.sibilant_delay[..written].fill(Q14::ZERO);
+        }
+        self.sibilant_index = 0;
+        self.sibilant_low_env = 0;
+        self.sibilant_high_env = 0;
+        self.sibilant_zcr_high = 0;
+        self.sibilant_zcr_full = 0;
+        self.sibilant_prev_sample = Q14::ZERO;
+        self.sibilant_prev_high = Q14::ZERO;
+        self.sibilant_mix = Q14::ZERO;
         self.create_delays();
         self.drift_ratio.fill(Q14::ONE);
         self.old_position = self.positions[0];
@@ -1107,8 +1205,56 @@ impl Resynthesis {
             self.written += 1;
         }
         self.raw[self.write] = sample;
+        let mut low = sample;
+        for filter in &mut self.sibilant_low {
+            low = filter.process_sample(low);
+        }
+        let mut high = sample;
+        for filter in &mut self.sibilant_high {
+            high = filter.process_sample(high);
+        }
+        let crossed_full = (sample.to_bits() ^ self.sibilant_prev_sample.to_bits()) < 0
+            && (sample.abs() > Q14::from_bits(8)
+                || self.sibilant_prev_sample.abs() > Q14::from_bits(8));
+        self.sibilant_prev_sample = sample;
+        self.sibilant_zcr_full = (self.sibilant_zcr_full << 1) | u64::from(crossed_full);
+        let crossed_high = (high.to_bits() ^ self.sibilant_prev_high.to_bits()) < 0
+            && (high.abs() > Q14::from_bits(4)
+                || self.sibilant_prev_high.abs() > Q14::from_bits(4));
+        self.sibilant_prev_high = high;
+        self.sibilant_zcr_high = (self.sibilant_zcr_high << 1) | u64::from(crossed_high);
+        self.sibilant_low_env = clamp_i32(
+            (i64::from(self.sibilant_low_env) * 63 + (i64::from(low.abs().to_bits()) << 6)) >> 6,
+        );
+        self.sibilant_high_env = clamp_i32(
+            (i64::from(self.sibilant_high_env) * 63 + (i64::from(high.abs().to_bits()) << 6)) >> 6,
+        );
+        let sibilant_active = if self.config.pitch.sibilant_bypass
+            && self.sibilant_high_env > SIBILANT_HIGH_FLOOR
+        {
+            let total_env = i64::from(self.sibilant_low_env) + i64::from(self.sibilant_high_env);
+            let high_ratio = if total_env > 0 {
+                Q14::from_bits(clamp_i32(
+                    (i64::from(self.sibilant_high_env) << 14) / total_env,
+                ))
+            } else {
+                Q14::ZERO
+            };
+            let zcr_high = self.sibilant_zcr_high.count_ones();
+            let zcr_full = self.sibilant_zcr_full.count_ones();
+            high_ratio >= SIBILANT_RATIO_MIN
+                && (zcr_high >= SIBILANT_ZCR_MIN || zcr_full >= SIBILANT_ZCR_MIN)
+        } else {
+            false
+        };
+        if sibilant_active {
+            self.sibilant_mix = (self.sibilant_mix + SIBILANT_ATTACK).min(Q14::ONE);
+        } else {
+            self.sibilant_mix = (self.sibilant_mix - SIBILANT_RELEASE).max(Q14::ZERO);
+        }
+        let voiced_sample = sample.mul(Q14::ONE - self.sibilant_mix) + low.mul(self.sibilant_mix);
         let was_tracking = !self.pitch.is_detecting();
-        let step = self.pitch.process_sample(sample.to_bits());
+        let step = self.pitch.process_sample(voiced_sample.to_bits());
         let write = self.write;
         // Readers have signed fractional coordinates. When the writer wraps,
         // move the origin of these coordinates with it. Do not apply a modulo
@@ -1157,21 +1303,34 @@ impl Resynthesis {
         self.periods[write] = step.period;
         self.previous_periods[write] = step.previous_period;
         self.ratios[write] = self.correction;
+        let delayed_voiced = self.voiced_delay[self.voiced_index];
+        self.voiced_delay[self.voiced_index] = voiced_sample;
+        self.voiced_index += 1;
+        if self.voiced_index == ANALYSIS_FRAMES {
+            self.voiced_index = 0;
+        }
+        let previous_voiced = self.prev_voiced;
+        self.prev_voiced = voiced_sample;
+        let aligned_high = self.sibilant_delay[self.sibilant_index];
+        self.sibilant_delay[self.sibilant_index] = high.mul(self.sibilant_mix);
+        self.sibilant_index += 1;
+        if self.sibilant_index == LATENCY_FRAMES {
+            self.sibilant_index = 0;
+        }
         self.overlap_index += 1;
         if self.overlap_index == OVERLAP_FRAMES {
             self.overlap_index = 0;
         }
         self.overlap[self.overlap_index] = if self.config.formant.enabled {
-            let previous = self.raw[ring(write as i32 - 1)];
             Q14::from_bits(self.formant.process_analysis(
-                sample.to_bits(),
-                previous.to_bits(),
+                voiced_sample.to_bits(),
+                previous_voiced.to_bits(),
                 self.periods.as_slice(),
                 write,
                 step.previous_period.to_bits(),
             ))
         } else {
-            self.raw[ring(write as i32 - ANALYSIS_FRAMES as i32)]
+            delayed_voiced
         };
         // The inverse analysis adds a delay of ANALYSIS_FRAMES. Read ahead by
         // the same number of frames in the overlap ring. Then the total delay
@@ -1364,6 +1523,9 @@ impl Resynthesis {
             for sum in &mut mix {
                 *sum = sum.mul(cosine);
             }
+        }
+        for sum in &mut mix {
+            *sum = *sum + aligned_high;
         }
         // The dry branch is the delayed raw input. It bypasses the shift
         // filters, the voice readers, the formant stages and the harmonic

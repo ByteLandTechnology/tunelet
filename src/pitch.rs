@@ -2,8 +2,8 @@
 //! estimates.
 //!
 //! Acquisition checks that repeated minima agree. Tracking refines the period
-//! in a window of 40 lags. The reporting bounds filter only the feedback to
-//! the host.
+//! in a window of 40 lags. Both pitch tracking and host feedback enforce the
+//! active [`VocalRange`] frequency limits.
 
 mod search;
 pub(crate) mod tracker;
@@ -11,7 +11,34 @@ pub(crate) mod tracker;
 use crate::error::{check_range, ConfigProblem};
 use crate::Error;
 
-/// The acquisition sensitivity and the bounds for pitch reports to the host.
+/// The frequency preset for pitch acquisition, pitch tracking and host reports.
+///
+/// The default is [`Self::Auto`]. Presets restrict pitch detection and
+/// feedback to the selected vocal register. Notes outside the active bounds
+/// stay unvoiced and bypass pitch shift and harmony voices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(rename_all = "camelCase")
+)]
+pub enum VocalRange {
+    /// Custom bounds from `min_frequency_hz` and `max_frequency_hz` in
+    /// [`PitchConfig`].
+    Custom,
+    /// The soprano register, 200..=1100 Hz.
+    Soprano,
+    /// The alto and tenor register, 100..=720 Hz.
+    AltoTenor,
+    /// The baritone and bass register, 45..=360 Hz.
+    BaritoneBass,
+    /// The full vocal register, 40..=1100 Hz. This is the default.
+    #[default]
+    Auto,
+}
+
+/// The acquisition sensitivity, vocal range preset, custom frequency limits
+/// and sibilant bypass control.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -26,42 +53,66 @@ pub struct PitchConfig {
     /// This value controls acquisition. It is not an output gain or an
     /// amplitude gate.
     pub threshold: f32,
-    /// The lower bound of the feedback in hertz (inclusive), 40..=2000.
+    /// The active vocal register preset. The default is [`VocalRange::Auto`].
+    ///
+    /// [`VocalRange::Custom`] uses `min_frequency_hz` and `max_frequency_hz`.
+    /// The other presets use fixed frequency limits. Both the pitch tracker
+    /// and [`crate::Processor::feedback`] enforce the active limits.
+    pub vocal_range: VocalRange,
+    /// The custom lower bound in hertz (inclusive), 40..=2000.
     ///
     /// The default is 40. It must be strictly less than `max_frequency_hz`.
-    /// These bounds do not change the tracking, the correction or the
-    /// resampling. A feedback query applies the current bounds to the kept
-    /// analysis. It does not process another sample.
+    /// [`VocalRange::Custom`] enforces this bound in pitch detection and in
+    /// feedback reports. Validation checks this field in all vocal ranges.
     pub min_frequency_hz: f32,
-    /// The upper bound of the feedback in hertz (inclusive), 40..=2000.
+    /// The custom upper bound in hertz (inclusive), 40..=2000.
     ///
     /// The default is 1100. It must be strictly greater than
-    /// `min_frequency_hz`. Results outside the bounds are reported as
-    /// unvoiced, with zero frequency and zero period.
+    /// `min_frequency_hz`. [`VocalRange::Custom`] enforces this bound in pitch
+    /// detection and in feedback reports. Results outside the active bounds
+    /// are unvoiced, with zero frequency and zero period.
     pub max_frequency_hz: f32,
+    /// Enables the 3.5 kHz sibilant crossover split. The default is `true`.
+    ///
+    /// If this field is `true`, active sibilants split into a low band and a
+    /// high band. The high band bypasses pitch shift and harmony voices at
+    /// unity pitch.
+    pub sibilant_bypass: bool,
 }
 
 impl Default for PitchConfig {
     fn default() -> Self {
         Self {
             threshold: 0.1,
+            vocal_range: VocalRange::Auto,
             min_frequency_hz: 40.0,
             max_frequency_hz: 1100.0,
+            sibilant_bypass: true,
         }
     }
 }
 
 impl PitchConfig {
-    /// Applies only the bounds for host reports to a kept estimate.
+    /// Returns the inclusive lower and upper frequency limits in hertz for the
+    /// active [`VocalRange`].
+    pub(crate) fn bounds(self) -> (f32, f32) {
+        match self.vocal_range {
+            VocalRange::Custom => (self.min_frequency_hz, self.max_frequency_hz),
+            VocalRange::Soprano => (200.0, 1100.0),
+            VocalRange::AltoTenor => (100.0, 720.0),
+            VocalRange::BaritoneBass => (45.0, 360.0),
+            VocalRange::Auto => (40.0, 1100.0),
+        }
+    }
+
+    /// Applies the active frequency bounds to a kept estimate for host reports.
     ///
     /// If the estimate is not voiced or is out of range, the result is the
     /// unvoiced value with all fields zero. The function does not change the
     /// tracker state or the correction state.
     pub(crate) fn report(self, estimate: PitchEstimate) -> PitchEstimate {
-        if estimate.voiced
-            && estimate.frequency_hz >= self.min_frequency_hz
-            && estimate.frequency_hz <= self.max_frequency_hz
-        {
+        let (min_hz, max_hz) = self.bounds();
+        if estimate.voiced && estimate.frequency_hz >= min_hz && estimate.frequency_hz <= max_hz {
             estimate
         } else {
             PitchEstimate::default()
