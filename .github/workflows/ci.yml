@@ -1,5 +1,5 @@
 # Continuous integration for the Rust crate, the Wasm bindings and the
-# npm package.
+# npm package across Linux, macOS and Windows.
 name: CI
 
 on:
@@ -18,9 +18,29 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  verify-os:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        include:
+          - os: ubuntu-latest
+            binaryen_archive: binaryen-version_133-x86_64-linux.tar.gz
+            binaryen_sha256: 2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489
+            cdylib: libtunelet.so
+          - os: macos-latest
+            binaryen_archive: binaryen-version_133-arm64-macos.tar.gz
+            binaryen_sha256: ad66da82ac13f163e424b1643f16c6dfcccc98b5966296b43e52d3cab04f84a8
+            cdylib: libtunelet.dylib
+          - os: windows-latest
+            binaryen_archive: binaryen-version_133-x86_64-windows.tar.gz
+            binaryen_sha256: 17a2cbeac6b5693c5fbafab3838d3c65fd9c1eb38b05f5baec6c657e8c84995b
+            cdylib: tunelet.dll
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,19 +57,90 @@ jobs:
         with:
           tool: wasm-pack@0.15.1
           checksum: true
-      # Install Binaryen wasm-opt 133 and verify its SHA-256 checksum.
-      - run: |
-          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz
-          echo "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  $RUNNER_TEMP/binaryen.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           cache: "npm"
+      # Download Binaryen wasm-opt 133, check its SHA-256 digest and extract it.
+      - shell: bash
+        env:
+          BINARYEN_ARCHIVE: ${{ matrix.binaryen_archive }}
+          BINARYEN_SHA256: ${{ matrix.binaryen_sha256 }}
+        run: |
+          node --input-type=module - <<'EOF'
+          import assert from "node:assert/strict";
+          import { execFileSync } from "node:child_process";
+          import crypto from "node:crypto";
+          import fs from "node:fs";
+          import os from "node:os";
+          import path from "node:path";
+
+          const tempDir = process.env.RUNNER_TEMP;
+          assert.ok(tempDir, "RUNNER_TEMP must be set");
+          const archiveName = process.env.BINARYEN_ARCHIVE;
+          assert.ok(archiveName, "BINARYEN_ARCHIVE must be set");
+          const expectedSha256 = process.env.BINARYEN_SHA256;
+          assert.ok(expectedSha256, "BINARYEN_SHA256 must be set");
+          const githubPath = process.env.GITHUB_PATH;
+          assert.ok(githubPath, "GITHUB_PATH must be set");
+
+          const archivePath = path.join(tempDir, archiveName);
+          const archiveUrl = `https://github.com/WebAssembly/binaryen/releases/download/version_133/${archiveName}`;
+          execFileSync(
+            process.platform === "win32" ? "curl.exe" : "curl",
+            [
+              "--proto",
+              "=https",
+              "--tlsv1.2",
+              "-fsSL",
+              "--retry",
+              "3",
+              "-o",
+              archivePath,
+              archiveUrl,
+            ],
+            { stdio: "inherit" },
+          );
+
+          const actualSha256 = crypto
+            .createHash("sha256")
+            .update(fs.readFileSync(archivePath))
+            .digest("hex");
+          assert.equal(
+            actualSha256,
+            expectedSha256,
+            `Binaryen SHA-256 mismatch for ${archiveName}`,
+          );
+
+          const winTar = path.join(
+            process.env.SystemRoot ?? "C:\\Windows",
+            "System32",
+            "tar.exe",
+          );
+          const tarCommand =
+            process.platform === "win32" && fs.existsSync(winTar)
+              ? winTar
+              : "tar";
+          execFileSync(tarCommand, ["-xzf", archiveName], {
+            cwd: tempDir,
+            stdio: "inherit",
+          });
+
+          const binDir = path.join(tempDir, "binaryen-version_133", "bin");
+          const wasmOpt = path.join(
+            binDir,
+            process.platform === "win32" ? "wasm-opt.exe" : "wasm-opt",
+          );
+          assert.ok(fs.existsSync(wasmOpt), `Expected ${wasmOpt}`);
+          fs.appendFileSync(githubPath, `${binDir}${os.EOL}`);
+          EOF
       - run: cargo fmt --check
       - run: cargo clippy --locked --lib -- -D warnings
       - run: cargo build --locked --release
+      # Check that the release build created the native dynamic library.
+      - run: node --input-type=module -e "import assert from 'node:assert/strict'; import fs from 'node:fs'; const stat = fs.statSync(process.env.CDYLIB_PATH); assert.ok(stat.isFile() && stat.size > 0);"
+        env:
+          CDYLIB_PATH: target/release/${{ matrix.cdylib }}
       - run: cargo doc --locked --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
@@ -58,4 +149,19 @@ jobs:
       - run: npm run check:wasm
         env:
           RUSTDOCFLAGS: "-D warnings"
-      - run: npm run verify:pack
+      - run: node scripts/verify-pack.mjs
+
+  # Report the combined matrix status under the verify check name.
+  verify:
+    needs: verify-os
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          if [ "${VERIFY_OS_RESULT}" != "success" ]; then
+            echo "verify-os result: ${VERIFY_OS_RESULT}" >&2
+            exit 1
+          fi
+        env:
+          VERIFY_OS_RESULT: ${{ needs.verify-os.result }}

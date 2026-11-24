@@ -43,29 +43,178 @@ function readPackageName() {
   return packageName;
 }
 
+/** Return true if `filePath` exists and is a regular file. */
+function isRegularFile(filePath) {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Find `npm` on Windows across standard and split Node.js layouts. */
+function resolveWin32Npm() {
+  const nodeDir = path.dirname(process.execPath);
+  const candidateDirs = [nodeDir];
+
+  const rawPath = process.env.PATH ?? process.env.Path ?? "";
+  for (const entry of rawPath.split(path.delimiter)) {
+    const cleaned = entry.trim().replace(/^"+|"+$/g, "");
+    if (cleaned.length > 0 && path.isAbsolute(cleaned)) {
+      candidateDirs.push(cleaned);
+    }
+  }
+
+  const voltaRoots = [];
+  if (/[\\/]tools[\\/]image[\\/]node[\\/]/i.test(nodeDir)) {
+    voltaRoots.push(
+      path.resolve(nodeDir, "..", "..", "..", ".."),
+      path.resolve(nodeDir, "..", "..", "..", "..", ".."),
+    );
+  }
+  if (process.env.VOLTA_HOME && path.isAbsolute(process.env.VOLTA_HOME)) {
+    voltaRoots.push(process.env.VOLTA_HOME);
+  }
+  if (process.env.LOCALAPPDATA && path.isAbsolute(process.env.LOCALAPPDATA)) {
+    voltaRoots.push(path.join(process.env.LOCALAPPDATA, "Volta"));
+    candidateDirs.push(
+      path.join(process.env.LOCALAPPDATA, "Programs", "nodejs"),
+    );
+  }
+  for (const voltaRoot of voltaRoots) {
+    candidateDirs.push(path.join(voltaRoot, "bin"));
+    const voltaNpmImageRoot = path.join(voltaRoot, "tools", "image", "npm");
+    try {
+      const versions = fs
+        .readdirSync(voltaNpmImageRoot)
+        .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+      for (const version of versions) {
+        candidateDirs.push(path.join(voltaNpmImageRoot, version, "bin"));
+      }
+    } catch {
+      // Ignore absent Volta image directories.
+    }
+  }
+
+  if (process.env.APPDATA && path.isAbsolute(process.env.APPDATA)) {
+    candidateDirs.push(path.join(process.env.APPDATA, "npm"));
+  }
+  if (process.env.NVM_SYMLINK && path.isAbsolute(process.env.NVM_SYMLINK)) {
+    candidateDirs.push(process.env.NVM_SYMLINK);
+  }
+  if (
+    process.env.ChocolateyInstall &&
+    path.isAbsolute(process.env.ChocolateyInstall)
+  ) {
+    const chocoRoot = process.env.ChocolateyInstall;
+    candidateDirs.push(
+      path.join(chocoRoot, "lib", "npm", "tools"),
+      path.join(chocoRoot, "lib", "nodejs", "tools"),
+      path.join(chocoRoot, "lib", "nodejs.commandline", "tools"),
+      path.join(chocoRoot, "lib", "nodejs-lts", "tools"),
+      path.join(chocoRoot, "bin"),
+    );
+  }
+  for (const envName of ["ProgramFiles", "ProgramFiles(x86)"]) {
+    const baseDir = process.env[envName];
+    if (baseDir && path.isAbsolute(baseDir)) {
+      candidateDirs.push(
+        path.join(baseDir, "nodejs"),
+        path.join(baseDir, "Volta"),
+      );
+    }
+  }
+
+  const seenDirs = new Set();
+  for (const dir of candidateDirs) {
+    const key = path.normalize(dir).toLowerCase();
+    if (seenDirs.has(key)) {
+      continue;
+    }
+    seenDirs.add(key);
+
+    const cliCandidates = [
+      path.join(dir, "node_modules", "npm", "bin", "npm-cli.js"),
+      path.resolve(
+        dir,
+        "..",
+        "lib",
+        "node_modules",
+        "npm",
+        "bin",
+        "npm-cli.js",
+      ),
+      path.resolve(dir, "..", "node_modules", "npm", "bin", "npm-cli.js"),
+      path.join(dir, "npm-cli.js"),
+      path.join(dir, "bin", "npm-cli.js"),
+      path.resolve(
+        dir,
+        "..",
+        "lib",
+        "npm",
+        "tools",
+        "node_modules",
+        "npm",
+        "bin",
+        "npm-cli.js",
+      ),
+      path.resolve(
+        dir,
+        "..",
+        "npm",
+        "tools",
+        "node_modules",
+        "npm",
+        "bin",
+        "npm-cli.js",
+      ),
+      path.resolve(
+        dir,
+        "..",
+        "..",
+        "npm",
+        "tools",
+        "node_modules",
+        "npm",
+        "bin",
+        "npm-cli.js",
+      ),
+    ];
+    for (const cliPath of cliCandidates) {
+      if (isRegularFile(cliPath)) {
+        return { command: process.execPath, prefixArgs: [cliPath] };
+      }
+    }
+
+    const exePath = path.join(dir, "npm.exe");
+    if (isRegularFile(exePath)) {
+      return { command: exePath, prefixArgs: [] };
+    }
+  }
+
+  throw new Error(
+    `npm-cli.js or npm.exe was not found for ${process.execPath}`,
+  );
+}
+
 /** Run `npm pack` without a shell and return the relative archive path. */
 function packArchive(packDir) {
   const npmExecPath = process.env.npm_execpath;
   if (npmExecPath) {
+    const isWin32Exe =
+      process.platform === "win32" && /\.exe$/i.test(npmExecPath);
+    const command = isWin32Exe ? npmExecPath : process.execPath;
+    const prefixArgs = isWin32Exe ? [] : [npmExecPath];
     execFileSync(
-      process.execPath,
-      [npmExecPath, "pack", "--pack-destination", packDir],
+      command,
+      [...prefixArgs, "pack", "--pack-destination", packDir],
       { cwd: repoRoot, stdio: "inherit" },
     );
   } else if (process.platform === "win32") {
-    const npmCliPath = path.join(
-      path.dirname(process.execPath),
-      "node_modules",
-      "npm",
-      "bin",
-      "npm-cli.js",
-    );
-    if (!fs.existsSync(npmCliPath)) {
-      throw new Error(`npm-cli.js was not found at ${npmCliPath}`);
-    }
+    const { command, prefixArgs } = resolveWin32Npm();
     execFileSync(
-      process.execPath,
-      [npmCliPath, "pack", "--pack-destination", packDir],
+      command,
+      [...prefixArgs, "pack", "--pack-destination", packDir],
       { cwd: repoRoot, stdio: "inherit" },
     );
   } else {

@@ -90,29 +90,68 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 
 ## Build and verify
 
+In a POSIX shell, run these commands to check the Rust crate and the
+`wasm` feature:
+
 ```sh
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
+cargo package --list --locked
 rustup target add wasm32-unknown-unknown
 cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
 ```
 
-If you change the Wasm or TypeScript code, also run these commands.
-`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
-`npm run build` compiles `src/wasm.rs` and `src/index.ts`.
-`npm run verify:pack` runs `npm run build` and checks the archives:
+In PowerShell, set `RUSTDOCFLAGS` in the environment before you run
+`cargo doc`:
+
+```powershell
+cargo build --locked --release
+cargo fmt --check
+cargo clippy --locked --lib -- -D warnings
+$env:RUSTDOCFLAGS = "-D warnings"
+cargo doc --locked --no-deps
+cargo package --list --locked
+rustup target add wasm32-unknown-unknown
+cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
+Remove-Item Env:RUSTDOCFLAGS
+```
+
+If you change the Wasm code, the TypeScript code or the build scripts,
+also run the package checks. `npm run check:wasm` runs Clippy and
+rustdoc for `wasm32-unknown-unknown`. `npm run build` compiles
+`src/wasm.rs` and `src/index.ts`. `node scripts/verify-pack.mjs` runs
+`npm pack`, triggers `prepack` and checks the archive, `loadTunelet()`
+and the TypeScript declarations. `npm run verify:pack` runs the same
+script.
+
+In a POSIX shell, run these commands:
 
 ```sh
 npm ci
 RUSTDOCFLAGS="-D warnings" npm run check:wasm
-npm run verify:pack
+node scripts/verify-pack.mjs
 ```
 
-- `.github/workflows/ci.yml` runs these checks on each pull request and each
-  push to `main`.
+In PowerShell, run these commands:
+
+```powershell
+npm ci
+$env:RUSTDOCFLAGS = "-D warnings"
+npm run check:wasm
+Remove-Item Env:RUSTDOCFLAGS
+node scripts/verify-pack.mjs
+```
+
+- `.github/workflows/ci.yml` runs these checks on `ubuntu-latest`,
+  `macos-latest` and `windows-latest` for each pull request and each
+  push to `main`. Each runner installs `wasm-pack` and Binaryen
+  `wasm-opt`, compiles the crate and the Wasm bindings and runs
+  `node scripts/verify-pack.mjs`. The `verify` job reports the combined
+  status of the three runners.
 - Make sure that there are no new warnings. This includes broken
   rustdoc links.
 - The crate has no tests (`test = false`). Do not add tests or test
