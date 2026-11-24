@@ -1178,8 +1178,14 @@ impl Resynthesis {
         // of the source is OVERLAP_FRAMES in the two formant modes.
         let overlap_read = (self.overlap_index + ANALYSIS_FRAMES) % OVERLAP_FRAMES;
         let mut filtered = self.overlap[overlap_read];
-        for filter in &mut self.post {
-            filtered = filter.process_sample(filtered);
+        if self.config.pitch_ratio > 1.0 {
+            for filter in &mut self.post {
+                filtered = filter.process_sample(filtered);
+            }
+        } else {
+            for filter in &mut self.post {
+                filtered = filter.bypass_sample(filtered);
+            }
         }
         self.filtered[write] = filtered;
         let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
