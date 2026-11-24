@@ -1,7 +1,7 @@
 //! The processor: audio blocks, timed controls, host feedback and the tail.
 
 use crate::effects::alien::{self, Alien};
-use crate::effects::punch::{Punch, PunchConfig};
+use crate::effects::punch::Punch;
 use crate::effects::reverb::{self, Reverb};
 use crate::effects::warm::Warm;
 use crate::events::{ValidatedEvent, ValidatedEvents};
@@ -90,9 +90,9 @@ impl Processor {
     /// I/O. Audio histories, pitch reports and meters start clear. The random
     /// stream starts from the low 32 bits of `random_seed`.
     ///
-    /// Punch uses its default cached drive until the first window of 100
-    /// frames with Punch enabled. The initial note table of correction has the
-    /// rate behavior that [`crate::CorrectionConfig`] describes.
+    /// Punch sets its initial drive from `config.punch.gain_db`. The initial
+    /// note table of correction has the rate behavior that
+    /// [`crate::CorrectionConfig`] describes.
     ///
     /// # Errors
     ///
@@ -103,13 +103,10 @@ impl Processor {
     pub fn new(preparation: PrepareConfig, config: ProcessorConfig) -> Result<Self, Error> {
         config.validate()?;
         let rate = preparation.sample_rate;
-        // Drive uses the default gain until the first 100-frame peak window.
-        let mut punch = Punch::new(rate, PunchConfig::default());
-        punch.set_config(config.punch);
         Ok(Self {
             preparation,
             config,
-            punch,
+            punch: Punch::new(rate, config.punch),
             warm: Warm::new(rate, config.warm),
             resynthesis: Box::new(Resynthesis::new(rate, config.resynthesis)),
             alien: Alien::new(config.alien),
@@ -375,7 +372,7 @@ impl Processor {
             voice_ratios,
             voice_gains,
             punch_gain: if self.config.punch.enabled {
-                self.punch.drive_ratio()
+                self.punch.effective_gain()
             } else {
                 1.0
             },
@@ -855,18 +852,20 @@ pub struct Telemetry {
     /// harmony level or the pan. The harmony controller updates it every 101
     /// frames.
     pub voice_gains: [f32; 16],
-    /// The current drive of Punch, divided by its base drive.
+    /// The effective linear gain of Punch at the current envelope level.
     ///
-    /// The value is the ratio of the two input envelopes times the
-    /// configured input gain. It is more than 1 at an attack. Punch updates
-    /// it every 100 frames. The value is 1 while Punch is disabled.
+    /// The value reflects the smoothed drive boost from the two input
+    /// envelopes, the configured input gain and any attenuation from the
+    /// output ceiling. Punch updates it on each enabled frame. The value is 1
+    /// while Punch is disabled.
     pub punch_gain: f32,
     /// The linear gain that Warm applies before its saturation curve and
     /// removes after it.
     ///
-    /// The value is the inverse of the input peak envelope. For input below
-    /// -30 dB, it is the gain of +30 dB. Warm updates it every 100 frames.
-    /// The value is 1 while Warm is disabled.
+    /// The value tracks the inverse of the input peak envelope, with +30 dB
+    /// for input below -30 dB. Warm reduces it immediately on attacks, smooths
+    /// it during release and updates it on each enabled frame. The value is 1
+    /// while Warm is disabled.
     pub warm_gain: f32,
     /// The length of the Alien loop in frames, as
     /// [`crate::AlienConfig::loop_frames`] gives.
