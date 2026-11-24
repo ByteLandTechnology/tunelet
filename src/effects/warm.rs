@@ -1,7 +1,7 @@
 //! Asymmetric saturation with gain compensation and a high-pass output filter.
 
 use crate::error::check_range;
-use crate::filter::{Biquad, Design};
+use crate::filter::{Design, OnePole};
 use crate::numeric::db_to_gain;
 use crate::numeric::fixed::{Fixed, Q12, Q14, Q8};
 use crate::{Error, SampleRate};
@@ -60,7 +60,7 @@ impl WarmConfig {
 #[derive(Debug)]
 pub(crate) struct Warm {
     /// The 50 Hz one-pole high-pass output filter.
-    filter: Biquad,
+    filter: OnePole,
     /// The kept Q14 peak envelope from completed windows.
     peak: Q14,
     /// The largest absolute Q14 sample in the current 100-frame window.
@@ -87,7 +87,7 @@ impl Warm {
     /// Prepares the fixed high-pass filter and the initial normalization
     /// state.
     pub(crate) fn new(rate: SampleRate, config: WarmConfig) -> Self {
-        let mut filter = Biquad::new();
+        let mut filter = OnePole::new();
         filter.set_design(Design::high_pass_one_pole(rate.hz(), 50.0));
         let mut result = Self {
             filter,

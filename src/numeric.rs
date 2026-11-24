@@ -28,18 +28,16 @@ pub(crate) fn mul_shift(a: i32, b: i32, shift: u32) -> i32 {
 /// Removes 14 fractional bits with a signed half-unit adjustment and clamps
 /// to `i32`.
 ///
-/// If the value is nonnegative, the function adds half a unit. If the value
-/// is negative, the function subtracts half a unit. Then an arithmetic shift
-/// removes the bits, and the function clamps the result to
-/// `i32::MIN..=i32::MAX`. The shift moves negative values down.
+/// The function clamps the input to the Q28 limits of `i32`. A sign mask
+/// selects `+8192` for zero or positive inputs and `-8192` for negative
+/// inputs. Then an arithmetic shift removes 14 bits toward negative infinity.
 #[inline]
 pub(crate) fn round_q14(value: i64) -> i32 {
-    let rounded = if value >= 0 {
-        value.saturating_add(8192) >> 14
-    } else {
-        value.saturating_sub(8192) >> 14
-    };
-    clamp_i32(rounded)
+    const MIN_Q28: i64 = ((i32::MIN as i64) << 14) + 8192;
+    const MAX_Q28: i64 = ((i32::MAX as i64) << 14) - 8192;
+    let clamped = value.clamp(MIN_Q28, MAX_Q28);
+    let bias = 8192 - ((clamped >> 49) & 16384);
+    ((clamped + bias) >> 14) as i32
 }
 
 /// Converts an amplitude in decibels to a linear multiplier with

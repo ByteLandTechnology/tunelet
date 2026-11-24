@@ -30,7 +30,7 @@
 mod history;
 
 use crate::error::{check_count, check_range};
-use crate::filter::{Biquad, Design};
+use crate::filter::{BypassCascade, Design};
 use crate::formant::{Formant, FormantConfig, ANALYSIS_FRAMES};
 use crate::harmony::{HarmonyConfig, HarmonyState, HARMONY_VOICES};
 use crate::midi::MidiEvent;
@@ -437,8 +437,8 @@ pub(crate) struct Resynthesis {
     /// frame. The audio path sets it, and only the formant envelope reads it.
     formant_position: i32,
     /// Two cascaded anti-alias filter sections. If the shift is not upward,
-    /// they have coefficients of 1.0 and zero.
-    post: [Biquad; 2],
+    /// the cascade uses bypass mode.
+    post: BypassCascade,
     /// The current smoothed Q14 correction ratio. It does not include the
     /// global shift or the voice ratios.
     correction: Q14,
@@ -536,7 +536,7 @@ impl Resynthesis {
             harmony_gains: [Q12::ZERO; HARMONY_VOICES],
             voice_ratios: [Q14::ONE; HARMONY_VOICES + 1],
             formant_position: 0,
-            post: [Biquad::new(), Biquad::new()],
+            post: BypassCascade::new(),
             correction: Q14::ONE,
             correction_decay: Q14::ZERO,
             scale_initialized: false,
@@ -610,20 +610,19 @@ impl Resynthesis {
     }
 
     /// Prepares two low-pass sections if the global shift is upward. If not,
-    /// sets coefficients of 1.0 and zero.
+    /// sets bypass mode.
     ///
-    /// A change of the coefficients keeps the filter histories. The code
-    /// truncates the numerator of the cutoff before it divides by the pitch
-    /// ratio.
+    /// A change of the mode or the coefficients keeps the filter histories.
+    /// The code truncates the numerator of the cutoff before it divides by the
+    /// pitch ratio.
     fn configure_shift_filters(&mut self) {
-        for filter in &mut self.post {
-            if self.config.pitch_ratio > 1.0 {
-                let numerator = (self.rate.hz() as f64 * 0.49) as i32;
-                let cutoff = numerator as f32 / self.config.pitch_ratio;
-                filter.set_design(Design::low_pass(self.rate.hz(), cutoff, 0.707));
-            } else {
-                filter.bypass();
-            }
+        if self.config.pitch_ratio > 1.0 {
+            let numerator = (self.rate.hz() as f64 * 0.49) as i32;
+            let cutoff = numerator as f32 / self.config.pitch_ratio;
+            self.post
+                .set_design(Design::low_pass(self.rate.hz(), cutoff, 0.707));
+        } else {
+            self.post.bypass();
         }
     }
 
@@ -737,9 +736,7 @@ impl Resynthesis {
         }
         self.overlap_index = 0;
         self.previous_output = [Q14::ZERO; 2];
-        for filter in &mut self.post {
-            filter.reset();
-        }
+        self.post.reset();
         self.create_delays();
         self.drift_ratio.fill(Q14::ONE);
         self.old_position = self.positions[0];
@@ -1177,11 +1174,7 @@ impl Resynthesis {
         // the same number of frames in the overlap ring. Then the total delay
         // of the source is OVERLAP_FRAMES in the two formant modes.
         let overlap_read = (self.overlap_index + ANALYSIS_FRAMES) % OVERLAP_FRAMES;
-        let mut filtered = self.overlap[overlap_read];
-        for filter in &mut self.post {
-            filtered = filter.process_sample(filtered);
-        }
-        self.filtered[write] = filtered;
+        self.filtered[write] = self.post.process_sample(self.overlap[overlap_read]);
         let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
         let dry = self.raw[delayed];
         let mut mix = [Q14::ZERO; 2];
