@@ -140,6 +140,51 @@ impl ParameterControl {
             Self::ReverbBrightnessHz(value) => reverb::validate_brightness_hz(value),
         }
     }
+
+    /// Validates the scalar parameter and writes it into `config`.
+    pub(crate) fn apply_to(self, config: &mut ProcessorConfig) -> Result<(), Error> {
+        self.validate()?;
+        match self {
+            Self::PunchGainDb(value) => config.punch.gain_db = value,
+            Self::PunchImpact(value) => config.punch.impact = value,
+            Self::PunchCeilingDb(value) => config.punch.ceiling_db = value,
+            Self::PunchAttackMs(value) => config.punch.attack_ms = value,
+            Self::WarmDriveDb(value) => config.warm.drive_db = value,
+            Self::PitchThreshold(value) => config.resynthesis.pitch.threshold = value,
+            Self::RetuneMs(value) => config.resynthesis.correction.retune_ms = value,
+            Self::PitchRatio(value) => config.resynthesis.pitch_ratio = value,
+            Self::FormantWidth(value) => config.resynthesis.formant.width = value,
+            Self::FormantStretch(value) => config.resynthesis.formant.stretch = value,
+            Self::FormantAspirationMix(value) => config.resynthesis.formant.aspiration_mix = value,
+            Self::FormantAspirationCutoffHz(value) => {
+                config.resynthesis.formant.aspiration_cutoff_hz = value;
+            }
+            Self::ChoirVoices(value) => config.resynthesis.choir_voices = value,
+            Self::ChoirDetune(value) => config.resynthesis.choir_detune = value,
+            Self::ChoirDelay(value) => config.resynthesis.choir_delay = value,
+            Self::ChoirSpreadPercent(value) => config.resynthesis.choir_spread_percent = value,
+            Self::HarmonyRegisterPercent(value) => {
+                config.resynthesis.harmony.register_percent = value;
+            }
+            Self::HarmonyVoicingSpreadPercent(value) => {
+                config.resynthesis.harmony.voicing_spread_percent = value;
+            }
+            Self::HarmonyPortamentoMs(value) => {
+                config.resynthesis.harmony.portamento_ms = value;
+            }
+            Self::HarmonyVoices(value) => config.resynthesis.harmony.voices = value,
+            Self::HarmonyGain(value) => config.resynthesis.harmony_gain = value,
+            Self::HarmonicModulation(value) => {
+                config.resynthesis.harmonic_modulation = value;
+            }
+            Self::DryMix(value) => config.resynthesis.dry_mix = value,
+            Self::ReverbMix(value) => config.reverb.mix = value,
+            Self::ReverbDiffusion(value) => config.reverb.diffusion = value,
+            Self::ReverbDecay(value) => config.reverb.decay = value,
+            Self::ReverbBrightnessHz(value) => config.reverb.brightness_hz = value,
+        }
+        Ok(())
+    }
 }
 
 /// A configuration or MIDI control that applies before a frame in the block.
@@ -188,11 +233,12 @@ pub enum ControlEvent {
     Midi(MidiEvent),
     /// This event changes the correction keyboard independently of harmony MIDI.
     ///
-    /// The held notes 0..=126 become pitch classes. Channels and nonzero
-    /// velocities do not change the selected classes. Key 127 is stored, but
-    /// the classes do not include it. Each event replaces the active
-    /// correction table. If a later change sets new configured notes, or
-    /// enables or disables correction, the configured mask loads again.
+    /// While at least one key in 0..=127 is held, the held keys become the
+    /// active pitch classes. Channels and nonzero velocities do not change the
+    /// selected classes. When all keys release, or on All Notes Off, the
+    /// configured mask loads again. If a later change sets new configured
+    /// notes, or enables or disables correction, the configured mask also
+    /// loads again.
     CorrectionMidi(MidiEvent),
     /// This event resets immediately before the event frame, with the semantics of
     /// [`crate::Processor::reset`].
@@ -281,7 +327,11 @@ impl<'a> ValidatedEvents<'a> {
     /// first invalid event. The offset bounds have priority over the order.
     /// The order has priority over the payload validation. The function gives
     /// no tokens unless the full slice passes.
-    pub(crate) fn new(events: &'a [TimedEvent], frames: usize) -> Result<Self, Error> {
+    pub(crate) fn new(
+        events: &'a [TimedEvent],
+        frames: usize,
+        mut config: ProcessorConfig,
+    ) -> Result<Self, Error> {
         let mut previous = 0;
         for (index, event) in events.iter().enumerate() {
             let problem = if event.offset >= frames {
@@ -289,7 +339,7 @@ impl<'a> ValidatedEvents<'a> {
             } else if event.offset < previous {
                 Some(EventProblem::OffsetDecreasing)
             } else {
-                match event.event.validate() {
+                match validate_in_sequence(event.event, &mut config) {
                     Ok(()) => None,
                     Err(Error::InvalidConfig { field, problem }) => {
                         Some(EventProblem::Config { field, problem })
@@ -318,5 +368,49 @@ impl<'a> ValidatedEvents<'a> {
         }
         self.remaining = remaining;
         Some(ValidatedEvent(event.event))
+    }
+}
+
+/// Validates one event and advances the stack configuration copy.
+fn validate_in_sequence(event: ControlEvent, config: &mut ProcessorConfig) -> Result<(), Error> {
+    match event {
+        ControlEvent::Configure(value) => {
+            value.validate()?;
+            *config = value;
+            Ok(())
+        }
+        ControlEvent::Resynthesis(value) => {
+            value.validate()?;
+            config.resynthesis = value;
+            Ok(())
+        }
+        ControlEvent::Punch(value) => {
+            value.validate()?;
+            config.punch = value;
+            Ok(())
+        }
+        ControlEvent::Warm(value) => {
+            value.validate()?;
+            config.warm = value;
+            Ok(())
+        }
+        ControlEvent::Alien(value) => {
+            value.validate()?;
+            config.alien = value;
+            Ok(())
+        }
+        ControlEvent::Reverb(value) => {
+            value.validate()?;
+            config.reverb = value;
+            Ok(())
+        }
+        ControlEvent::OutputGain(gain) => {
+            validate_output_gain(gain)?;
+            config.output_gain = gain;
+            Ok(())
+        }
+        ControlEvent::Parameter(parameter) => parameter.apply_to(config),
+        ControlEvent::Midi(midi) | ControlEvent::CorrectionMidi(midi) => midi.validate(),
+        ControlEvent::Reset => Ok(()),
     }
 }

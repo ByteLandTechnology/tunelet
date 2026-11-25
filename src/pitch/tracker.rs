@@ -17,6 +17,7 @@ use super::search::{tracking_minimum, TRACKING_LAGS};
 use crate::filter::{Biquad, Design};
 use crate::numeric::fixed::{Q14, Q6};
 use crate::numeric::{mul14, mul14_bounded, ring, HISTORY, ONE};
+use crate::resynthesis::history::{clear_dirty_ring, prepare_history, record_history};
 use crate::{PitchConfig, SampleRate};
 
 /// The result of one full-rate input sample.
@@ -115,10 +116,7 @@ impl PitchTracker {
         pre[1].set_design(Design::low_pass(rate.hz(), cutoff * 1.5, 0.707));
         Self {
             pre,
-            raw: vec![0; HISTORY]
-                .into_boxed_slice()
-                .try_into()
-                .expect("prepared pitch history length"),
+            raw: prepare_history(0),
             write: 0,
             detecting: true,
             first: true,
@@ -156,12 +154,7 @@ impl PitchTracker {
     /// The acquisition tables clear at the next decimated call. The previous
     /// usable period stays until another tracking update replaces it.
     pub(crate) fn reset(&mut self) {
-        let written = usize::from(self.written);
-        if written == HISTORY {
-            self.raw.fill(0);
-        } else {
-            self.raw[1..written + 1].fill(0);
-        }
+        clear_dirty_ring(self.raw.as_mut_slice(), usize::from(self.written), 0);
         self.written = 0;
         self.write = 0;
         self.restart();
@@ -470,9 +463,9 @@ impl PitchTracker {
         index = ring(self.write as i32 - period * 2);
         for lag in 1..TRACKING_LAGS {
             let first = self.raw[index];
-            index = if index == 0 { HISTORY - 1 } else { index - 1 };
+            index = previous_history(index);
             let second = self.raw[index];
-            index = if index == 0 { HISTORY - 1 } else { index - 1 };
+            index = previous_history(index);
             energy = energy.wrapping_add(
                 mul14_bounded(first, first).wrapping_add(mul14_bounded(second, second)),
             );
@@ -543,6 +536,12 @@ impl PitchTracker {
         cross
     }
 
+    /// Returns the cycle difference with 32-bit wrap at a lag slot.
+    #[inline]
+    fn tracking_difference(&self, lag: usize) -> i32 {
+        (self.tracking_energy[lag] >> 1).wrapping_sub(self.tracking_cross[lag])
+    }
+
     /// Increments the full-rate energy and cross windows when all reads are
     /// contiguous.
     /// The fixed array lengths encode 40 lag samples and 79 samples with a
@@ -580,14 +579,7 @@ impl PitchTracker {
     /// curvature is zero, acquisition starts again. The last usable period is
     /// not discarded.
     pub(crate) fn process_sample(&mut self, sample: i32) -> PitchStep {
-        self.write += 1;
-        if self.write == HISTORY {
-            self.write = 0;
-        }
-        if usize::from(self.written) < HISTORY {
-            self.written += 1;
-        }
-        self.raw[self.write] = sample;
+        record_history(&mut self.raw, &mut self.write, &mut self.written, sample);
         let mut filtered = Q14::from_bits(sample);
         for pre in &mut self.pre {
             filtered = pre.process_sample(filtered);
@@ -624,7 +616,7 @@ impl PitchTracker {
                 let current_sq = mul14_bounded(current, current);
                 for lag in 0..TRACKING_LAGS {
                     let middle = self.raw[first];
-                    first = if first == 0 { HISTORY - 1 } else { first - 1 };
+                    first = previous_history(first);
                     let delayed = self.raw[second];
                     second = if second < 2 {
                         second + HISTORY - 2
@@ -641,9 +633,7 @@ impl PitchTracker {
             self.tracking_counter += 1;
             if self.tracking_counter == 5 {
                 self.tracking_counter = 0;
-                let mut best = tracking_minimum(|lag| {
-                    (self.tracking_energy[lag] >> 1).wrapping_sub(self.tracking_cross[lag])
-                });
+                let mut best = tracking_minimum(|lag| self.tracking_difference(lag));
                 if best == TRACKING_LAGS - 1 || best == 0 || self.base + best as i32 <= 19 {
                     self.restart();
                     step.restarted = true;
@@ -681,12 +671,9 @@ impl PitchTracker {
                         }
                     }
                     if !self.detecting {
-                        let y0 = (self.tracking_energy[best - 1] >> 1)
-                            .wrapping_sub(self.tracking_cross[best - 1]);
-                        let y1 = (self.tracking_energy[best] >> 1)
-                            .wrapping_sub(self.tracking_cross[best]);
-                        let y2 = (self.tracking_energy[best + 1] >> 1)
-                            .wrapping_sub(self.tracking_cross[best + 1]);
+                        let y0 = self.tracking_difference(best - 1);
+                        let y1 = self.tracking_difference(best);
+                        let y2 = self.tracking_difference(best + 1);
                         let mut numerator = y0.wrapping_sub(y2) >> 1;
                         let mut denominator = y1.wrapping_mul(-2).wrapping_add(y0).wrapping_add(y2);
                         let abs = numerator.wrapping_abs();
@@ -717,5 +704,15 @@ impl PitchTracker {
         step.period = self.period;
         step.previous_period = self.previous_period;
         step
+    }
+}
+
+/// Returns the previous frame index in the `HISTORY` ring.
+#[inline]
+fn previous_history(index: usize) -> usize {
+    if index == 0 {
+        HISTORY - 1
+    } else {
+        index - 1
     }
 }

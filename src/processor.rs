@@ -8,7 +8,10 @@ use crate::events::{ValidatedEvent, ValidatedEvents};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
 use crate::resynthesis::{self, Resynthesis};
-use crate::{ControlEvent, Error, ParameterControl, PrepareConfig, ProcessorConfig, TimedEvent};
+use crate::{
+    ControlActivity, ControlEvent, Error, ParameterControl, PrepareConfig, ProcessorConfig,
+    TimedEvent,
+};
 
 /// Selects the output channel layout for the downmix and the peak meters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,6 +20,21 @@ pub(crate) enum OutputLayout {
     Stereo,
     /// Downmixes the two channels and measures mono peaks.
     Mono,
+}
+
+/// The formant state and query parameters for [`Processor::formant_envelope`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(all(feature = "wasm", target_arch = "wasm32")),
+    expect(dead_code, reason = "only WasmProcessor reads this cache key")
+)]
+pub(crate) struct EnvelopeKey {
+    /// The active flag, the bank epoch, the stamp fields and the Q14 width.
+    stamp: (bool, u64, u8, u8, u16, i32),
+    /// The IEEE 754 bits of the validated upper frequency in hertz.
+    max_frequency_bits: u32,
+    /// The validated number of frequency bins in each slice.
+    points: usize,
 }
 
 /// A prepared vocal processor with state, mono input and stereo synthesis.
@@ -328,6 +346,16 @@ impl Processor {
         self.config
     }
 
+    /// Returns which choir, harmony and reverb controls change the audio in
+    /// the current configuration.
+    ///
+    /// A `false` flag means that the related control makes no sample change in
+    /// the active voice mode, harmony source or reverb network. This method
+    /// does not allocate memory and does not change state.
+    pub fn control_activity(&self) -> ControlActivity {
+        self.config.control_activity()
+    }
+
     /// Returns the nominal resynthesis latency: 1,593 frames at both rates.
     ///
     /// The dry path also has a delay of 1,593 frames. Resampled voices, choir
@@ -447,7 +475,21 @@ impl Processor {
         input: &mut [f32],
         output: &mut [f32],
     ) -> Result<bool, Error> {
-        Error::check_length(input.len(), output.len())?;
+        self.check_envelope(max_frequency_hz, input.len(), output.len())?;
+        Ok(self
+            .resynthesis
+            .formant_envelope(max_frequency_hz, input, output))
+    }
+
+    /// Checks the slice lengths and the upper frequency for the formant
+    /// envelopes.
+    fn check_envelope(
+        &self,
+        max_frequency_hz: f32,
+        input_len: usize,
+        output_len: usize,
+    ) -> Result<(), Error> {
+        Error::check_length(input_len, output_len)?;
         let nyquist = self.preparation.sample_rate.hz() / 2.0;
         if !max_frequency_hz.is_finite() || max_frequency_hz <= 0.0 || max_frequency_hz > nyquist {
             return Err(Error::InvalidFrequency {
@@ -455,9 +497,27 @@ impl Processor {
                 max_hz: nyquist,
             });
         }
-        Ok(self
-            .resynthesis
-            .formant_envelope(max_frequency_hz, input, output))
+        Ok(())
+    }
+
+    /// Validates the arguments and returns the cache key for the current
+    /// formant envelope.
+    #[cfg_attr(
+        not(all(feature = "wasm", target_arch = "wasm32")),
+        expect(dead_code, reason = "only WasmProcessor calls this helper")
+    )]
+    pub(crate) fn envelope_key(
+        &self,
+        max_frequency_hz: f32,
+        points: usize,
+        output_len: usize,
+    ) -> Result<EnvelopeKey, Error> {
+        self.check_envelope(max_frequency_hz, points, output_len)?;
+        Ok(EnvelopeKey {
+            stamp: self.resynthesis.envelope_stamp(),
+            max_frequency_bits: max_frequency_hz.to_bits(),
+            points,
+        })
     }
 
     /// Validates all configuration fields and applies them.
@@ -520,12 +580,12 @@ impl Processor {
     /// This method cancels an active drain. It also clears the correction
     /// ratio, the Punch envelopes, the Warm filters, the Alien recording and
     /// the reverb delays. It releases the harmony MIDI notes and, in
-    /// MIDI-chord mode, the chord voices. It keeps these items:
+    /// MIDI-chord mode, the chord voices. It releases correction keys 0..=127
+    /// and loads the configured correction notes again. It keeps these items:
     ///
     /// - the configuration
     /// - the random stream and the arctangent lookup position of Punch
     /// - the reverb low-pass memories and the reverb write position
-    /// - correction key 127 and the active correction note table
     /// - the last usable period of the pitch tracker, which fills unvoiced
     ///   gaps
     /// - the harmony gain envelopes and the last voice ratios of the harmony
@@ -535,8 +595,7 @@ impl Processor {
     /// - the control-step counter of Choir and Harmony
     /// - the phase of the harmonic modulation.
     ///
-    /// When the method clears the held keys, it does not load the configured
-    /// scale again. For a fully new state, make a new processor.
+    /// For a fully new state, make a new processor.
     pub fn reset(&mut self) {
         self.punch.reset();
         self.warm.reset();
@@ -567,7 +626,7 @@ impl Processor {
         events: &'a [TimedEvent],
     ) -> Result<ValidatedEvents<'a>, Error> {
         self.check_block(frames)?;
-        ValidatedEvents::new(events, frames)
+        ValidatedEvents::new(events, frames, self.config)
     }
 
     /// Enforces the prepared block limit for each call.

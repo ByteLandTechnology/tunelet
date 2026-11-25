@@ -15,17 +15,9 @@ const LANES: usize = 4;
 /// the same value for an index, independent of the order of comparisons.
 #[inline]
 pub(super) fn tracking_minimum(value_at: impl Fn(usize) -> i32) -> usize {
-    let first = value_at(0);
-    let mut minima = [first; LANES];
+    let mut minima = [i32::MAX; LANES];
     let mut indices = [0; LANES];
-    for lane in 1..LANES {
-        let value = value_at(lane);
-        if minima[lane] > value {
-            minima[lane] = value;
-            indices[lane] = lane;
-        }
-    }
-    for group in 1..TRACKING_LAGS / LANES {
+    for group in 0..TRACKING_LAGS / LANES {
         for lane in 0..LANES {
             let index = group * LANES + lane;
             let value = value_at(index);
