@@ -847,6 +847,19 @@ impl Resynthesis {
     pub(crate) fn formant_generation(&self) -> u32 {
         self.formant.generation()
     }
+    /// Returns the formant state that selects the current envelope response.
+    pub(crate) fn envelope_stamp(&self) -> (bool, u64, u8, u8, u16, i32) {
+        let (bank_epoch, current, previous, blend, width) =
+            self.formant.envelope_stamp(self.formant_position);
+        (
+            self.config.formant.enabled,
+            bank_epoch,
+            current,
+            previous,
+            blend,
+            width,
+        )
+    }
     /// Writes the formant envelopes of the model that the audio used for the
     /// last frame. Refer to `Formant::envelope`.
     ///
