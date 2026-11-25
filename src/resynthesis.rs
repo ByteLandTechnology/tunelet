@@ -35,7 +35,7 @@ use crate::formant::{Formant, FormantConfig, ANALYSIS_FRAMES};
 use crate::harmony::{HarmonyConfig, HarmonyState, HARMONY_VOICES};
 use crate::midi::MidiEvent;
 use crate::numeric::fixed::{Q12, Q14, Q6, Q8};
-use crate::numeric::{clamp_i32, ring, NumericContext, HISTORY};
+use crate::numeric::{clamp_i32, quadratic, ring, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
@@ -1361,9 +1361,7 @@ impl Resynthesis {
             let left = self.cosine[(index + 127) % 128];
             let middle = self.cosine[index];
             let right = self.cosine[(index + 1) % 128];
-            let cosine = middle
-                + ((((left + right) >> 1) - middle).mul::<14, 14>(frac) + ((right - left) >> 1))
-                    .mul(frac);
+            let cosine = quadratic(left, middle, right, frac);
             for sum in &mut mix {
                 *sum = sum.mul(cosine);
             }
