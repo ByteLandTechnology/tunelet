@@ -23,6 +23,17 @@ use std::ops::{Add, Neg, Shl, Shr, Sub};
 #[repr(transparent)]
 pub(crate) struct Fixed<const FRAC: u32>(i32);
 
+/// The format with 30 fractional bits, for per-sample envelope coefficients.
+pub(crate) type Q30 = Fixed<30>;
+/// The format with 28 fractional bits, for envelopes, gains and output
+/// ceilings.
+pub(crate) type Q28 = Fixed<28>;
+/// The format with 24 fractional bits, for saturation drive and envelope
+/// ratios.
+pub(crate) type Q24 = Fixed<24>;
+/// The format with 22 fractional bits, for normalization gains and saturator
+/// inputs.
+pub(crate) type Q22 = Fixed<22>;
 /// The format with 14 fractional bits, for audio, ratios, coefficients and
 /// frame positions.
 ///
