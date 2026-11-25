@@ -12,7 +12,7 @@ cd "$repo_root"
 
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
-cargo doc --locked --no-deps
+RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
 
 if [ -d pkg ] && [ -d node_modules ]; then
     ./node_modules/.bin/tsc --noEmit

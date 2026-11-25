@@ -46,6 +46,15 @@ END {
     }
 
     header_re = "^(build|chore|ci|deps|docs|feat|fix|perf|refactor|revert|style|test)(\\([a-z0-9][a-z0-9._/-]*\\))?!?: [^ \t](.*[^ \t])?$"
+    merge_re = "^Merge ((remote-tracking )?branch(es)? |tag(s)? |commit(s)? |pull request #[0-9]+ from )[^ \t].*$"
+    revert_re = "^(Revert|Reapply) \".+\"$"
+    hex7_re = "[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]+"
+    revert_line_re = "^This reverts commit " hex7_re "\\.$"
+    revert_merge1_re = "^This reverts commit " hex7_re ", reversing$"
+    revert_merge2_re = "^changes made to " hex7_re "\\.$"
+
+    is_git_merge = (lines[1] ~ merge_re)
+    is_git_revert = (lines[1] ~ revert_re)
 
     for (i = 1; i <= count; i++) {
         line = lines[i]
@@ -53,7 +62,7 @@ END {
         low = tolower(line)
         bad_meta = 0
 
-        if (length(line) > 72) {
+        if (length(line) > 72 && !(i == 1 && (is_git_merge || is_git_revert))) {
             fail(ln, "keep each line at or below 72 columns (found " length(line) ").")
         }
 
@@ -66,13 +75,16 @@ END {
             bad_meta = 1
         }
 
-        if (low ~ /https?:\/\// || low ~ /(^|[^a-z])session([ \t]+(link|url|id))?[ \t]*:/) {
-            fail(ln, "do not add session links or URLs.")
+        if (low ~ /(^|[^a-z0-9])session([ \t-]+(link|url|id))?[ \t]*:/ ||
+            low ~ /https?:\/\/([a-z0-9-]+\.)*(claude\.ai|chatgpt\.com|chat\.openai\.com|ampcode\.com|devin\.ai|cursor\.(com|sh)|(jules|aistudio|gemini)\.google(\.com)?|stitch\.withgoogle(\.com)?|copilot-workspace\.githubnext\.com)([^a-z0-9-]|$)/ ||
+            low ~ /https?:\/\/([a-z0-9-]+\.)*github\.com\/copilot([\/?#.]|$)/ ||
+            low ~ /https?:\/\/[^ \t]*(\/(sessions?|chats?|conversations?)([\/?#.]|$)|session([_=-][a-z0-9]|[-_]?id[=:/]))/) {
+            fail(ln, "do not add agent session links.")
             bad_meta = 1
         }
 
         if (i == 1) {
-            if (line !~ header_re) {
+            if (line !~ header_re && !is_git_merge && !is_git_revert) {
                 fail(ln, "use a Conventional Commits header: type(scope): summary or type: summary.")
             }
         } else if (i == 2) {
@@ -85,8 +97,16 @@ END {
             }
         } else {
             if (line ~ /^[ \t]*$/) {
-                fail(ln, "remove extra blank lines.")
+                if (!(is_git_revert && line == "" && i < count &&
+                    (lines[i - 1] ~ revert_line_re || (i == 5 && lines[3] ~ revert_merge1_re && lines[4] ~ revert_merge2_re)))) {
+                    fail(ln, "remove extra blank lines.")
+                }
             } else if (!bad_meta) {
+                if (is_git_revert && (line ~ revert_line_re ||
+                    (i == 3 && count >= 4 && line ~ revert_merge1_re && lines[4] ~ revert_merge2_re) ||
+                    (i == 4 && lines[3] ~ revert_merge1_re && line ~ revert_merge2_re))) {
+                    continue
+                }
                 if (line !~ /^- [^ \t]/) {
                     fail(ln, "start each body line with \"- \" and do not continue lines.")
                 } else if (line ~ /[ \t]$/) {
