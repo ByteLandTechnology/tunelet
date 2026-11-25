@@ -69,6 +69,6 @@
   <text class="warntext" x="570" y="222">cancels the drain</text>
 
   <path class="wire" d="M770,224 V276 H370 V226" marker-end="url(#arrow)"/>
-  <text class="label" x="570" y="268">after the budget, the next non-empty call returns 0 and calls <tspan class="code">reset()</tspan></text>
+  <text class="label" x="570" y="252"><tspan x="570">after the budget, the next non-empty call</tspan><tspan x="570" dy="16">returns 0 and calls <tspan class="code">reset()</tspan></tspan></text>
   <text class="item" x="570" y="294">later drain calls return 0</text>
 </svg>
