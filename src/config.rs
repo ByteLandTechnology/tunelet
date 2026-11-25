@@ -2,9 +2,11 @@
 
 use crate::effects::alien::AlienConfig;
 use crate::effects::punch::PunchConfig;
-use crate::effects::reverb::ReverbConfig;
+use crate::effects::reverb::{ReverbConfig, ReverbMode};
 use crate::effects::warm::WarmConfig;
 use crate::error::{check_range, ConfigProblem};
+use crate::harmony::HarmonySource;
+use crate::resynthesis::MultiVoiceMode;
 use crate::Error;
 use crate::ResynthesisConfig;
 use std::num::NonZeroUsize;
@@ -171,11 +173,14 @@ pub struct ProcessorConfig {
     /// The default is 1. The dry weight is `1 - mix` in Q14. The dry path
     /// reads the raw mono input before Punch, with a delay of 1,593 frames. All
     /// internal stages continue to advance at all mix values. In JavaScript,
-    /// this field is optional and an absent value gives 1.
+    /// this field is optional and an absent or `undefined` value gives 1.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(default = "crate::wasm::default_mix"),
-        tsify(optional)
+        serde(
+            default = "crate::wasm::default_mix",
+            deserialize_with = "crate::wasm::deserialize_mix"
+        ),
+        tsify(optional, type = "number | undefined")
     )]
     pub mix: f32,
     /// Selects the 1,593-frame delayed raw input instead of the mixed output.
@@ -183,11 +188,11 @@ pub struct ProcessorConfig {
     /// The default is `false`. If `bypass` changes after construction, the
     /// processor crossfades over 200 frames in Q14 while all internal stages
     /// continue to advance. In JavaScript, this field is optional and an
-    /// absent value gives `false`.
+    /// absent or `undefined` value gives `false`.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(default),
-        tsify(optional)
+        serde(default, deserialize_with = "crate::wasm::deserialize_false"),
+        tsify(optional, type = "boolean | undefined")
     )]
     pub bypass: bool,
 }
@@ -232,6 +237,125 @@ impl ProcessorConfig {
         validate_output_gain(self.output_gain)?;
         validate_mix(self.mix)
     }
+
+    /// Returns which choir, harmony and reverb controls change the audio in
+    /// the active modes.
+    ///
+    /// A `false` flag means that the related control makes no sample change in
+    /// the active voice mode, harmony source or reverb network. This method
+    /// does not allocate memory and does not validate ranges.
+    pub fn control_activity(self) -> ControlActivity {
+        let choir = self.resynthesis.mode == MultiVoiceMode::Choir;
+        let multi_choir = choir && self.resynthesis.choir_voices > 1;
+        let harmony = self.resynthesis.mode == MultiVoiceMode::Harmony;
+        let source = self.resynthesis.harmony.source;
+        let interval = matches!(
+            source,
+            HarmonySource::FixedInterval | HarmonySource::SmartInterval
+        );
+        let interval_voices = self.resynthesis.harmony.voices > 0;
+        let named_or_degree = matches!(
+            source,
+            HarmonySource::ChordByDegree | HarmonySource::ChordByName
+        );
+        let chord = named_or_degree || source == HarmonySource::ChordViaMidi;
+        let reverb = self.reverb.enabled;
+        let reverb_mode = self.reverb.mode;
+        ControlActivity {
+            choir_voices: choir,
+            choir_detune: multi_choir,
+            choir_delay: multi_choir,
+            choir_spread_percent: multi_choir && self.resynthesis.stereo_output,
+            harmony_source: harmony,
+            harmony_key: harmony
+                && ((source == HarmonySource::SmartInterval && interval_voices) || named_or_degree),
+            harmony_scale: harmony
+                && ((source == HarmonySource::SmartInterval && interval_voices)
+                    || source == HarmonySource::ChordByDegree),
+            harmony_chromatic_intervals: harmony
+                && source == HarmonySource::FixedInterval
+                && interval_voices,
+            harmony_diatonic_intervals: harmony
+                && source == HarmonySource::SmartInterval
+                && interval_voices,
+            harmony_chord: harmony && source == HarmonySource::ChordByName,
+            harmony_degree: harmony && source == HarmonySource::ChordByDegree,
+            harmony_inversion: harmony && named_or_degree,
+            harmony_register_percent: harmony && chord,
+            harmony_voicing_spread_percent: harmony && chord,
+            harmony_portamento_ms: harmony && (!interval || interval_voices),
+            harmony_voices: harmony && interval,
+            harmony_gain: harmony && (!interval || interval_voices),
+            reverb_mode: reverb,
+            reverb_mix: reverb,
+            reverb_diffusion: reverb
+                && !matches!(reverb_mode, ReverbMode::Schroeder | ReverbMode::SmallRoom),
+            reverb_decay: reverb && reverb_mode != ReverbMode::Binaural,
+            reverb_brightness_hz: reverb
+                && !matches!(reverb_mode, ReverbMode::Echo | ReverbMode::Schroeder),
+        }
+    }
+}
+
+/// The flags that show which choir, harmony and reverb controls are active in
+/// a [`ProcessorConfig`].
+///
+/// Get this snapshot from [`ProcessorConfig::control_activity`] or
+/// [`crate::Processor::control_activity`]. A `false` flag means that the
+/// related control makes no sample change in the active voice mode, harmony
+/// source or reverb network. `Default` sets all flags to `false`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(rename_all = "camelCase")
+)]
+pub struct ControlActivity {
+    /// `true` if [`ResynthesisConfig::choir_voices`] is active.
+    pub choir_voices: bool,
+    /// `true` if [`ResynthesisConfig::choir_detune`] is active.
+    pub choir_detune: bool,
+    /// `true` if [`ResynthesisConfig::choir_delay`] is active.
+    pub choir_delay: bool,
+    /// `true` if [`ResynthesisConfig::choir_spread_percent`] is active.
+    pub choir_spread_percent: bool,
+    /// `true` if [`crate::HarmonyConfig::source`] is active.
+    pub harmony_source: bool,
+    /// `true` if [`crate::HarmonyConfig::key`] is active.
+    pub harmony_key: bool,
+    /// `true` if [`crate::HarmonyConfig::scale`] is active.
+    pub harmony_scale: bool,
+    /// `true` if [`crate::HarmonyConfig::chromatic_intervals`] is active.
+    pub harmony_chromatic_intervals: bool,
+    /// `true` if [`crate::HarmonyConfig::diatonic_intervals`] is active.
+    pub harmony_diatonic_intervals: bool,
+    /// `true` if [`crate::HarmonyConfig::chord`] is active.
+    pub harmony_chord: bool,
+    /// `true` if [`crate::HarmonyConfig::degree`] is active.
+    pub harmony_degree: bool,
+    /// `true` if [`crate::HarmonyConfig::inversion`] is active.
+    pub harmony_inversion: bool,
+    /// `true` if [`crate::HarmonyConfig::register_percent`] is active.
+    pub harmony_register_percent: bool,
+    /// `true` if [`crate::HarmonyConfig::voicing_spread_percent`] is active.
+    pub harmony_voicing_spread_percent: bool,
+    /// `true` if [`crate::HarmonyConfig::portamento_ms`] is active.
+    pub harmony_portamento_ms: bool,
+    /// `true` if [`crate::HarmonyConfig::voices`] is active.
+    pub harmony_voices: bool,
+    /// `true` if [`ResynthesisConfig::harmony_gain`] is active.
+    pub harmony_gain: bool,
+    /// `true` if [`ReverbConfig::mode`] is active.
+    pub reverb_mode: bool,
+    /// `true` if [`ReverbConfig::mix`] is active.
+    pub reverb_mix: bool,
+    /// `true` if [`ReverbConfig::diffusion`] is active.
+    pub reverb_diffusion: bool,
+    /// `true` if [`ReverbConfig::decay`] is active.
+    pub reverb_decay: bool,
+    /// `true` if [`ReverbConfig::brightness_hz`] is active.
+    pub reverb_brightness_hz: bool,
 }
 
 /// Checks the output gain range.

@@ -301,12 +301,18 @@ These calls read the state of the processor. They do not change the audio.
 
 | Call                 | Data                                                              |
 | -------------------- | ----------------------------------------------------------------- |
+| `control_activity()` | Which choir, harmony and reverb controls are active               |
 | `feedback()`         | The pitch, the output peak, the correction ratio, the frame count |
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
 | `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
+
+`Processor::control_activity()` and `ProcessorConfig::control_activity()`
+return a `ControlActivity` struct. A `false` flag means that the related
+control makes no sample change in the active voice mode, harmony source or
+reverb network.
 
 The telemetry includes these items:
 
@@ -343,6 +349,7 @@ allocate memory, acquire locks or do I/O:
 
 - Processing
 - Configuration
+- Control activity
 - MIDI
 - Feedback
 - Telemetry
@@ -389,22 +396,26 @@ and you can try again. A Node.js file error goes to the caller.
 For a custom asset location, give one of these sources to
 `loadTunelet(source)`:
 
-- A URL.
+- A URL or URL string.
 - A fetch Response.
 - A byte buffer.
 - A compiled `WebAssembly.Module`.
 - A promise for one of these.
 
-For a Node.js `file:` source, use a URL object. A string source obeys fetch
-rules. The first concurrent call selects the source. Later arguments do not
-replace an initialized module. A custom binary must match the generated
-bindings.
+In Node.js, `loadTunelet` reads `file:` `URL` objects and `"file:"` URL strings
+from disk. Other URLs and string sources obey fetch rules. The first concurrent
+call selects the source. Later arguments do not replace an initialized module.
+A custom binary must match the generated bindings.
 
 The package root also exports `loadTunelet` as its default export. For direct
 control of Wasm initialization, `tunelet/wasm` gives the generated default
-initializer and `initSync`. The package root re-exports `initSync` too. Use
-only one initialization entry point for each module instance. The package
-gives only ESM exports. CommonJS applications can use `await import("tunelet")`.
+initializer and `initSync`. The package root re-exports `initSync` too. The
+package exports the Wasm binary at `tunelet/pkg/tunelet_bg.wasm` and
+`tunelet/tunelet_bg.wasm`. Use only one initialization entry point for each
+module instance.
+
+The package gives only ESM exports. CommonJS applications can use
+`await import("tunelet")`.
 
 ### Deployment
 
@@ -426,6 +437,7 @@ page that opens the JavaScript.
 | Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
 | In-place mono downmix             | `processMono(audio, events?)`                            |
 | Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
+| Control activity                  | `controlActivity()`                                      |
 | Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
 | Feedback                          | `feedback()`, `takeFeedback()`                           |
 | Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
@@ -458,12 +470,12 @@ and show enums as string literals. To change the configuration, do these steps:
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. Optional `mix`, `punch.mix`, `warm.mix` and `alien.mix`
-default to 1 if they are absent. Optional `bypass` defaults to `false`, and
-optional `resynthesis.harmony.voices` defaults to 4. `defaultConfig()`
-returns an object that contains these optional fields with their defaults.
-The conversion ignores extra object properties. The generated declarations
-contain the parameter documentation from the Rust types.
+JavaScript `Error`. If an optional field is absent or `undefined`, `mix`,
+`punch.mix`, `warm.mix` and `alien.mix` default to 1. In the same case,
+`bypass` defaults to `false` and `resynthesis.harmony.voices` defaults to 4.
+`defaultConfig()` returns an object that contains these optional fields with
+their defaults. The conversion ignores extra object properties. The generated
+declarations contain the parameter documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
@@ -493,7 +505,9 @@ bindings.
 
 ### Feedback, telemetry and formant envelopes
 
-`telemetry()` and `takeTelemetry()` return a `Telemetry` object.
+`controlActivity()` returns a `ControlActivity` object with camelCase boolean
+flags for the choir, harmony and reverb controls. `telemetry()` and
+`takeTelemetry()` return a `Telemetry` object.
 
 In feedback, `targetMidiNote` is `undefined` in these cases, which are also
 the cases where `voiced` is `false`:
@@ -523,7 +537,7 @@ Wasm. These items can allocate:
 - Supplied events when a call gives more events than before, or when an event
   converts a stage configuration.
 - Errors.
-- Feedback and telemetry.
+- Control activity, feedback and telemetry.
 - The formant envelopes.
 
 The generated glue can also make temporary views. This binding is for general
@@ -551,8 +565,8 @@ these commands:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
-cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
+cargo clippy --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+cargo doc --locked --release --no-deps --target wasm32-unknown-unknown --features wasm
 ```
 
 Native Rust builds and these Wasm checks use Cargo and do not need Node.js
@@ -571,10 +585,11 @@ npm run check:wasm
 npm pack
 ```
 
-`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
-`npm pack` builds the Wasm bindings and the TypeScript entry point. Then it
-creates `tunelet-<version>.tgz`. To use this archive in a browser project or
-a Node.js project, install it with this command:
+`npm run check:wasm` runs Clippy and rustdoc in release mode for
+`wasm32-unknown-unknown`. `npm pack` builds the Wasm bindings and the
+TypeScript entry point. Then it creates `tunelet-<version>.tgz`. To use
+this archive in a browser project or a Node.js project, install it with
+this command:
 
 ```sh
 npm install /path/to/tunelet-<version>.tgz

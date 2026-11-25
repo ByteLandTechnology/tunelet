@@ -70,12 +70,15 @@ pub struct PunchConfig {
     ///
     /// The default is 1. The dry weight is `1 - mix` in Q14. If Punch is
     /// enabled, a zero mix still advances the peak hold, the envelopes and the
-    /// drive. In JavaScript, this field is optional and an absent value gives
-    /// 1.
+    /// drive. In JavaScript, this field is optional and an absent or
+    /// `undefined` value gives 1.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(default = "crate::wasm::default_mix"),
-        tsify(optional)
+        serde(
+            default = "crate::wasm::default_mix",
+            deserialize_with = "crate::wasm::deserialize_mix"
+        ),
+        tsify(optional, type = "number | undefined")
     )]
     pub mix: f32,
 }

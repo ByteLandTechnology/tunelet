@@ -33,11 +33,15 @@ pub struct WarmConfig {
     /// The default is 1. The dry weight is `1 - mix` in Q14. The 50 Hz
     /// high-pass filter applies only to the wet signal before the blend. If
     /// Warm is enabled, a zero mix still advances the envelope and the filter.
-    /// In JavaScript, this field is optional and an absent value gives 1.
+    /// In JavaScript, this field is optional and an absent or `undefined`
+    /// value gives 1.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(default = "crate::wasm::default_mix"),
-        tsify(optional)
+        serde(
+            default = "crate::wasm::default_mix",
+            deserialize_with = "crate::wasm::deserialize_mix"
+        ),
+        tsify(optional, type = "number | undefined")
     )]
     pub mix: f32,
 }
