@@ -1,4 +1,5 @@
-//! Audio histories on the heap and three-point parabolic interpolation.
+//! Audio histories on the heap, ring cursors and three-point parabolic
+//! interpolation.
 
 use crate::numeric::fixed::Q14;
 use crate::numeric::{quadratic, ring, HISTORY};
@@ -8,7 +9,7 @@ use crate::numeric::{quadratic, ring, HISTORY};
 ///
 /// The conversion from slice to array cannot fail, because the allocation
 /// gives the slice the necessary length.
-pub(super) fn prepare_history<T: Copy>(value: T) -> Box<[T; HISTORY]> {
+pub(crate) fn prepare_history<T: Copy>(value: T) -> Box<[T; HISTORY]> {
     // Allocate directly on the heap. The fixed history length is then part
     // of the type for index operations, and no large temporary array goes on
     // the stack.
@@ -16,6 +17,43 @@ pub(super) fn prepare_history<T: Copy>(value: T) -> Box<[T; HISTORY]> {
         .into_boxed_slice()
         .try_into()
         .unwrap_or_else(|_| unreachable!("prepared voice history length"))
+}
+
+/// Advances `write` in `0..HISTORY`, caps `written` at `HISTORY` and stores
+/// `sample`.
+///
+/// Returns the new `write` index. The first frame after construction or a
+/// reset writes at index 1.
+#[inline]
+pub(crate) fn record_history<T>(
+    buffer: &mut [T; HISTORY],
+    write: &mut usize,
+    written: &mut u16,
+    sample: T,
+) -> usize {
+    *write += 1;
+    if *write == HISTORY {
+        *write = 0;
+    }
+    if usize::from(*written) < HISTORY {
+        *written += 1;
+    }
+    buffer[*write] = sample;
+    *write
+}
+
+/// Fills the written span of a ring buffer that starts at index 1 with
+/// `value`.
+///
+/// If `written` is at least `buffer.len()`, the function fills the full
+/// slice. If `written` is zero, the function does nothing.
+#[inline]
+pub(crate) fn clear_dirty_ring<T: Copy>(buffer: &mut [T], written: usize, value: T) {
+    if written >= buffer.len() {
+        buffer.fill(value);
+    } else if written > 0 {
+        buffer[1..=written].fill(value);
+    }
 }
 
 /// Returns the previous, center and next positions in the ring buffer.

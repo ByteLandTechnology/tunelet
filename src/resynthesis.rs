@@ -28,7 +28,7 @@
 //! - The order in which stages read random values.
 //! - The order of the fixed-point arithmetic.
 
-mod history;
+pub(crate) mod history;
 
 use crate::error::{check_count, check_range};
 use crate::filter::{Biquad, Design};
@@ -41,7 +41,7 @@ use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
 use crate::{Error, SampleRate};
-use history::prepare_history;
+use history::{clear_dirty_ring, prepare_history, record_history};
 
 /// The method that resynthesis uses to render its voices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,10 +69,11 @@ pub enum MultiVoiceMode {
 /// empty or correction is disabled, the ratio moves toward 1.0 at the same
 /// rate.
 ///
-/// Correction MIDI replaces the active note table. It does not change this
-/// configuration. A change to `notes` or to `enabled` loads the configured
-/// mask again. Reset releases the correction keys 0..=126. It keeps key 127
-/// and the active note table. Key 127 has no effect on the note table.
+/// While at least one key in 0..=127 is held, correction MIDI replaces the
+/// active note table. It does not change this configuration. When all keys
+/// release, on All Notes Off or on reset, the configured `notes` load again.
+/// A change to `notes` or to `enabled` also loads the configured mask again.
+/// Reset releases the correction keys 0..=127.
 ///
 /// Construction loads the configured `notes` mask with the periods for the
 /// prepared sample rate. Later changes to `notes`, to `enabled` or from
@@ -94,8 +95,9 @@ pub struct CorrectionConfig {
     /// The configured target pitch classes. The default is
     /// [`NoteMask::CHROMATIC`].
     ///
-    /// All boolean masks are valid. MIDI can replace the active table. This
-    /// replacement stays until this mask or `enabled` changes.
+    /// All boolean masks are valid. Held keys from correction MIDI replace the
+    /// active table. When all keys release, or if this mask or `enabled`
+    /// changes, this mask loads again.
     pub notes: NoteMask,
     /// The half-life of the smoothing in milliseconds, 0..=400. The default
     /// is 0.
@@ -763,12 +765,13 @@ impl Resynthesis {
         self.configure_coefficients();
     }
 
-    /// Releases the correction keys 0..=126 and resets the audio state.
+    /// Releases the correction keys 0..=127, loads the configured correction
+    /// notes again and resets the audio state.
     ///
-    /// The active correction table, key 127 and the items that
-    /// `reset_audio` keeps do not change.
+    /// The items that `reset_audio` keeps do not change, except the correction
+    /// keyboard and the active note table.
     pub(crate) fn reset(&mut self) {
-        self.scale.reset();
+        self.scale.reset(self.config.correction.notes);
         self.reset_audio();
     }
 
@@ -788,39 +791,27 @@ impl Resynthesis {
         let written = usize::from(self.written);
         self.written = 0;
         self.pitch.reset();
-        if written == HISTORY {
-            self.raw.fill(Q14::ZERO);
-            self.filtered.fill(Q14::ZERO);
-            self.lead.fill(Q14::ZERO);
-            self.periods.fill(Q6::ZERO);
-            self.previous_periods.fill(Q6::ZERO);
-            self.ratios.fill(Q14::ONE);
-        } else if written > 0 {
-            let end = written + 1;
+        clear_dirty_ring(self.raw.as_mut_slice(), written, Q14::ZERO);
+        clear_dirty_ring(self.filtered.as_mut_slice(), written, Q14::ZERO);
+        clear_dirty_ring(self.lead.as_mut_slice(), written, Q14::ZERO);
+        if written > 0 {
             let lead_start = HISTORY - OVERLAP_FRAMES + 1;
-            self.raw[1..end].fill(Q14::ZERO);
-            self.filtered[1..end].fill(Q14::ZERO);
-            self.lead[1..end].fill(Q14::ZERO);
             if written < OVERLAP_FRAMES {
-                self.periods[1..end].fill(Q6::ZERO);
+                self.periods[1..=written].fill(Q6::ZERO);
                 self.periods[lead_start..lead_start + written].fill(Q6::ZERO);
             } else if written < HISTORY - OVERLAP_FRAMES {
-                self.periods[..end].fill(Q6::ZERO);
+                self.periods[..=written].fill(Q6::ZERO);
                 self.periods[lead_start..].fill(Q6::ZERO);
             } else {
                 self.periods.fill(Q6::ZERO);
             }
-            self.previous_periods[1..end].fill(Q6::ZERO);
-            self.ratios[1..end].fill(Q14::ONE);
         }
+        clear_dirty_ring(self.previous_periods.as_mut_slice(), written, Q6::ZERO);
+        clear_dirty_ring(self.ratios.as_mut_slice(), written, Q14::ONE);
         self.write = 0;
         self.formant.reset();
         self.harmony.reset();
-        if written >= OVERLAP_FRAMES {
-            self.overlap.fill(Q14::ZERO);
-        } else if written > 0 {
-            self.overlap[1..written + 1].fill(Q14::ZERO);
-        }
+        clear_dirty_ring(self.overlap.as_mut_slice(), written, Q14::ZERO);
         self.overlap_index = 0;
         self.previous_output = [Q14::ZERO; 2];
         for filter in &mut self.post {
@@ -868,7 +859,8 @@ impl Resynthesis {
     /// Applies a correction MIDI event that the API or the block code checked
     /// before.
     pub(crate) fn apply_correction_midi(&mut self, event: MidiEvent) {
-        self.scale.apply_validated_midi(event);
+        self.scale
+            .apply_validated_midi(event, self.config.correction.notes);
         self.scale_initialized = false;
     }
 
@@ -972,6 +964,19 @@ impl Resynthesis {
     /// Returns the wrapping count of formant model designs.
     pub(crate) fn formant_generation(&self) -> u32 {
         self.formant.generation()
+    }
+    /// Returns the formant state that selects the current envelope response.
+    pub(crate) fn envelope_stamp(&self) -> (bool, u64, u8, u8, u16, i32) {
+        let (bank_epoch, current, previous, blend, width) =
+            self.formant.envelope_stamp(self.formant_position);
+        (
+            self.config.formant.enabled,
+            bank_epoch,
+            current,
+            previous,
+            blend,
+            width,
+        )
     }
     /// Writes the formant envelopes of the model that the audio used for the
     /// last frame. Refer to `Formant::envelope`.
@@ -1343,17 +1348,9 @@ impl Resynthesis {
     /// tracking was active before this frame.
     pub(crate) fn process_sample(&mut self, input: i16, numeric: &mut NumericContext) -> [Q14; 2] {
         let sample = Q14::from_bits(i32::from(input) >> 1);
-        self.write += 1;
-        if self.write == HISTORY {
-            self.write = 0;
-        }
-        if usize::from(self.written) < HISTORY {
-            self.written += 1;
-        }
-        self.raw[self.write] = sample;
+        let write = record_history(&mut self.raw, &mut self.write, &mut self.written, sample);
         let was_tracking = !self.pitch.is_detecting();
         let step = self.pitch.process_sample(sample.to_bits());
-        let write = self.write;
         // Readers have signed fractional coordinates. When the writer wraps,
         // move the origin of these coordinates with it. Do not apply a modulo
         // to each fractional position. This keeps the distances that the jump
@@ -1475,6 +1472,7 @@ impl Resynthesis {
         let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
         let dry = self.raw[ring(write as i32 - LATENCY_FRAMES as i32)];
         let mut mix = [Q14::ZERO; 2];
+        let mut mono = stereo_fade == Q14::ZERO;
         let mut final_ratio = Q14::ONE;
         if self.config.mode == MultiVoiceMode::Choir {
             let voice_count = self.config.choir_voices as usize;
@@ -1483,9 +1481,13 @@ impl Resynthesis {
                 let (value, ratio) = self.render_lead(delayed, numeric);
                 final_ratio = ratio;
                 self.voice_ratios[0] = ratio;
-                let panned = apply_pan(value, self.pan[0], stereo_fade);
-                for (channel, sum) in mix.iter_mut().enumerate() {
-                    *sum = *sum + panned[channel];
+                if mono {
+                    mix[0] = mix[0] + value;
+                } else {
+                    let panned = apply_pan(value, self.pan[0], stereo_fade);
+                    for (channel, sum) in mix.iter_mut().enumerate() {
+                        *sum = *sum + panned[channel];
+                    }
                 }
             }
             {
@@ -1523,11 +1525,17 @@ impl Resynthesis {
                         *value = sample;
                     }
                     // Keep the voice and channel order of each sum.
-                    for (lane, value) in values.into_iter().enumerate() {
-                        let current_voice = voice + lane;
-                        let panned = apply_pan(value, self.pan[current_voice], stereo_fade);
-                        for (channel, sum) in mix.iter_mut().enumerate() {
-                            *sum = *sum + panned[channel];
+                    if mono {
+                        for value in values {
+                            mix[0] = mix[0] + value;
+                        }
+                    } else {
+                        for (lane, value) in values.into_iter().enumerate() {
+                            let current_voice = voice + lane;
+                            let panned = apply_pan(value, self.pan[current_voice], stereo_fade);
+                            for (channel, sum) in mix.iter_mut().enumerate() {
+                                *sum = *sum + panned[channel];
+                            }
                         }
                     }
                     voice += 4;
@@ -1549,9 +1557,13 @@ impl Resynthesis {
                         value = value.mul(fade) + old.mul(Q14::ONE - fade);
                         self.fades[voice] = (fade + FADE_STEP).min(Q14::ONE);
                     }
-                    let panned = apply_pan(value, self.pan[voice], stereo_fade);
-                    for (channel, sum) in mix.iter_mut().enumerate() {
-                        *sum = *sum + panned[channel];
+                    if mono {
+                        mix[0] = mix[0] + value;
+                    } else {
+                        let panned = apply_pan(value, self.pan[voice], stereo_fade);
+                        for (channel, sum) in mix.iter_mut().enumerate() {
+                            *sum = *sum + panned[channel];
+                        }
                     }
                 }
             }
@@ -1624,19 +1636,27 @@ impl Resynthesis {
                     raw_ready &= self.filtered_tap_ready(old_center, false);
                     lpc_ready &= self.filtered_tap_ready(old_center, true);
                 }
-                let panned = if slot > 0 {
-                    value = value.mul(self.harmony_gains[slot - 1]);
-                    apply_harmony_pan(
-                        value,
-                        self.harmony_gain,
-                        self.harmony_pan[slot - 1],
-                        stereo_fade,
-                    )
+                if mono {
+                    if slot > 0 {
+                        value = value.mul(self.harmony_gains[slot - 1]);
+                        value = value.mul(self.harmony_gain);
+                    }
+                    mix[0] = mix[0] + value;
                 } else {
-                    [value, value]
-                };
-                for (channel, sum) in mix.iter_mut().enumerate() {
-                    *sum = *sum + panned[channel];
+                    let panned = if slot > 0 {
+                        value = value.mul(self.harmony_gains[slot - 1]);
+                        apply_harmony_pan(
+                            value,
+                            self.harmony_gain,
+                            self.harmony_pan[slot - 1],
+                            stereo_fade,
+                        )
+                    } else {
+                        [value, value]
+                    };
+                    for (channel, sum) in mix.iter_mut().enumerate() {
+                        *sum = *sum + panned[channel];
+                    }
                 }
             }
             let steady_off = self.formant_fade == Q14::ZERO && raw_ready;
@@ -1644,17 +1664,40 @@ impl Resynthesis {
                 self.config.formant.enabled && self.formant_fade == Q14::ONE && lpc_ready;
             if steady_on {
                 self.formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
-                mix = self
-                    .formant
-                    .forward_stereo(mix.map(Q14::to_bits), self.formant_position, numeric)
-                    .map(Q14::from_bits);
-                for (channel, value) in mix.iter_mut().enumerate() {
-                    *value =
-                        Q14::from_bits(self.formant.model_glottal(
+                // If Choir changed only channel zero before a switch to
+                // Harmony, synthesize the two channels until their histories
+                // are equal.
+                if mono
+                    && self.formant.histories_match()
+                    && self.previous_output[0] == self.previous_output[1]
+                {
+                    let value = Q14::from_bits(self.formant.forward_mono(
+                        mix[0].to_bits(),
+                        self.formant_position,
+                        numeric,
+                    ));
+                    let value = Q14::from_bits(
+                        self.formant
+                            .model_glottal(value.to_bits(), self.previous_output[0].to_bits()),
+                    );
+                    self.previous_output = [value; 2];
+                    mix[0] = value;
+                } else {
+                    if mono {
+                        mix[1] = mix[0];
+                    }
+                    mix = self
+                        .formant
+                        .forward_stereo(mix.map(Q14::to_bits), self.formant_position, numeric)
+                        .map(Q14::from_bits);
+                    for (channel, value) in mix.iter_mut().enumerate() {
+                        *value = Q14::from_bits(self.formant.model_glottal(
                             value.to_bits(),
                             self.previous_output[channel].to_bits(),
                         ));
-                    self.previous_output[channel] = *value;
+                        self.previous_output[channel] = *value;
+                    }
+                    mono = mono && mix[0] == mix[1];
                 }
             } else if !steady_off {
                 let mut raw_mix = [Q14::ZERO; 2];
@@ -1668,19 +1711,27 @@ impl Resynthesis {
                         let old = self.interpolate_raw_filtered(self.old_positions[slot]);
                         value = value.mul(fade) + old.mul(Q14::ONE - fade);
                     }
-                    let panned = if slot > 0 {
-                        value = value.mul(self.harmony_gains[slot - 1]);
-                        apply_harmony_pan(
-                            value,
-                            self.harmony_gain,
-                            self.harmony_pan[slot - 1],
-                            stereo_fade,
-                        )
+                    if mono {
+                        if slot > 0 {
+                            value = value.mul(self.harmony_gains[slot - 1]);
+                            value = value.mul(self.harmony_gain);
+                        }
+                        raw_mix[0] = raw_mix[0] + value;
                     } else {
-                        [value, value]
-                    };
-                    for (channel, sum) in raw_mix.iter_mut().enumerate() {
-                        *sum = *sum + panned[channel];
+                        let panned = if slot > 0 {
+                            value = value.mul(self.harmony_gains[slot - 1]);
+                            apply_harmony_pan(
+                                value,
+                                self.harmony_gain,
+                                self.harmony_pan[slot - 1],
+                                stereo_fade,
+                            )
+                        } else {
+                            [value, value]
+                        };
+                        for (channel, sum) in raw_mix.iter_mut().enumerate() {
+                            *sum = *sum + panned[channel];
+                        }
                     }
                 }
                 if self.config.formant.enabled {
@@ -1697,18 +1748,41 @@ impl Resynthesis {
                 if lpc_ready && self.formant_fade > Q14::ZERO {
                     self.formant_position =
                         (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
-                    let mut lpc_mix = self
-                        .formant
-                        .forward_stereo(mix.map(Q14::to_bits), self.formant_position, numeric)
-                        .map(Q14::from_bits);
-                    for (channel, value) in lpc_mix.iter_mut().enumerate() {
-                        *value = Q14::from_bits(self.formant.model_glottal(
-                            value.to_bits(),
-                            self.previous_output[channel].to_bits(),
+                    if mono
+                        && self.formant.histories_match()
+                        && self.previous_output[0] == self.previous_output[1]
+                    {
+                        let value = Q14::from_bits(self.formant.forward_mono(
+                            mix[0].to_bits(),
+                            self.formant_position,
+                            numeric,
                         ));
-                        self.previous_output[channel] = *value;
-                        mix[channel] = raw_mix[channel].mul(Q14::ONE - self.formant_fade)
-                            + (*value).mul(self.formant_fade);
+                        let value = Q14::from_bits(
+                            self.formant
+                                .model_glottal(value.to_bits(), self.previous_output[0].to_bits()),
+                        );
+                        self.previous_output = [value; 2];
+                        mix[0] = raw_mix[0].mul(Q14::ONE - self.formant_fade)
+                            + value.mul(self.formant_fade);
+                    } else {
+                        if mono {
+                            mix[1] = mix[0];
+                            raw_mix[1] = raw_mix[0];
+                        }
+                        let mut lpc_mix = self
+                            .formant
+                            .forward_stereo(mix.map(Q14::to_bits), self.formant_position, numeric)
+                            .map(Q14::from_bits);
+                        for (channel, value) in lpc_mix.iter_mut().enumerate() {
+                            *value = Q14::from_bits(self.formant.model_glottal(
+                                value.to_bits(),
+                                self.previous_output[channel].to_bits(),
+                            ));
+                            self.previous_output[channel] = *value;
+                            mix[channel] = raw_mix[channel].mul(Q14::ONE - self.formant_fade)
+                                + (*value).mul(self.formant_fade);
+                        }
+                        mono = mono && mix[0] == mix[1];
                     }
                 } else {
                     mix = raw_mix;
@@ -1739,8 +1813,12 @@ impl Resynthesis {
             let middle = self.cosine[index];
             let right = self.cosine[(index + 1) % 128];
             let cosine = quadratic(left, middle, right, frac);
-            for sum in &mut mix {
-                *sum = sum.mul(cosine);
+            if mono {
+                mix[0] = mix[0].mul(cosine);
+            } else {
+                for sum in &mut mix {
+                    *sum = sum.mul(cosine);
+                }
             }
         }
         // The dry branch is the delayed raw input. It bypasses the shift
@@ -1750,9 +1828,14 @@ impl Resynthesis {
         let dry_mix = i64::from(self.dry_mix.to_bits());
         let wet = i64::from((Q8::ONE - self.dry_mix).to_bits());
         let dry = i64::from(dry.to_bits());
-        for sum in &mut mix {
-            let blended = (dry * dry_mix + i64::from(sum.to_bits()) * wet) >> 8;
-            *sum = Q14::from_bits(clamp_i32(blended));
+        if mono {
+            let blended = (dry * dry_mix + i64::from(mix[0].to_bits()) * wet) >> 8;
+            mix = [Q14::from_bits(clamp_i32(blended)); 2];
+        } else {
+            for sum in &mut mix {
+                let blended = (dry * dry_mix + i64::from(sum.to_bits()) * wet) >> 8;
+                *sum = Q14::from_bits(clamp_i32(blended));
+            }
         }
         mix
     }
