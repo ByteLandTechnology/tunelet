@@ -192,6 +192,7 @@ impl Default for ProcessorConfig {
 /// configuration to [`crate::Processor::new`] or
 /// [`crate::Processor::set_config`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),

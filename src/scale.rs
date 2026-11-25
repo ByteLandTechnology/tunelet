@@ -66,6 +66,7 @@ impl PitchClass {
 
 /// A scale for [`NoteMask::from_key_scale`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
