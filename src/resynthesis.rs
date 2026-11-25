@@ -699,6 +699,12 @@ impl Resynthesis {
         if old.mode != config.mode || old.choir_delay != config.choir_delay {
             self.create_delays();
         }
+        if old.mode != config.mode {
+            self.previous_output[1..].fill(Q14::ZERO);
+            for slot in 1..5 {
+                self.formant.bypass_voice(slot);
+            }
+        }
         if old.choir_voices < config.choir_voices {
             for voice in old.choir_voices as usize..config.choir_voices as usize {
                 self.positions[voice] = self.positions[0];
