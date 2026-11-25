@@ -1,6 +1,6 @@
 {
   "name": "tunelet",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Vocal pitch correction, choir, harmony, formant control and effects for WebAssembly",
   "license": "MIT",
   "repository": {
@@ -18,7 +18,9 @@
     "./wasm": {
       "types": "./pkg/tunelet.d.ts",
       "import": "./pkg/tunelet.js"
-    }
+    },
+    "./pkg/tunelet_bg.wasm": "./pkg/tunelet_bg.wasm",
+    "./tunelet_bg.wasm": "./pkg/tunelet_bg.wasm"
   },
   "files": [
     "dist",
@@ -29,9 +31,9 @@
   "sideEffects": false,
   "scripts": {
     "build": "npm run build:wasm && npm run build:ts",
-    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node --input-type=module -e \"import fs from 'node:fs'; fs.rmSync('pkg/.gitignore', { force: true })\"",
+    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node scripts/postbuild-wasm.mjs",
     "build:ts": "tsc",
-    "check:wasm": "cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings && cargo rustdoc --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings",
+    "check:wasm": "cargo clippy --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings && cargo rustdoc --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings",
     "prepack": "npm run build",
     "verify:pack": "node scripts/verify-pack.mjs"
   },
