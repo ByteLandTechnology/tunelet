@@ -95,10 +95,13 @@ cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
+cargo package --locked
 rustup target add wasm32-unknown-unknown
 cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
 ```
+
+If you run `cargo package --locked` before a commit, add `--allow-dirty`.
 
 If you change the Wasm or TypeScript code, also run these commands.
 `npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
