@@ -150,6 +150,7 @@ impl ParameterControl {
 /// replaces all settings of that stage. Configuration changes have the same
 /// effects on state as [`crate::Processor::set_config`].
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
