@@ -198,8 +198,15 @@ The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
 voices. The other voices release with the usual gain envelope. The chord
 and MIDI sources ignore this field.
 
-`resynthesis.harmony_gain` scales the four harmony voices in mono and in
-stereo. It does not scale the lead voice.
+`resynthesis.lead_gain` (`0..=1`, default `1`) scales the lead voice in
+`Harmony` mode. `resynthesis.harmony_gain` (`0..=1`, default `0.5`) sets the
+master gain of the four harmony voices in mono and in stereo. In
+`resynthesis.harmony`, `voice_gains` (`0..=1`), `voice_pans` (`-1..=1`, when
+`stereo_output` is `true`) and `voice_mutes` control the mix of each harmony
+voice. When `resynthesis.formant.enabled` is `true`, `voice_formant_stretch`
+and `voice_formant_width` (`0.5..=2`, default `[1, 1, 1, 1]`) shape an
+independent LPC synthesis filter for each harmony voice before the stereo pan
+sum.
 
 ## Process audio
 
@@ -451,10 +458,17 @@ and show enums as string literals. To change the configuration, do these steps:
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+JavaScript `Error`. These optional fields use defaults if they are absent:
+
+- `resynthesis.leadGain` defaults to `1`.
+- `resynthesis.harmony.voices` defaults to `4`.
+- `resynthesis.harmony.voiceGains`, `voiceFormantStretch` and
+  `voiceFormantWidth` default to `[1, 1, 1, 1]`.
+- `resynthesis.harmony.voicePans` defaults to `[-1/3, 1/3, -1, 1]`.
+- `resynthesis.harmony.voiceMutes` defaults to `[false, false, false, false]`.
+
+The conversion ignores extra object properties. The generated declarations
+contain the parameter documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use

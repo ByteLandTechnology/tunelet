@@ -5,21 +5,24 @@
 //! frames, the analysis makes a 50th-order predictor from a segment that is
 //! aligned to the pitch. If no pitch is available, the segment is
 //! approximately 10 ms. The correlations are normalized, weighted and
-//! smoothed. Then they become reflection coefficients. If width or stretch
-//! is not 1, the code changes the reflection coefficients into tract areas.
-//! Then it changes these areas into a synthesis model.
+//! smoothed. Then they become reflection coefficients. For each voice bank
+//! whose width or stretch is not 1, the code changes the reflection
+//! coefficients into tract areas. Then it changes these areas into a
+//! synthesis model for that voice.
 //!
-//! Thirty model banks keep the history of the coefficients. Each audio frame
-//! stores a pair of banks and a blend. Thus, a fractional voice reader can
-//! find the model that applies to the audio that it reads again. The inverse
-//! filter has a delay of 441 frames. Resynthesis uses this delay to align
-//! each source sample with the stamp of the frame that filtered it. Audio
-//! and coefficients use Q14 words. All areas use one common scale that the
-//! code sets at runtime. The order of the arithmetic and of the rescale
-//! operations changes the output samples.
+//! Thirty model banks keep the history of the coefficients for the lead voice
+//! and for the four harmony voices. Each audio frame stores a pair of banks
+//! and a blend. Thus, a fractional voice reader can find the model that
+//! applies to the audio that it reads again. The inverse filter has a delay
+//! of 441 frames. Resynthesis uses this delay to align each source sample
+//! with the stamp of the frame that filtered it. Audio and coefficients use
+//! Q14 words. All areas use one common scale that the code sets at runtime.
+//! The order of the arithmetic and of the rescale operations changes the
+//! output samples.
 
 use crate::error::check_range;
 use crate::filter::{Biquad, Design};
+use crate::harmony::HARMONY_VOICES;
 use crate::lpc;
 use crate::numeric::fixed::{Q14, Q6};
 use crate::numeric::{clamp_i32, db_to_gain, fast_sinc, mul14, round_q14, NumericContext};
@@ -119,6 +122,9 @@ const MAX_ORDER: usize = 110;
 /// The number of coefficient banks in the ring. The stamps of the audio
 /// history refer to these banks.
 const BANKS: usize = 30;
+/// The number of synthesis voice slots: the lead voice and the four harmony
+/// voices.
+const VOICE_BANKS: usize = HARMONY_VOICES + 1;
 
 /// The model selection for one frame of input history.
 ///
@@ -147,7 +153,7 @@ impl Default for Stamp {
 }
 
 /// The formant stage. It holds preallocated analysis memory, the model
-/// history and the synthesis state for two channels.
+/// histories and the synthesis state for five voices.
 #[derive(Debug)]
 pub(crate) struct Formant {
     /// The validated formant controls. The resynthesis caller decides if this
@@ -164,12 +170,12 @@ pub(crate) struct Formant {
     temporary: Vec<i32>,
     /// The Q14 coefficient banks for the inverse filter.
     inverse: Vec<[i32; ORDER]>,
-    /// The Q14 coefficient banks for the forward filter. `orders` holds the
-    /// active lengths.
-    models: Vec<[i32; MAX_ORDER]>,
-    /// The valid synthesis order for each bank. Zero means that there is no
-    /// feedback model.
-    orders: [usize; BANKS],
+    /// The Q14 coefficient banks for the five forward synthesis voices.
+    /// `orders` holds the active lengths.
+    models: Vec<[[i32; MAX_ORDER]; BANKS]>,
+    /// The valid synthesis order for each voice slot and bank. Zero means
+    /// that there is no feedback model.
+    orders: [[usize; BANKS]; VOICE_BANKS],
     /// One record of a bank pair and a blend for each frame of input history.
     stamps: Vec<Stamp>,
     /// The index of the current coefficient bank.
@@ -183,12 +189,13 @@ pub(crate) struct Formant {
     /// A counter that increases from a negative value to zero. At zero, the
     /// stage tries to make a model.
     design_counter: i32,
-    /// The separate Q14 feedback histories of the synthesis, for the left and
-    /// right channels. Mono synthesis uses channel zero.
-    history: [[i32; MAX_ORDER]; 2],
-    /// The next slot in the synthesis history. The two channels use the same
-    /// slot.
-    history_index: usize,
+    /// The separate Q14 feedback histories of the synthesis, for the lead
+    /// voice and the four harmony voices.
+    history: [[i32; MAX_ORDER]; VOICE_BANKS],
+    /// The next slot in the synthesis history of each voice.
+    history_index: [usize; VOICE_BANKS],
+    /// Marks each voice history that holds nonzero synthesis feedback.
+    history_dirty: [bool; VOICE_BANKS],
     /// The two previous normalized autocorrelation vectors for the moving
     /// average.
     correlation_history: [[i32; 111]; 2],
@@ -205,20 +212,21 @@ pub(crate) struct Formant {
     dirty: bool,
     /// The Q14 first-order coefficient for pre-emphasis and de-emphasis.
     glottal: i32,
-    /// The Q14 width control. The stage also uses it as the output gain of
-    /// the forward filter.
-    width: i32,
-    /// The Q14 square of the width, for the scale of the tract areas.
-    width_squared: i32,
-    /// The Q14 stretch control. The stage uses it to decide if a change to
-    /// the areas is necessary.
-    stretch: i32,
-    /// The number of active coefficients in the stretched model, not more
+    /// The Q14 width control of each voice. The stage also uses it as the
+    /// output gain of that forward filter.
+    width: [i32; VOICE_BANKS],
+    /// The Q14 square of the width of each voice, for the scale of the tract
+    /// areas.
+    width_squared: [i32; VOICE_BANKS],
+    /// The Q14 stretch control of each voice. The stage uses it to decide if
+    /// a change to the areas is necessary.
+    stretch: [i32; VOICE_BANKS],
+    /// The number of active coefficients in each stretched model, not more
     /// than MAX_ORDER.
-    stretch_count: usize,
-    /// The Q7 positions that map the stretched sections into the area model
-    /// with 50 sections.
-    stretch_map: [i32; MAX_ORDER],
+    stretch_count: [usize; VOICE_BANKS],
+    /// The Q7 positions that map the stretched sections of each voice into
+    /// the area model with 50 sections.
+    stretch_map: [[i32; MAX_ORDER]; VOICE_BANKS],
     /// The original tract areas, with the runtime scale that the LPC
     /// conversion returns.
     areas: [i32; MAX_ORDER],
@@ -263,7 +271,12 @@ impl Formant {
     /// At the supported rates, the capacity of the temporary segment holds
     /// the longest analysis segment and the predictor padding. Later calls
     /// use this memory again.
-    pub(crate) fn new(rate: SampleRate, config: FormantConfig) -> Self {
+    pub(crate) fn new(
+        rate: SampleRate,
+        config: FormantConfig,
+        voice_width: [f32; HARMONY_VOICES],
+        voice_stretch: [f32; HARMONY_VOICES],
+    ) -> Self {
         let d1 = -std::f64::consts::LN_2 / 0.9_f64.ln();
         let d2 = rate.hz() as f64 * d1 / 44100.0;
         let mut result = Self {
@@ -272,15 +285,16 @@ impl Formant {
             input: vec![0; HISTORY_FRAMES],
             temporary: vec![0_i32; (2 * (rate.as_u32() as usize / 40) + MAX_ORDER + 256).max(2865)],
             inverse: vec![[0; ORDER]; BANKS],
-            models: vec![[0; MAX_ORDER]; BANKS],
-            orders: [0; BANKS],
+            models: vec![[[0; MAX_ORDER]; BANKS]; VOICE_BANKS],
+            orders: [[0; BANKS]; VOICE_BANKS],
             stamps: vec![Stamp::default(); HISTORY_FRAMES],
             current: 1,
             previous: 0,
             blend: 0,
             design_counter: 0,
-            history: [[0; MAX_ORDER]; 2],
-            history_index: 0,
+            history: [[0; MAX_ORDER]; VOICE_BANKS],
+            history_index: [0; VOICE_BANKS],
+            history_dirty: [false; VOICE_BANKS],
             correlation_history: [[0; 111]; 2],
             correlation_sum: [0; 111],
             smooth_index: 0,
@@ -288,11 +302,11 @@ impl Formant {
             smooth_reset: true,
             dirty: false,
             glottal: (0.5_f64.powf(1.0 / d2) * 16384.0) as i32,
-            width: 16384,
-            width_squared: 16384,
-            stretch: 16384,
-            stretch_count: ORDER,
-            stretch_map: [0; MAX_ORDER],
+            width: [16384; VOICE_BANKS],
+            width_squared: [16384; VOICE_BANKS],
+            stretch: [16384; VOICE_BANKS],
+            stretch_count: [ORDER; VOICE_BANKS],
+            stretch_map: [[0; MAX_ORDER]; VOICE_BANKS],
             areas: [0; MAX_ORDER],
             stretched_areas: [0; MAX_ORDER],
             noise_filter: Biquad::new(),
@@ -300,27 +314,44 @@ impl Formant {
             noise_amplitude: 0_i32,
             generation: 0,
         };
-        result.set_config(config);
+        result.set_config(config, voice_width, voice_stretch);
         result
     }
-    /// Quantizes the validated controls, prepares the Q7 map for the area
+    /// Quantizes the width and the stretch for one synthesis voice slot and
+    /// builds its Q7 area map.
+    fn configure_voice_tract(&mut self, slot: usize, width: f64, stretch: f64) {
+        self.width[slot] = (width * 16384.0) as i32;
+        self.width_squared[slot] = (width * width * 16384.0) as i32;
+        self.stretch[slot] = (stretch * 16384.0) as i32;
+        let count = (((ORDER - 1) as f64 * stretch + 1.001) as usize).min(MAX_ORDER);
+        self.stretch_count[slot] = count;
+        for (i, entry) in self.stretch_map[slot][..count - 1].iter_mut().enumerate() {
+            let fraction = i as f64 / (count - 1) as f64;
+            *entry = ((ORDER - 1) as f64 * fraction * 128.0) as i32;
+        }
+        self.stretch_map[slot][count - 1] = ((ORDER - 1) * 128) as i32;
+    }
+    /// Quantizes the validated controls, prepares the Q7 maps for the area
     /// interpolation and updates the coefficients of the aspiration filter.
     ///
     /// The histories do not change. A valid stretch gives a model with 25 to
-    /// 99 entries. Thus, the last point of the map and the denominators of
+    /// 99 entries. Thus, the last point of each map and the denominators of
     /// the interpolation are always defined.
-    pub(crate) fn set_config(&mut self, config: FormantConfig) {
+    pub(crate) fn set_config(
+        &mut self,
+        config: FormantConfig,
+        voice_width: [f32; HARMONY_VOICES],
+        voice_stretch: [f32; HARMONY_VOICES],
+    ) {
         self.config = config;
-        self.width = (config.width as f64 * 16384.0) as i32;
-        self.width_squared = (config.width as f64 * config.width as f64 * 16384.0) as i32;
-        self.stretch = (config.stretch as f64 * 16384.0) as i32;
-        self.stretch_count =
-            (((ORDER - 1) as f64 * config.stretch as f64 + 1.001) as usize).min(MAX_ORDER);
-        for i in 0..self.stretch_count - 1 {
-            let fraction = i as f64 / (self.stretch_count - 1) as f64;
-            self.stretch_map[i] = ((ORDER - 1) as f64 * fraction * 128.0) as i32;
+        let lead_width = f64::from(config.width);
+        let lead_stretch = f64::from(config.stretch);
+        self.configure_voice_tract(0, lead_width, lead_stretch);
+        for voice in 0..HARMONY_VOICES {
+            let width = (lead_width * f64::from(voice_width[voice])).clamp(0.5, 2.0);
+            let stretch = (lead_stretch * f64::from(voice_stretch[voice])).clamp(0.5, 2.0);
+            self.configure_voice_tract(voice + 1, width, stretch);
         }
-        self.stretch_map[self.stretch_count - 1] = ((ORDER - 1) * 128) as i32;
         self.noise_gain = (config.aspiration_mix as f64 * 16384.0) as i32;
         let frequency = (config.aspiration_cutoff_hz as i32)
             .min((self.rate.hz() as f64 * 0.48) as i32)
@@ -329,8 +360,8 @@ impl Formant {
         self.noise_filter
             .set_design(Design::high_pass(self.rate.hz(), frequency as f32, 0.707));
     }
-    /// Clears the audio, the stamps, the synthesis history and the history of
-    /// the aspiration filter.
+    /// Clears the audio, the stamps, the synthesis histories and the history
+    /// of the aspiration filter.
     ///
     /// The function also selects and clears the initial bank pair, and starts
     /// the correlation smoothing again. The other banks stay allocated. The
@@ -343,8 +374,9 @@ impl Formant {
         self.input.fill(0_i32);
 
         self.stamps.fill(Stamp::default());
-        self.history = [[0; MAX_ORDER]; 2];
-        self.history_index = 0;
+        self.history = [[0; MAX_ORDER]; VOICE_BANKS];
+        self.history_index = [0; VOICE_BANKS];
+        self.history_dirty = [false; VOICE_BANKS];
         self.current = BANKS - 1;
         self.next_filter();
         self.next_filter();
@@ -410,9 +442,10 @@ impl Formant {
         }
         self.blend = 0;
         self.inverse[self.current].fill(0_i32);
-
-        self.models[self.current].fill(0_i32);
-        self.orders[self.current] = 0;
+        for slot in 0..VOICE_BANKS {
+            self.models[slot][self.current].fill(0_i32);
+            self.orders[slot][self.current] = 0;
+        }
     }
     /// Calculates the average of a maximum of two autocorrelation vectors. It
     /// does not allocate memory.
@@ -615,38 +648,60 @@ impl Formant {
             );
 
             if valid {
-                if self.width != one || self.stretch != one {
-                    if let Some(scale) = lpc::parcor_to_areas(&parcor[..ORDER], &mut self.areas) {
-                        for i in 0..self.stretch_count {
-                            let map = self.stretch_map[i];
+                let needs_areas = (0..VOICE_BANKS)
+                    .any(|slot| self.width[slot] != one || self.stretch[slot] != one);
+                let area_scale = if needs_areas {
+                    lpc::parcor_to_areas(&parcor[..ORDER], &mut self.areas)
+                } else {
+                    None
+                };
+                let mut voice_parcor = [0; MAX_ORDER];
+                for slot in 0..VOICE_BANKS {
+                    if self.width[slot] == one && self.stretch[slot] == one {
+                        self.models[slot][self.current][..ORDER]
+                            .copy_from_slice(&self.inverse[self.current]);
+                        self.orders[slot][self.current] = ORDER;
+                    } else if let Some(prev) = (0..slot).find(|&prev| {
+                        let count = self.stretch_count[slot];
+                        self.width_squared[prev] == self.width_squared[slot]
+                            && self.stretch[prev] == self.stretch[slot]
+                            && self.stretch_count[prev] == count
+                            && self.stretch_map[prev][..count] == self.stretch_map[slot][..count]
+                    }) {
+                        let order = self.orders[prev][self.current];
+                        let (head, tail) = self.models.split_at_mut(slot);
+                        tail[0][self.current][..order]
+                            .copy_from_slice(&head[prev][self.current][..order]);
+                        self.orders[slot][self.current] = order;
+                    } else if let Some(scale) = area_scale {
+                        let count = self.stretch_count[slot];
+                        for i in 0..count {
+                            let map = self.stretch_map[slot][i];
                             let index = map.wrapping_shr(7).min((ORDER - 2) as i32) as usize;
                             let fraction = map.wrapping_sub((index as i32) << 7).wrapping_shl(7);
                             self.stretched_areas[i] = mul14(
                                 mul14(one.wrapping_sub(fraction), self.areas[index])
                                     .wrapping_add(mul14(fraction, self.areas[index + 1])),
-                                self.width_squared,
+                                self.width_squared[slot],
                             );
                             if self.stretched_areas[i] == 0_i32 {
                                 self.stretched_areas[i] = 1;
                             }
                         }
                         if lpc::areas_to_parcor(
-                            &self.stretched_areas[..self.stretch_count],
-                            &mut parcor,
+                            &self.stretched_areas[..count],
+                            &mut voice_parcor,
                             scale,
                         ) {
                             lpc::parcor_to_pef(
-                                &parcor[..self.stretch_count],
-                                &mut self.models[self.current],
+                                &voice_parcor[..count],
+                                &mut self.models[slot][self.current],
                                 &mut scratch,
                                 14,
                             );
-                            self.orders[self.current] = self.stretch_count;
+                            self.orders[slot][self.current] = count;
                         }
                     }
-                } else {
-                    self.models[self.current][..ORDER].copy_from_slice(&self.inverse[self.current]);
-                    self.orders[self.current] = ORDER;
                 }
             } else {
                 self.smooth_reset = true;
@@ -708,35 +763,42 @@ impl Formant {
         mul14(sample, 16384_i32.saturating_sub(self.noise_gain))
             .saturating_add(mul14(noise, self.noise_gain))
     }
-    /// Finds the synthesis model of the stamp at a signed history frame.
+    /// Finds the synthesis model of `slot` at the stamp of a signed history
+    /// frame.
     ///
     /// If `stamp.blend` is 16384 or the previous bank has order zero, the
     /// function borrows the current bank. If not, the function returns `None`.
     /// Negative positions wrap in the ring.
     #[inline]
-    fn coefficients(&self, position: i32) -> Option<&[i32]> {
+    fn coefficients(&self, slot: usize, position: i32) -> Option<&[i32]> {
         let stamp = self.stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
         let current = usize::from(stamp.current);
         let previous = usize::from(stamp.previous);
-        if stamp.blend < 16384 && self.orders[previous] != 0 {
+        if stamp.blend < 16384 && self.orders[slot][previous] != 0 {
             None
         } else {
-            Some(&self.models[current][..self.orders[current]])
+            Some(&self.models[slot][current][..self.orders[slot][current]])
         }
     }
-    /// Blends the two synthesis banks at a signed history frame into `output`.
+    /// Blends the two synthesis banks of `slot` at a signed history frame
+    /// into `output`.
     ///
     /// Returns the active prefix of `output`. Negative positions wrap in the
     /// ring.
-    fn blend_coefficients<'a>(&self, position: i32, output: &'a mut [i32; MAX_ORDER]) -> &'a [i32] {
+    fn blend_coefficients<'a>(
+        &self,
+        slot: usize,
+        position: i32,
+        output: &'a mut [i32; MAX_ORDER],
+    ) -> &'a [i32] {
         let stamp = self.stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
         let current = usize::from(stamp.current);
         let previous = usize::from(stamp.previous);
         let blend = i32::from(stamp.blend);
-        let order = self.orders[current].max(self.orders[previous]);
+        let order = self.orders[slot][current].max(self.orders[slot][previous]);
         for (i, value) in output[..order].iter_mut().enumerate() {
-            *value = mul14(16384 - blend, self.models[previous][i])
-                .saturating_add(mul14(blend, self.models[current][i]));
+            *value = mul14(16384 - blend, self.models[slot][previous][i])
+                .saturating_add(mul14(blend, self.models[slot][current][i]));
         }
         &output[..order]
     }
@@ -783,11 +845,11 @@ impl Formant {
         output: &mut [f32],
     ) -> bool {
         let mut blended;
-        let synthesis = if let Some(slice) = self.coefficients(position) {
+        let synthesis = if let Some(slice) = self.coefficients(0, position) {
             slice
         } else {
             blended = [0; MAX_ORDER];
-            self.blend_coefficients(position, &mut blended)
+            self.blend_coefficients(0, position, &mut blended)
         };
         if synthesis.is_empty() {
             input.fill(0.0);
@@ -805,7 +867,7 @@ impl Formant {
             0.0
         };
         let glottal = self.glottal as f64 / 16384.0;
-        let width = self.width as f64 / 16384.0;
+        let width = self.width[0] as f64 / 16384.0;
         // |1 - sum(c[i] * z^-(i+1))| at z = e^(j * omega).
         let magnitude = |coefficients: &[i32], cosine: f64, sine: f64| {
             let (mut real, mut imaginary) = (1.0, 0.0);
@@ -841,63 +903,79 @@ impl Formant {
         context: &mut NumericContext,
     ) -> i32 {
         self.dirty = true;
+        self.history_dirty[0] = true;
         let sample = self.add_noise(sample, context);
         let mut blended;
-        let coefficients = if let Some(slice) = self.coefficients(position) {
+        let coefficients = if let Some(slice) = self.coefficients(0, position) {
             slice
         } else {
             blended = [0; MAX_ORDER];
-            self.blend_coefficients(position, &mut blended)
+            self.blend_coefficients(0, position, &mut blended)
         };
-        let sum = ring_sum(&self.history[0], self.history_index, coefficients);
+        let index = self.history_index[0];
+        let sum = ring_sum(&self.history[0], index, coefficients);
         let sample = sample.saturating_add(round_q14(sum));
-        self.history[0][self.history_index] = sample;
-        self.history_index += 1;
-        if self.history_index == MAX_ORDER {
-            self.history_index = 0;
-        }
-        round_q14(i64::from(sample) * i64::from(self.width))
+        self.history[0][index] = sample;
+        self.history_index[0] = if index + 1 == MAX_ORDER { 0 } else { index + 1 };
+        round_q14(i64::from(sample) * i64::from(self.width[0]))
     }
-    /// Synthesizes two Q14 channels with one stamped model for the two
-    /// channels. Each channel has its own feedback history.
+    /// Reads at most one random value for the current Harmony frame and
+    /// advances the aspiration filter one time.
     ///
-    /// The function applies the aspiration mix one time to the stereo
-    /// midpoint. Then it adds the change of the midpoint to the two channels.
-    /// If aspiration is active, the function reads one random value for each
-    /// frame. The history cursor is the same for the two channels. It
-    /// advances only after the two channels.
-    pub(crate) fn forward_stereo(
-        &mut self,
-        mut samples: [i32; 2],
-        position: i32,
-        context: &mut NumericContext,
-    ) -> [i32; 2] {
-        self.dirty = true;
-        let mid = ((i64::from(samples[0]) + i64::from(samples[1])) >> 1) as i32;
-        let noise = self.add_noise(mid, context).saturating_sub(mid);
-        for sample in &mut samples {
-            *sample = sample.saturating_add(noise);
+    /// If the aspiration level is 0.01 or less, the function returns `None`.
+    /// Then the random stream and the noise filter do not advance.
+    pub(crate) fn prepare_noise(&mut self, context: &mut NumericContext) -> Option<i32> {
+        if self.config.aspiration_mix <= 0.01 {
+            return None;
         }
+        self.dirty = true;
+        let random = (context.random.next_u31() >> 17) - 8192;
+        Some(
+            self.noise_filter
+                .process_sample(Q14::from_bits(random))
+                .to_bits(),
+        )
+    }
+    /// Clears the synthesis feedback history of a voice that enters silence or
+    /// mute.
+    pub(crate) fn bypass_voice(&mut self, slot: usize) {
+        if self.history_dirty[slot] {
+            self.history[slot].fill(0_i32);
+            self.history_index[slot] = 0;
+            self.history_dirty[slot] = false;
+        }
+    }
+    /// Synthesizes one Harmony voice slot with its stamped model, its own
+    /// feedback history and the shared aspiration sample of the frame.
+    pub(crate) fn forward_voice(
+        &mut self,
+        slot: usize,
+        sample: i32,
+        position: i32,
+        frame_noise: Option<i32>,
+    ) -> i32 {
+        self.dirty = true;
+        self.history_dirty[slot] = true;
+        let sample = if let Some(filtered_random) = frame_noise {
+            let modulated = mul14(filtered_random, sample);
+            let noise = clamp_i32(i64::from(mul14(self.noise_amplitude, modulated)) << 6);
+            mul14(sample, 16384_i32.saturating_sub(self.noise_gain))
+                .saturating_add(mul14(noise, self.noise_gain))
+        } else {
+            sample
+        };
         let mut blended;
-        let coefficients = if let Some(slice) = self.coefficients(position) {
+        let coefficients = if let Some(slice) = self.coefficients(slot, position) {
             slice
         } else {
             blended = [0; MAX_ORDER];
-            self.blend_coefficients(position, &mut blended)
+            self.blend_coefficients(slot, position, &mut blended)
         };
-        let sums = [
-            ring_sum(&self.history[0], self.history_index, coefficients),
-            ring_sum(&self.history[1], self.history_index, coefficients),
-        ];
-        for (channel, sample) in samples.iter_mut().enumerate() {
-            *sample = sample.saturating_add(round_q14(sums[channel]));
-            self.history[channel][self.history_index] = *sample;
-            *sample = round_q14(i64::from(*sample) * i64::from(self.width));
-        }
-        self.history_index += 1;
-        if self.history_index == MAX_ORDER {
-            self.history_index = 0;
-        }
-        samples
+        let index = self.history_index[slot];
+        let sum = ring_sum(&self.history[slot], index, coefficients);
+        let sample = sample.saturating_add(round_q14(sum));
+        self.history[slot][index] = sample;
+        self.history_index[slot] = if index + 1 == MAX_ORDER { 0 } else { index + 1 };
+        round_q14(i64::from(sample) * i64::from(self.width[slot]))
     }
 }
