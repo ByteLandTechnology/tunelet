@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.4](https://github.com/ByteLandTechnology/tunelet/compare/v0.3.3...v0.3.4) (2026-11-25)
+
+
+### Bug Fixes
+
+* **midi:** reset harmony on source change and fix correction keys ([#46](https://github.com/ByteLandTechnology/tunelet/issues/46)) ([7dea4b3](https://github.com/ByteLandTechnology/tunelet/commit/7dea4b366f13101571c271969076b86276c807b1))
+* **wasm:** sanitize TypeScript declarations and Wasm exports ([#123](https://github.com/ByteLandTechnology/tunelet/issues/123)) ([254ce7d](https://github.com/ByteLandTechnology/tunelet/commit/254ce7d9cbacfaa8eff770c653e3401a847a7847))
+
+
+### Performance Improvements
+
+* cache Warm reciprocals and accelerate AtanQ14 ([#113](https://github.com/ByteLandTechnology/tunelet/issues/113)) ([7ae0f23](https://github.com/ByteLandTechnology/tunelet/commit/7ae0f2332787399a6ae9870a6d07f210ee525922))
+* **formant:** fuse envelope rotations and cache Wasm results ([#30](https://github.com/ByteLandTechnology/tunelet/issues/30)) ([c815dd5](https://github.com/ByteLandTechnology/tunelet/commit/c815dd5dfb6d6aa41dd1df4e7dc7c7b2d7ed324b))
+* **resynthesis:** synthesize one channel when stereo is off ([#102](https://github.com/ByteLandTechnology/tunelet/issues/102)) ([4d52353](https://github.com/ByteLandTechnology/tunelet/commit/4d523534932d0d58f82a4d77a41d587b22bc0f4c))
+* **reverb:** use a fixed ring with inline taps ([#86](https://github.com/ByteLandTechnology/tunelet/issues/86)) ([c7b6224](https://github.com/ByteLandTechnology/tunelet/commit/c7b622480227fbf947c82f34e6bca8377c23aa8f))
+
 ## [0.3.3](https://github.com/ByteLandTechnology/tunelet/compare/v0.3.2...v0.3.3) (2026-11-25)
 
 
