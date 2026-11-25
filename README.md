@@ -177,7 +177,8 @@ limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
 multi-voice mixes.
 
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+dry path starts after Warm and has a delay of 1,593 frames. All six reverb
+modes keep the stereo dry signal.
 
 ### Harmony sources
 
@@ -227,8 +228,9 @@ Select the process function for your output layout:
 | Mono `f32` slice                     | `process_mono_in_place_f32` | `drain_mono_f32`      |
 
 The `f32` methods convert `NaN` input samples to `0`. They clamp other input
-values to `-1.0..=1.0`, multiply by `32767.0` and round to `i16`. They divide
-each `i16` output sample by `32768.0` and fill unused tail frames with `0.0`.
+values to `-1.0..=1.0`, multiply by `32767.0` in `f64` and round to `i16`. They
+divide each `i16` output sample by `32768.0` and fill unused tail frames with
+`0.0`.
 
 These rules apply to each call:
 
@@ -303,7 +305,7 @@ These calls read the state of the processor. They do not change the audio.
 
 | Call                 | Data                                                              |
 | -------------------- | ----------------------------------------------------------------- |
-| `feedback()`         | The pitch, the stereo peak, the correction ratio, the frame count |
+| `feedback()`         | The pitch, the output peak, the correction ratio, the frame count |
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
@@ -319,8 +321,9 @@ The telemetry includes these items:
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
 The peak windows of the telemetry are independent of the peak window of the
-feedback. The latency is nominal. Dry mixes, resampled voices and effects
-have different timing.
+feedback. In mono calls, the output and reverb wet peaks measure the audio
+after the downmix. The dry path has the 1,593-frame delay. Resampled voices,
+choir delays and effects use different delays.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
@@ -550,7 +553,8 @@ call with more points than before reserve memory.
 ### Memory allocation
 
 The constructor allocates reusable `i16` and `f32` buffers of length
-`maxBlockFrames`. `processF32InPlace`, `processMonoF32InPlace`,
+`maxBlockFrames`. The processor also keeps an event buffer and uses its
+capacity again across calls. `processF32InPlace`, `processMonoF32InPlace`,
 `drainF32InPlace` and `drainMonoF32InPlace` without `events` do not allocate
 Rust storage, make JavaScript views or call JavaScript imports. If Wasm memory
 does not grow, `TuneletAudioViews` also allocates no new `Float32Array` views
@@ -562,7 +566,8 @@ memory:
 
 - A new `Tunelet` instance.
 - Configuration conversion.
-- Supplied events.
+- Supplied events when a call gives more events than before, or when an event
+  converts a stage configuration.
 - Errors.
 - Feedback and telemetry.
 - Formant envelopes with more points than before.
@@ -574,14 +579,15 @@ functions.
 
 ### Rust crate
 
-To build the crate and check the format, the lints and the documentation,
-run these commands:
+To build the crate and check the format, the lints, the documentation and
+the archive, run these commands:
 
 ```sh
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 cargo doc --locked --no-deps
+cargo package --locked
 ```
 
 To check the `wasm` feature for `wasm32-unknown-unknown` with Cargo, run
