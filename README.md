@@ -472,10 +472,11 @@ and show enums as string literals. To change the configuration, do these steps:
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent or `undefined`. The conversion ignores extra object
-properties. The generated declarations contain the parameter documentation from
-the Rust types.
+JavaScript `Error`. The optional `resynthesis.pitch.vocalRange` field defaults
+to `"custom"` if it is absent or `undefined`. The optional
+`resynthesis.harmony.voices` field defaults to 4 if it is absent or
+`undefined`. The conversion ignores extra object properties. The generated
+declarations contain the parameter documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use

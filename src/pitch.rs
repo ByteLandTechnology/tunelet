@@ -19,6 +19,7 @@ use crate::{Error, SampleRate};
 /// `max_frequency_hz` from [`PitchConfig`]. Each other variant sets fixed
 /// inclusive bounds for pitch acquisition, tracking and feedback reports.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
@@ -51,7 +52,14 @@ pub struct PitchConfig {
     ///
     /// The default is [`VocalRange::Custom`]. If you select a named preset,
     /// its frequency bounds override `min_frequency_hz` and `max_frequency_hz`
-    /// for detection and reports. Validation still checks those two fields.
+    /// for detection and reports. Validation still checks those two fields. In
+    /// JavaScript, the field is optional and an absent or `undefined` value
+    /// gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default, deserialize_with = "deserialize_vocal_range"),
+        tsify(optional, type = "VocalRange | undefined")
+    )]
     pub vocal_range: VocalRange,
     /// The normalized cycle-difference threshold for acquisition, 0.002..=0.2.
     ///
@@ -75,6 +83,16 @@ pub struct PitchConfig {
     /// it. Pitches above the active range do not acquire or track, and
     /// feedback reports them as unvoiced.
     pub max_frequency_hz: f32,
+}
+
+/// Decodes an optional vocal range and maps an absent value to
+/// [`VocalRange::Custom`].
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn deserialize_vocal_range<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<VocalRange, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<VocalRange>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl Default for PitchConfig {
