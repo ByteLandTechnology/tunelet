@@ -1,15 +1,17 @@
 /**
  * This script builds the package one time and packs `tunelet` and
  * `@bytelandtechnology/tunelet`. For each archive, it checks the eight files,
- * `loadTunelet()` and the `NodeNext` TypeScript declarations.
+ * `loadTunelet()`, the HTTP Wasm loaders and the `NodeNext` TypeScript
+ * declarations.
  *
  * If you give `--out-dir <dir>`, the script writes both `.tgz` archives and
  * `SHA256SUMS.txt` to `<dir>` after all checks succeed.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -752,13 +754,235 @@ function verifyTypeDeclarations(consumerDir, packageName) {
 }
 
 /** Check the archive list, runtime imports and TypeScript declarations. */
-function verifyPackedArchive(workDir, relativeArchivePath, packageName) {
+async function verifyPackedArchive(workDir, relativeArchivePath, packageName) {
   const consumerDir = path.join(workDir, "consumer");
   fs.mkdirSync(consumerDir);
   verifyArchiveEntries(workDir, relativeArchivePath);
   installArchive(workDir, relativeArchivePath, consumerDir, packageName);
   verifyRuntimeImport(consumerDir, packageName);
+  await verifyHttpLoaders(consumerDir, packageName);
   verifyTypeDeclarations(consumerDir, packageName);
+}
+
+/** Run one isolated Node.js child process while the HTTP server is active. */
+function runNodeScript(scriptPath, args, cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [scriptPath, ...args], {
+      cwd,
+      stdio: "inherit",
+    });
+    child.on("error", reject);
+    child.on("exit", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(
+        new Error(
+          `Child process failed (${args.join(" ")}): code=${code} signal=${signal}`,
+        ),
+      );
+    });
+  });
+}
+
+/** Start a local HTTP server for `WebAssembly.instantiateStreaming`, MIME fallback and 404 checks. */
+function startWasmServer(wasmBytes) {
+  const requestCounts = new Map();
+  const server = http.createServer((req, res) => {
+    const route = req.url ?? "/";
+    requestCounts.set(route, (requestCounts.get(route) ?? 0) + 1);
+
+    if (route === "/tunelet.wasm") {
+      res.writeHead(200, { "Content-Type": "application/wasm" });
+      res.end(wasmBytes);
+      return;
+    }
+    if (route === "/octet-stream.wasm") {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(wasmBytes);
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Not Found");
+  });
+
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      assert.ok(address !== null && typeof address === "object");
+      resolve({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        requestCounts,
+        close() {
+          return new Promise((closeResolve, closeReject) => {
+            server.closeAllConnections();
+            server.close((error) => {
+              if (error) {
+                closeReject(error);
+                return;
+              }
+              closeResolve();
+            });
+          });
+        },
+      });
+    });
+  });
+}
+
+/** Check the HTTP Wasm loaders in isolated Node.js child processes. */
+async function verifyHttpLoaders(consumerDir, packageName) {
+  const installedDir = path.join(
+    consumerDir,
+    "node_modules",
+    ...packageName.split("/"),
+  );
+  const wasmBytes = fs.readFileSync(
+    path.join(installedDir, "pkg", "tunelet_bg.wasm"),
+  );
+  const checkHttpPath = path.join(consumerDir, "check-http.mjs");
+
+  fs.writeFileSync(
+    checkHttpPath,
+    [
+      'import assert from "node:assert/strict";',
+      "",
+      "const [packageName, mode, baseUrl] = process.argv.slice(2);",
+      "const rootModule = await import(packageName);",
+      "",
+      "function verifyPcmBlock(moduleNamespace) {",
+      "  const config = moduleNamespace.defaultConfig();",
+      "  const processor = new moduleNamespace.Tunelet(48000, 128, config);",
+      "  try {",
+      "    const input = new Int16Array(128);",
+      "    for (let i = 0; i < input.length; i += 1) {",
+      "      input[i] = ((i * 517) % 16384) - 8192;",
+      "    }",
+      "    const left = new Int16Array(128);",
+      "    const right = new Int16Array(128);",
+      "    processor.process(input, left, right);",
+      "    assert.equal(processor.feedback().processedFrames, 128n);",
+      "    const mono = Int16Array.from(input);",
+      "    processor.processMono(mono);",
+      "    assert.equal(processor.feedback().processedFrames, 256n);",
+      "  } finally {",
+      "    processor.free();",
+      "  }",
+      "}",
+      "",
+      'if (mode === "http-404-retry") {',
+      "  await assert.rejects(",
+      "    () => rootModule.loadTunelet(`${baseUrl}/missing.wasm`),",
+      "    /404/,",
+      "  );",
+      "  const wasmExports = await rootModule.loadTunelet(`${baseUrl}/tunelet.wasm`);",
+      "  assert.ok(wasmExports);",
+      "  const cachedExports = await rootModule.loadTunelet(`${baseUrl}/missing.wasm`);",
+      "  assert.equal(cachedExports, wasmExports);",
+      "  verifyPcmBlock(rootModule);",
+      '} else if (mode === "http-response-wasm") {',
+      "  const response = await fetch(`${baseUrl}/tunelet.wasm`);",
+      "  assert.equal(response.ok, true);",
+      '  assert.equal(response.headers.get("Content-Type"), "application/wasm");',
+      "  const originalStreaming = WebAssembly.instantiateStreaming;",
+      "  const originalInstantiate = WebAssembly.instantiate;",
+      "  const originalWarn = console.warn;",
+      "  let streamingCalls = 0;",
+      "  let instantiateCalls = 0;",
+      "  const warnings = [];",
+      "  WebAssembly.instantiateStreaming = async (...args) => {",
+      "    streamingCalls += 1;",
+      "    return originalStreaming.apply(WebAssembly, args);",
+      "  };",
+      "  WebAssembly.instantiate = async (...args) => {",
+      "    instantiateCalls += 1;",
+      "    return originalInstantiate.apply(WebAssembly, args);",
+      "  };",
+      "  console.warn = (...args) => {",
+      "    warnings.push(args);",
+      "  };",
+      "  try {",
+      "    const wasmExports = await rootModule.loadTunelet(response);",
+      "    assert.ok(wasmExports);",
+      "  } finally {",
+      "    WebAssembly.instantiateStreaming = originalStreaming;",
+      "    WebAssembly.instantiate = originalInstantiate;",
+      "    console.warn = originalWarn;",
+      "  }",
+      "  assert.equal(streamingCalls, 1);",
+      "  assert.equal(instantiateCalls, 0);",
+      "  assert.equal(warnings.length, 0);",
+      "  verifyPcmBlock(rootModule);",
+      '} else if (mode === "http-response-octet-stream") {',
+      "  const response = await fetch(`${baseUrl}/octet-stream.wasm`);",
+      "  assert.equal(response.ok, true);",
+      '  assert.equal(response.headers.get("Content-Type"), "application/octet-stream");',
+      "  const originalStreaming = WebAssembly.instantiateStreaming;",
+      "  const originalInstantiate = WebAssembly.instantiate;",
+      "  const originalWarn = console.warn;",
+      "  let streamingCalls = 0;",
+      "  let streamingRejected = false;",
+      "  let instantiateCalls = 0;",
+      "  const warnings = [];",
+      "  WebAssembly.instantiateStreaming = async (...args) => {",
+      "    streamingCalls += 1;",
+      "    try {",
+      "      return await originalStreaming.apply(WebAssembly, args);",
+      "    } catch (error) {",
+      "      streamingRejected = true;",
+      "      throw error;",
+      "    }",
+      "  };",
+      "  WebAssembly.instantiate = async (...args) => {",
+      "    instantiateCalls += 1;",
+      "    return originalInstantiate.apply(WebAssembly, args);",
+      "  };",
+      "  console.warn = (...args) => {",
+      "    warnings.push(args);",
+      "  };",
+      "  try {",
+      "    const wasmExports = await rootModule.loadTunelet(response);",
+      "    assert.ok(wasmExports);",
+      "  } finally {",
+      "    WebAssembly.instantiateStreaming = originalStreaming;",
+      "    WebAssembly.instantiate = originalInstantiate;",
+      "    console.warn = originalWarn;",
+      "  }",
+      "  assert.equal(streamingCalls, 1);",
+      "  assert.equal(streamingRejected, true);",
+      "  assert.equal(instantiateCalls, 1);",
+      "  assert.equal(warnings.length, 1);",
+      "  assert.match(String(warnings[0][0]), /application\\/wasm/);",
+      "  verifyPcmBlock(rootModule);",
+      "} else {",
+      "  throw new Error(`Unknown HTTP loader mode: ${mode}`);",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const server = await startWasmServer(wasmBytes);
+  try {
+    const modes = [
+      "http-404-retry",
+      "http-response-wasm",
+      "http-response-octet-stream",
+    ];
+    for (const mode of modes) {
+      await runNodeScript(
+        checkHttpPath,
+        [packageName, mode, server.baseUrl],
+        consumerDir,
+      );
+    }
+    assert.equal(server.requestCounts.get("/missing.wasm"), 1);
+    assert.equal(server.requestCounts.get("/tunelet.wasm"), 2);
+    assert.equal(server.requestCounts.get("/octet-stream.wasm"), 1);
+  } finally {
+    await server.close();
+  }
 }
 
 /** Copy both verified archives and write `SHA256SUMS.txt` in `outDir`. */
@@ -796,7 +1020,7 @@ try {
     unscopedPackDir,
     unscopedFileName,
   );
-  verifyPackedArchive(
+  await verifyPackedArchive(
     unscopedWorkDir,
     unscopedRelativeArchivePath,
     UNSCOPED_PACKAGE_NAME,
@@ -817,7 +1041,7 @@ try {
     scopedFileName,
     { ignoreScripts: true },
   );
-  verifyPackedArchive(
+  await verifyPackedArchive(
     scopedWorkDir,
     scopedRelativeArchivePath,
     SCOPED_PACKAGE_NAME,
