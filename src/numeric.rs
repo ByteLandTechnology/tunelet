@@ -34,12 +34,12 @@ pub(crate) fn mul_shift(a: i32, b: i32, shift: u32) -> i32 {
 /// `i32::MIN..=i32::MAX`. The shift moves negative values down.
 #[inline]
 pub(crate) fn round_q14(value: i64) -> i32 {
-    let rounded = if value >= 0 {
-        value.saturating_add(8192) >> 14
-    } else {
-        value.saturating_sub(8192) >> 14
-    };
-    clamp_i32(rounded)
+    const MIN_Q28: i64 = ((i32::MIN as i64) << 14) + 8192;
+    const MAX_Q28: i64 = (i32::MAX as i64) << 14;
+    let clamped = value.clamp(MIN_Q28, MAX_Q28);
+    let sign = clamped >> 63;
+    let bias = (8192 ^ sign) - sign;
+    ((clamped + bias) >> 14) as i32
 }
 
 /// Converts an amplitude in decibels to a linear multiplier with
