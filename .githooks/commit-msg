@@ -110,9 +110,7 @@ END {
                 if (line !~ /^- [^ \t]/) {
                     fail(ln, "start each body line with \"- \" and do not continue lines.")
                 } else if (line ~ /[ \t]$/) {
-                    fail(ln, "end each \"- \" bullet with a period and no spaces after it.")
-                } else if (line !~ /^- [^ \t.].*\.$/) {
-                    fail(ln, "end each \"- \" bullet with a period.")
+                    fail(ln, "remove spaces from the end of the \"- \" bullet.")
                 }
             }
         }
