@@ -811,6 +811,7 @@ pub struct Feedback {
 /// [`Processor::take_telemetry`]. This window is independent of the peak
 /// window of [`Feedback`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Deserialize, tsify::Tsify),
