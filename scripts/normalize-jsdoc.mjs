@@ -24,6 +24,9 @@ const EXACT_REPLACEMENTS = [
   ["[`Processor::take_telemetry`]", "`Tunelet.takeTelemetry`"],
   ["[`Processor::latency_frames`]", "`Tunelet.latencyFrames`"],
   ["[`Processor::formant_envelope`]", "`Tunelet.formantEnvelope`"],
+  ["[`Processor::process_planar_f32`]", "the native `f32` stereo method"],
+  ["[`Processor::process_mono_in_place_f32`]", "the native `f32` mono method"],
+  ["[`Processor`]", "the native processor"],
   ["[`Feedback::processed_frames`]", "`Feedback.processedFrames`"],
   ["[`Feedback::voiced`]", "`Feedback.voiced`"],
   [
@@ -121,15 +124,26 @@ function transformCommentText(input) {
   }
 
   text = text.replace(
-    / \(inclusive\),\s*(-?\d+(?:\.\d+)?)\.\.=(-?\d+(?:[./]\d+)?%?)/g,
+    /\bin\s+`([^`\n]+?)\.\.=([^`\n]+?)`/g,
+    "from `$1` to `$2` (inclusive)",
+  );
+  text = text.replace(
+    /`([^`\n]+?)\.\.=([^`\n]+?)`/g,
+    "`$1` to `$2` (inclusive)",
+  );
+
+  const bound =
+    "(?:-?\\d+(?:\\.\\d+)?(?:\\s*\\/\\s*\\d+)?%?|[A-Za-z_][A-Za-z0-9_]*)";
+  text = text.replace(
+    new RegExp(` \\(inclusive\\),\\s*(${bound})\\.\\.=(${bound})`, "g"),
     ", from $1 to $2 (inclusive)",
   );
   text = text.replace(
-    /\bin\s+(-?\d+(?:\.\d+)?)\.\.=(-?\d+(?:[./]\d+)?%?)/g,
+    new RegExp(`\\bin\\s+(${bound})\\.\\.=(${bound})`, "g"),
     "from $1 to $2 (inclusive)",
   );
   text = text.replace(
-    /(-?\d+(?:\.\d+)?)\.\.=(-?\d+(?:[./]\d+)?%?)/g,
+    new RegExp(`(${bound})\\.\\.=(${bound})`, "g"),
     "$1 to $2 (inclusive)",
   );
 
