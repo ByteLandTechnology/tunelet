@@ -215,23 +215,23 @@ impl Processor {
         })
     }
 
-    /// Processes mono floating-point audio into `[left, right]` stereo frames.
+    /// Processes mono `f32` audio into `[left, right]` stereo frames.
     ///
-    /// If an input sample is NaN, the method uses `0` for PCM. It clamps other
-    /// input values to `-1.0..=1.0`, multiplies by `32767.0` in `f64` and
-    /// rounds to the nearest `i16`. It divides each `i16` output sample by
-    /// `32768.0`, so output samples stay in
-    /// `-32767.0 / 32768.0..=32767.0 / 32768.0`.
+    /// For each input sample, `NaN` becomes `0`, and other values clamp to
+    /// `-1.0..=1.0`, multiply by `32767.0` and round to `-32767..=32767`. Each
+    /// clipped stereo `i16` sample then divides by `32768.0`, so each output
+    /// value is in `-32767.0 / 32768.0..=32767.0 / 32768.0`.
     ///
-    /// Frame counts, block limits, event rules and drain cancellation are the
-    /// same as for [`process`](Self::process).
+    /// The frame counts, the block limit, the events and the drain cancellation
+    /// obey the same rules as in [`process`](Self::process). If the call
+    /// succeeds, it writes all output frames.
     ///
     /// # Errors
     ///
     /// The call checks [`Error::BufferLength`] first and
     /// [`Error::BlockTooLarge`] second. Then it checks [`Error::InvalidEvent`]
-    /// for the first invalid event. All checks finish before the state or the
-    /// output changes.
+    /// for the first invalid event. The validation of the full event slice
+    /// finishes before the state or the output changes.
     pub fn process_f32(
         &mut self,
         input: &[f32],
@@ -241,17 +241,18 @@ impl Processor {
         Error::check_length(input.len(), output.len())?;
         self.process_into(input.len(), events, |processor, index| {
             output[index] = processor
-                .next(quantize_f32(input[index]), OutputLayout::Stereo)
-                .map(sample_to_f32);
+                .next(pcm_from_f32(input[index]), OutputLayout::Stereo)
+                .map(pcm_to_f32);
         })
     }
 
-    /// Processes mono floating-point audio into separate left and right slices.
+    /// Processes mono `f32` audio into separate left and right `f32` slices.
     ///
-    /// The three slices must have equal frame counts. Input quantization,
-    /// the output scale, event order and drain cancellation are the same as for
-    /// [`process_f32`](Self::process_f32). If the call succeeds, it writes all
-    /// output samples.
+    /// The three slices must have equal frame counts and fit in
+    /// [`PrepareConfig::max_block_frames`]. Input quantization, the output
+    /// range `-32767.0 / 32768.0..=32767.0 / 32768.0`, events and drain
+    /// cancellation are the same as in [`process_f32`](Self::process_f32). If
+    /// the call succeeds, it writes all output samples.
     ///
     /// # Errors
     ///
@@ -269,20 +270,21 @@ impl Processor {
         Error::check_length(input.len(), left.len())?;
         Error::check_length(input.len(), right.len())?;
         self.process_into(input.len(), events, |processor, index| {
-            let frame = processor.next(quantize_f32(input[index]), OutputLayout::Stereo);
-            left[index] = sample_to_f32(frame[0]);
-            right[index] = sample_to_f32(frame[1]);
+            let frame = processor.next(pcm_from_f32(input[index]), OutputLayout::Stereo);
+            left[index] = pcm_to_f32(frame[0]);
+            right[index] = pcm_to_f32(frame[1]);
         })
     }
 
-    /// Replaces mono floating-point audio with the scaled stereo downmix.
+    /// Replaces mono `f32` audio with the stereo result after the downmix.
     ///
-    /// Input quantization is the same as in [`process_f32`](Self::process_f32).
-    /// The method computes the integer downmix as in
-    /// [`process_mono_in_place`](Self::process_mono_in_place), then divides by
-    /// `32768.0`. Peak feedback and output telemetry measure the mono samples
-    /// after this downmix. Events and drain cancellation are the same as for
-    /// [`process`](Self::process).
+    /// The method quantizes each input sample before it writes over that
+    /// location, as in [`process_f32`](Self::process_f32). It divides the `i16`
+    /// downmix of [`process_mono_in_place`](Self::process_mono_in_place) by
+    /// `32768.0`, so each output sample is in
+    /// `-32767.0 / 32768.0..=32767.0 / 32768.0`. Peak feedback and output
+    /// telemetry measure the mono samples after this downmix. Events and drain
+    /// cancellation are the same as for [`process`](Self::process).
     ///
     /// # Errors
     ///
@@ -295,8 +297,8 @@ impl Processor {
         events: &[TimedEvent],
     ) -> Result<(), Error> {
         self.process_into(audio.len(), events, |processor, index| {
-            let output = processor.next(quantize_f32(audio[index]), OutputLayout::Mono);
-            audio[index] = sample_to_f32(output[0]);
+            let output = processor.next(pcm_from_f32(audio[index]), OutputLayout::Mono);
+            audio[index] = pcm_to_f32(output[0]);
         })
     }
 
@@ -385,9 +387,9 @@ impl Processor {
     /// Renders the next stereo tail frames as `f32` pairs and returns their
     /// count.
     ///
-    /// Call [`begin_drain`](Self::begin_drain) first. The method divides each
-    /// `i16` tail sample by `32768.0` and fills unused frames with `[0.0, 0.0]`.
-    /// Empty buffers, return values and completion are the same as for
+    /// Call [`begin_drain`](Self::begin_drain) first. Each rendered sample is
+    /// in `-32767.0 / 32768.0..=32767.0 / 32768.0`, and unused frames get
+    /// `0.0`. Return values, empty buffers and completion are the same as in
     /// [`drain`](Self::drain).
     ///
     /// # Errors
@@ -396,7 +398,7 @@ impl Processor {
     /// returns [`Error::BlockTooLarge`] and does not change state or output.
     pub fn drain_f32(&mut self, output: &mut [[f32; 2]]) -> Result<usize, Error> {
         let count = self.drain_into(output.len(), OutputLayout::Stereo, |index, frame| {
-            output[index] = frame.map(sample_to_f32);
+            output[index] = frame.map(pcm_to_f32);
         })?;
         output[count..].fill([0.0; 2]);
         Ok(count)
@@ -404,9 +406,9 @@ impl Processor {
 
     /// Renders the tail into separate `f32` output channels of equal size.
     ///
-    /// The output scale and the `0.0` values in unused samples are the same as
-    /// in [`drain_f32`](Self::drain_f32). Empty buffers, return values and
-    /// completion are the same as for [`drain`](Self::drain).
+    /// Each rendered sample is in `-32767.0 / 32768.0..=32767.0 / 32768.0`,
+    /// and unused samples get `0.0`. The return values, empty buffers and
+    /// completion are the same as in [`drain_planar`](Self::drain_planar).
     ///
     /// # Errors
     ///
@@ -420,21 +422,22 @@ impl Processor {
     ) -> Result<usize, Error> {
         Error::check_length(left.len(), right.len())?;
         let count = self.drain_into(left.len(), OutputLayout::Stereo, |index, frame| {
-            left[index] = sample_to_f32(frame[0]);
-            right[index] = sample_to_f32(frame[1]);
+            left[index] = pcm_to_f32(frame[0]);
+            right[index] = pcm_to_f32(frame[1]);
         })?;
         left[count..].fill(0.0);
         right[count..].fill(0.0);
         Ok(count)
     }
 
-    /// Renders the tail as mono `f32` audio and returns the rendered frame
-    /// count.
+    /// Renders the tail as mono `f32` audio and returns the number of rendered
+    /// frames.
     ///
-    /// The downmix, the peak measurements and the output scale are the same as
-    /// in [`process_mono_in_place_f32`](Self::process_mono_in_place_f32). The
-    /// method fills unused samples with `0.0`. Empty buffers, return values and
-    /// completion are the same as for [`drain_mono`](Self::drain_mono).
+    /// The downmix, the peak measurements and the `1 / 32768` output scale are
+    /// the same as in
+    /// [`process_mono_in_place_f32`](Self::process_mono_in_place_f32). Unused
+    /// samples get `0.0`. The return values, empty buffers and completion are
+    /// the same as in [`drain_mono`](Self::drain_mono).
     ///
     /// # Errors
     ///
@@ -442,7 +445,7 @@ impl Processor {
     /// returns [`Error::BlockTooLarge`] before it changes output or state.
     pub fn drain_mono_f32(&mut self, output: &mut [f32]) -> Result<usize, Error> {
         let count = self.drain_into(output.len(), OutputLayout::Mono, |index, frame| {
-            output[index] = sample_to_f32(frame[0]);
+            output[index] = pcm_to_f32(frame[0]);
         })?;
         output[count..].fill(0.0);
         Ok(count)
@@ -865,23 +868,16 @@ fn downmix(frame: [i16; 2]) -> i16 {
     ((i32::from(frame[0]) + i32::from(frame[1])) >> 1) as i16
 }
 
-/// Quantizes one floating-point input sample to signed 16-bit PCM.
-///
-/// If `sample` is NaN, this function returns `0`. It clamps other values to
-/// `-1.0..=1.0`, multiplies by `32767.0` in `f64` and rounds to the nearest
-/// integer.
-#[inline]
-fn quantize_f32(sample: f32) -> i16 {
+/// Quantizes one `f32` sample to symmetric `-32767..=32767` PCM.
+fn pcm_from_f32(sample: f32) -> i16 {
     if sample.is_nan() {
-        0
-    } else {
-        (f64::from(sample.clamp(-1.0, 1.0)) * 32_767.0).round() as i16
+        return 0;
     }
+    (f64::from(sample.clamp(-1.0, 1.0)) * 32_767.0).round() as i16
 }
 
-/// Divides one signed 16-bit PCM output sample by `32768.0`.
-#[inline]
-fn sample_to_f32(sample: i16) -> f32 {
+/// Divides one 16-bit PCM sample by `32768.0`.
+fn pcm_to_f32(sample: i16) -> f32 {
     f32::from(sample) / 32_768.0
 }
 

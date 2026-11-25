@@ -221,10 +221,10 @@ Select the process function for your output layout:
 | Output layout                        | Function for input          | Function for the tail |
 | ------------------------------------ | --------------------------- | --------------------- |
 | `[[i16; 2]]` stereo frames           | `process`                   | `drain`               |
-| Separate `i16` left and right slices | `process_planar`            | `drain_planar`        |
-| Mono `i16` slice                     | `process_mono_in_place`     | `drain_mono`          |
 | `[[f32; 2]]` stereo frames           | `process_f32`               | `drain_f32`           |
+| Separate `i16` left and right slices | `process_planar`            | `drain_planar`        |
 | Separate `f32` left and right slices | `process_planar_f32`        | `drain_planar_f32`    |
+| Mono `i16` slice                     | `process_mono_in_place`     | `drain_mono`          |
 | Mono `f32` slice                     | `process_mono_in_place_f32` | `drain_mono_f32`      |
 
 The `f32` methods convert `NaN` input samples to `0`. They clamp other input
@@ -424,40 +424,51 @@ page that opens the JavaScript.
 
 ### TypeScript API
 
-| Operation                         | TypeScript API                                                         |
-| --------------------------------- | ---------------------------------------------------------------------- |
-| Shared initialization             | `loadTunelet(source?)`                                                 |
-| Mono PCM to planar stereo         | `process(input, left, right, events?)`                                 |
-| In-place mono PCM downmix         | `processMono(audio, events?)`                                          |
-| Fixed `Float32` buffer offsets    | `inputF32Ptr`, `leftF32Ptr`, `rightF32Ptr`                             |
-| Cached `Float32` memory views     | `new TuneletAudioViews(memory, processor)`                             |
-| In-place `Float32` stereo         | `processF32InPlace(frames, events?)`                                   |
-| In-place `Float32` mono downmix   | `processMonoF32InPlace(frames, events?)`                               |
-| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`                     |
-| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`                        |
-| Feedback                          | `feedback()`, `takeFeedback()`                                         |
-| Telemetry                         | `telemetry()`, `takeTelemetry()`                                       |
-| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`                       |
-| Finite PCM tail                   | `beginDrain()`, `drain(left, right)`, `drainMono(audio)`               |
-| Finite `Float32` tail             | `beginDrain()`, `drainF32InPlace(frames)`, `drainMonoF32InPlace(frames)` |
-| Configured tail budget            | `tailFrames()`                                                         |
-| Reset or release memory           | `reset()`, `free()`, `views.dispose()`                                 |
+| Operation                         | TypeScript API                                                           |
+| --------------------------------- | ------------------------------------------------------------------------ |
+| Shared initialization             | `loadTunelet(source?)`                                                   |
+| Mono `Int16Array` to stereo       | `process(input, left, right, events?)`                                   |
+| Mono `Float32Array` to stereo     | `processF32(input, left, right, events?)`                                |
+| In-place `Int16Array` mono        | `processMono(audio, events?)`                                            |
+| In-place `Float32Array` mono      | `processMonoF32(audio, events?)`                                         |
+| Fixed `Float32` buffer offsets    | `inputF32Ptr`, `leftF32Ptr`, `rightF32Ptr`                               |
+| Cached `Float32` memory views     | `new TuneletAudioViews(memory, processor)`                               |
+| Zero-copy `Float32` stereo        | `processF32InPlace(frames, events?)`                                     |
+| Zero-copy `Float32` mono          | `processMonoF32InPlace(frames, events?)`                                 |
+| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`                       |
+| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`                          |
+| Feedback                          | `feedback()`, `takeFeedback()`                                           |
+| Telemetry                         | `telemetry()`, `takeTelemetry()`                                         |
+| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`                         |
+| `Int16Array` finite tail          | `beginDrain()`, `drain(left, right)`, `drainMono(audio)`                 |
+| `Float32Array` finite tail        | `beginDrain()`, `drainF32(left, right)`, `drainMonoF32(audio)`           |
+| Zero-copy `Float32` tail          | `beginDrain()`, `drainF32InPlace(frames)`, `drainMonoF32InPlace(frames)` |
+| Configured tail budget            | `tailFrames()`                                                           |
+| Reset or release memory           | `reset()`, `free()`, `views.dispose()`                                   |
 
 ### Audio buffers
 
-The package offers copied `Int16Array` calls and in-place `Float32` calls. All
-blocks must fit in `maxBlockFrames`. This package does not install an
-AudioWorklet or an integration with an audio device.
+The package offers copied `Int16Array` and `Float32Array` calls and zero-copy
+in-place `Float32` calls. All blocks must fit in `maxBlockFrames`. This
+package does not install an AudioWorklet or an integration with an audio
+device.
 
-For `process`, `processMono`, `drain` and `drainMono`, pass `Int16Array`
-buffers. These rules apply:
+For `process`, `processMono`, `drain`, `drainMono`, `processF32`,
+`processMonoF32`, `drainF32` and `drainMonoF32`, pass `Int16Array` or
+`Float32Array` buffers. These rules apply:
 
 - Stereo output arrays must not overlap.
 - The input can overlap an output, because the binding copies the input
   first.
 - Buffers must stay attached during each call.
 
-For Web Audio and zero-copy blocks, bind `TuneletAudioViews` to
+For `Float32` input, `NaN` becomes `0`, and other values clamp to `-1..=1`,
+multiply by `32767` in `f64` and round to `-32767..=32767`. Each `Float32`
+output sample divides the clipped `i16` sample or downmix by `32768`, and
+unused drain frames get `0`. Web Audio channels can go directly to
+`processF32` or `processMonoF32`.
+
+For zero-copy blocks in an AudioWorklet, bind `TuneletAudioViews` to
 `InitOutput.memory` and a `Tunelet` instance:
 
 ```ts
@@ -475,9 +486,10 @@ processor.free();
 ```
 
 `inputF32Ptr`, `leftF32Ptr` and `rightF32Ptr` stay at fixed byte offsets until
-`processor.free()`. Mono in-place calls read and write `views.input`. Stereo
-in-place calls read `views.input` and write `views.left` and `views.right`.
-The quantization and the output scale match the native `f32` methods.
+`processor.free()`. Copied `Float32Array` calls and in-place `Float32` calls
+share those three `f32` buffers. Mono in-place calls read and write
+`views.input`. Stereo in-place calls read `views.input` and write `views.left`
+and `views.right`.
 
 These lifetime rules apply to `Float32` views:
 
@@ -560,9 +572,9 @@ Rust storage, make JavaScript views or call JavaScript imports. If Wasm memory
 does not grow, `TuneletAudioViews` also allocates no new `Float32Array` views
 after construction.
 
-`Int16Array` audio calls copy samples across the boundary and make temporary
-views in the generated glue. These operations can also allocate and grow Wasm
-memory:
+`Int16Array` and `Float32Array` buffer calls copy samples across the boundary
+and make temporary views in the generated glue. These operations can also
+allocate and grow Wasm memory:
 
 - A new `Tunelet` instance.
 - Configuration conversion.

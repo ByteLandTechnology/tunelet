@@ -26,7 +26,7 @@
 //!
 //! # Audio and timed controls
 //!
-//! There are three output layouts for `i16` PCM and `f32` audio:
+//! Each buffer layout has an `i16` method and an `f32` method:
 //!
 //! - [`Processor::process`] and [`Processor::process_f32`] write `[left, right]`
 //!   frames.
@@ -36,9 +36,15 @@
 //!   [`Processor::process_mono_in_place_f32`] replace the input with the stereo
 //!   downmix.
 //!
+//! [`Processor::drain`], [`Processor::drain_planar`] and
+//! [`Processor::drain_mono`] have the equivalents [`Processor::drain_f32`],
+//! [`Processor::drain_planar_f32`] and [`Processor::drain_mono_f32`].
 //! These layouts do not depend on [`ResynthesisConfig::stereo_output`], which
-//! controls voice panning. PCM output is clipped to -32767..=32767. The `f32`
-//! methods quantize inputs to `i16` and divide `i16` outputs by `32768.0`.
+//! controls voice panning. The `i16` output is clipped to `-32767..=32767`.
+//! For `f32` calls, `NaN` input becomes `0`, and other values clamp to
+//! `-1.0..=1.0`, multiply by `32767.0` and round to `-32767..=32767`. Each
+//! `f32` output sample divides the clipped `i16` sample or downmix by
+//! `32768.0`, and unused drain frames get `0.0`.
 //!
 //! An event applies before its selected frame. Offsets must be in the current
 //! block and must not decrease. Events with equal offsets execute in slice
