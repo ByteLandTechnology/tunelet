@@ -504,13 +504,15 @@ call with more points than before reserve memory.
 
 ### Memory allocation
 
-The constructor allocates reusable PCM buffers. A successful call that
+The constructor allocates reusable PCM buffers. The processor also keeps an
+event buffer and uses its capacity again across calls. A successful call that
 processes audio without events does not allocate new Rust PCM storage.
 However, the call copies the audio across the boundary between JavaScript and
 Wasm. These items can allocate:
 
 - Object conversion.
-- Supplied events.
+- Supplied events when a call gives more events than before, or when an event
+  converts a stage configuration.
 - Errors.
 - Feedback and telemetry.
 - The formant envelopes.
