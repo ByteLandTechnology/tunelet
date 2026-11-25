@@ -91,7 +91,7 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 ## Build and verify
 
 ```sh
-cargo build --locked --release
+cargo rustc --locked --lib --release -- -D warnings
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
@@ -107,7 +107,7 @@ If you change the Wasm or TypeScript code, also run these commands.
 
 ```sh
 npm ci
-RUSTDOCFLAGS="-D warnings" npm run check:wasm
+npm run check:wasm
 npm run verify:pack
 ```
 

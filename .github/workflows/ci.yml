@@ -50,6 +50,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --lib -- -D warnings
       - run: cargo build --locked --release
+        env:
+          RUSTFLAGS: "-D warnings"
       - run: cargo doc --locked --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"

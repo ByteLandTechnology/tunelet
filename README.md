@@ -350,7 +350,7 @@ reset semantics. Read it on [docs.rs](https://docs.rs/tunelet), or run this
 command:
 
 ```sh
-cargo doc --locked --no-deps --open
+cargo rustdoc --locked --lib --open -- -D warnings
 ```
 
 ## WebAssembly and TypeScript
@@ -526,10 +526,10 @@ To build the crate and check the format, the lints and the documentation,
 run these commands:
 
 ```sh
-cargo build --locked --release
+cargo rustc --locked --lib --release -- -D warnings
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
-cargo doc --locked --no-deps
+cargo rustdoc --locked --lib -- -D warnings
 ```
 
 To check the `wasm` feature for `wasm32-unknown-unknown` with Cargo, run
@@ -538,7 +538,7 @@ these commands:
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
-cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
+cargo rustdoc --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
 ```
 
 Native Rust builds and these Wasm checks use Cargo and do not need Node.js
