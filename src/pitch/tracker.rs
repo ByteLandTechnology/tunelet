@@ -10,8 +10,8 @@
 //! The 40-lag window moves to keep the minimum near its center. If the
 //! minimum is at a boundary or the curvature is not usable, acquisition
 //! starts again. The last usable period stays available as a fallback for
-//! resynthesis. The public frequency bounds apply only to feedback reports.
-//! They do not change the size of these windows.
+//! resynthesis. The public frequency bounds gate pitch reports, the `tracking`
+//! flag and pitch correction. They do not change the size of these windows.
 
 use super::search::{tracking_minimum, TRACKING_LAGS};
 use crate::filter::{Biquad, Design};
@@ -44,7 +44,7 @@ pub(crate) struct PitchStep {
 }
 
 /// The number of lags that acquisition compares.
-const ACQUISITION_LAGS: usize = 137;
+const ACQUISITION_LAGS: usize = 305;
 
 /// The two-stage pitch tracker.
 ///
@@ -140,7 +140,7 @@ impl PitchTracker {
     }
 
     /// Updates only the acquisition sensitivity.
-    /// The reporting bounds apply outside the tracker. A change of the
+    /// The frequency bounds apply outside the tracker. A change of the
     /// sensitivity does not reset a tracked period.
     pub(crate) fn set_config(&mut self, config: PitchConfig) {
         self.threshold = Q14::from_f64(config.threshold as f64);
@@ -321,7 +321,7 @@ impl PitchTracker {
                 &mut self.cross[lag..end],
             );
             index1 = if count == index1 + 1 {
-                273
+                2 * ACQUISITION_LAGS - 1
             } else {
                 index1 - count
             };

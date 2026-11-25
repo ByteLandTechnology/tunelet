@@ -50,11 +50,11 @@
 //!
 //! [`Processor::feedback`] gives the pitch, the correction ratio, the
 //! accumulated stereo peak and the frame count.
-//! [`Processor::take_feedback`] also clears the peak window. The pitch
-//! reporting bounds change only the reports. They do not change the detection
-//! or the audio signal. [`Processor::latency_frames`] gives a nominal
-//! resynthesis delay. Voice delays, pitch changes and effects have their own
-//! timing.
+//! [`Processor::take_feedback`] also clears the peak window. The frequency
+//! bounds of [`PitchConfig`] gate the pitch reports, [`Telemetry::tracking`]
+//! and the selection of correction targets. [`Processor::latency_frames`]
+//! gives a nominal resynthesis delay. Voice delays, pitch changes and effects
+//! have their own timing.
 //!
 //! [`Processor::telemetry`] gives data for meters and displays: the ratio and
 //! the gain of each voice, the input and output peaks, the pitch clarity and

@@ -166,7 +166,7 @@ impl CorrectionConfig {
     tsify(large_number_types_as_bigints)
 )]
 pub struct ResynthesisConfig {
-    /// The acquisition sensitivity and the reporting bounds. The
+    /// The acquisition sensitivity and the frequency bounds. The
     /// default is [`PitchConfig::default`].
     pub pitch: PitchConfig,
     /// The target notes and the retune time. The default is enabled
@@ -789,20 +789,13 @@ impl Resynthesis {
             }
     }
     /// Converts the latest period to samples and hertz and applies the
-    /// current report limits.
+    /// current frequency bounds.
     ///
     /// The analysis does not advance, and the correction does not change.
     pub(crate) fn estimate(&self) -> PitchEstimate {
-        let period = (self.periods[self.write].to_bits() as f64 / 64.0) as f32;
-        self.config.pitch.report(PitchEstimate {
-            period_samples: period,
-            frequency_hz: if period > 0.0 {
-                self.rate.hz() / period
-            } else {
-                0.0
-            },
-            voiced: period > 0.0,
-        })
+        self.config
+            .pitch
+            .report(self.rate, self.periods[self.write])
     }
     /// Returns the current Q14 correction factor as f32. The result does not
     /// include other ratios.
@@ -827,12 +820,20 @@ impl Resynthesis {
     /// Returns how periodic the tracked input is, from 0 to 1. Refer to
     /// `PitchTracker::clarity`.
     pub(crate) fn clarity(&self) -> f32 {
-        self.pitch.clarity()
+        if self.is_tracking() {
+            self.pitch.clarity()
+        } else {
+            0.0
+        }
     }
-    /// Returns `true` if the pitch tracker follows a period, and `false`
-    /// during acquisition.
+    /// Returns `true` if the pitch tracker follows a period inside the
+    /// configured frequency bounds. If not, returns `false`.
     pub(crate) fn is_tracking(&self) -> bool {
         !self.pitch.is_detecting()
+            && self
+                .config
+                .pitch
+                .in_bounds(self.rate, self.periods[self.write])
     }
     /// Writes the effective ratio and the linear gain of each active voice
     /// from the last frame, and returns `1` plus the active secondary voices.
@@ -904,7 +905,9 @@ impl Resynthesis {
     /// period is not positive, the ratio becomes 1.0 immediately.
     fn update_correction(&mut self, period: Q6) {
         let mut target_ratio = Q14::ONE;
-        if self.config.correction.enabled && self.scale.count != 0 {
+        if !self.config.pitch.in_bounds(self.rate, period) {
+            self.scale_initialized = false;
+        } else if self.config.correction.enabled && self.scale.count != 0 {
             let count = self.scale.count;
             // The correction table holds periods normalized to one octave.
             // They use the same units as the shifted target period below.
@@ -1105,6 +1108,7 @@ impl Resynthesis {
     /// tracking was active before this frame.
     pub(crate) fn process_sample(&mut self, input: i16, numeric: &mut NumericContext) -> [Q14; 2] {
         let sample = Q14::from_bits(i32::from(input) >> 1);
+        let was_tracking = self.is_tracking();
         self.write += 1;
         if self.write == HISTORY {
             self.write = 0;
@@ -1113,7 +1117,6 @@ impl Resynthesis {
             self.written += 1;
         }
         self.raw[self.write] = sample;
-        let was_tracking = !self.pitch.is_detecting();
         let step = self.pitch.process_sample(sample.to_bits());
         let write = self.write;
         // Readers have signed fractional coordinates. When the writer wraps,
@@ -1139,7 +1142,12 @@ impl Resynthesis {
             self.formant.detection_mode_off();
         }
         if step.tracking_update {
-            self.update_correction(step.period);
+            let period = if self.config.pitch.in_bounds(self.rate, step.period) {
+                step.period
+            } else {
+                Q6::ZERO
+            };
+            self.update_correction(period);
         }
         // Use the state from before this sample. If acquisition occurs on
         // this frame, the choir drift counter starts on the next frame. Read

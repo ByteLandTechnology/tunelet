@@ -306,12 +306,15 @@ The telemetry includes these items:
 - The active voice count, and the pitch ratio and scaled gain of each voice.
 - The peaks of the input, of the two output channels and of the reverb wet
   signal.
-- The pitch clarity, which is a confidence score from 0 to 1.
+- The `tracking` flag and the pitch clarity, inside the `resynthesis.pitch`
+  bounds.
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
 The peak windows of the telemetry are independent of the peak window of the
-feedback. The latency is nominal. Dry mixes, resampled voices and effects
-have different timing.
+feedback. If a pitch is outside `min_frequency_hz..=max_frequency_hz`, it
+reports as unvoiced, sets `tracking` to `false` and moves correction toward 1.
+The latency is nominal. Dry mixes, resampled voices and effects have different
+timing.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
@@ -488,7 +491,7 @@ the cases where `voiced` is `false`:
 
 - The kept pitch estimate is unvoiced. This includes the time before the
   first detection and after a reset or a drain completion.
-- The estimated frequency is outside the inclusive reporting bounds
+- The estimated frequency is outside the inclusive frequency bounds
   `resynthesis.pitch.minFrequencyHz` and `resynthesis.pitch.maxFrequencyHz`.
 
 `formantEnvelope(maxFrequencyHz, input, output)` fills two `Float32Array`

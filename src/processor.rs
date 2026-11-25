@@ -725,7 +725,7 @@ pub struct Feedback {
     pub resample_ratio: f32,
     /// The reported input pitch period in samples, with fractional samples.
     ///
-    /// It is zero if the input is unvoiced or outside the reporting bounds of
+    /// It is zero if the input is unvoiced or outside the frequency bounds of
     /// [`crate::PitchConfig`].
     pub period_samples: f32,
     /// The reported input pitch frequency in hertz.
@@ -749,11 +749,11 @@ pub struct Feedback {
     ///
     /// The value is `None` if [`voiced`](Self::voiced) is `false`, and only
     /// then. This occurs if the input is unvoiced or if its frequency is
-    /// outside the current reporting bounds. A target table that has no
+    /// outside the current frequency bounds. A target table that has no
     /// selected target does not give `None`.
     pub target_midi_note: Option<f32>,
     /// This field is `true` if the current pitch estimate is positive and
-    /// inside the current reporting bounds.
+    /// inside the current frequency bounds.
     ///
     /// This is not an amplitude gate or a confidence score. A tracking result
     /// can stay between detector updates.
@@ -822,13 +822,14 @@ pub struct Telemetry {
     /// How periodic the tracked input is, in 0..=1.
     ///
     /// The value is 1 for a signal that repeats exactly at the tracked
-    /// period. It is 0 for a signal with no relation between cycles and
-    /// during pitch acquisition. Use it as a confidence score for
-    /// [`Feedback::voiced`]. The tracker updates the related sums on each
-    /// frame.
+    /// period. It is 0 for a signal with no relation between cycles, during
+    /// pitch acquisition or if the pitch is outside [`crate::PitchConfig`].
+    /// Use it as a confidence score for [`Feedback::voiced`]. The tracker
+    /// updates the related sums on each frame.
     pub clarity: f32,
-    /// This field is `true` if the pitch tracker follows a period. It is
-    /// `false` during pitch acquisition.
+    /// This field is `true` if the pitch tracker follows a period inside the
+    /// current frequency bounds of [`crate::PitchConfig`]. If pitch
+    /// acquisition is active or the pitch is out of bounds, it is `false`.
     pub tracking: bool,
     /// The number of valid entries in [`voice_ratios`](Self::voice_ratios)
     /// and [`voice_gains`](Self::voice_gains).
