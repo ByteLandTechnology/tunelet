@@ -166,7 +166,7 @@ impl CorrectionConfig {
     tsify(large_number_types_as_bigints)
 )]
 pub struct ResynthesisConfig {
-    /// The acquisition sensitivity and the reporting bounds. The
+    /// The acquisition sensitivity and the pitch bounds. The
     /// default is [`PitchConfig::default`].
     pub pitch: PitchConfig,
     /// The target notes and the retune time. The default is enabled
@@ -434,8 +434,12 @@ pub(crate) struct Resynthesis {
     /// telemetry reads them.
     voice_ratios: [Q14; HARMONY_VOICES + 1],
     /// The signed history frame that the formant model used for the last
-    /// frame. The audio path sets it, and only the formant envelope reads it.
+    /// frame. The audio path sets it, and the formant telemetry and envelope
+    /// read it.
     formant_position: i32,
+    /// The last refined Q6 period inside the configured frequency bounds. An
+    /// audio reset keeps it.
+    kept_period: Q6,
     /// Two cascaded anti-alias filter sections. If the shift is not upward,
     /// they have coefficients of 1.0 and zero.
     post: [Biquad; 2],
@@ -536,6 +540,7 @@ impl Resynthesis {
             harmony_gains: [Q12::ZERO; HARMONY_VOICES],
             voice_ratios: [Q14::ONE; HARMONY_VOICES + 1],
             formant_position: 0,
+            kept_period: Q6::ZERO,
             post: [Biquad::new(), Biquad::new()],
             correction: Q14::ONE,
             correction_decay: Q14::ZERO,
@@ -650,6 +655,12 @@ impl Resynthesis {
         let old = self.config;
         self.config = config;
         self.pitch.set_config(config.pitch);
+        if old.pitch != config.pitch
+            && !config.pitch.contains_period(self.rate, self.pitch.period())
+        {
+            self.correction = Q14::ONE;
+            self.scale_initialized = false;
+        }
         self.formant.set_config(config.formant);
         self.harmony.apply_config(config.harmony);
         if old.correction.notes != config.correction.notes
@@ -827,21 +838,30 @@ impl Resynthesis {
     /// Returns how periodic the tracked input is, from 0 to 1. Refer to
     /// `PitchTracker::clarity`.
     pub(crate) fn clarity(&self) -> f32 {
-        self.pitch.clarity()
+        if self.is_tracking() {
+            self.pitch.clarity()
+        } else {
+            0.0
+        }
     }
-    /// Returns `true` if the pitch tracker follows a period, and `false`
-    /// during acquisition.
+    /// Returns `true` if the pitch tracker follows a period inside the
+    /// configured frequency bounds, and `false` otherwise.
     pub(crate) fn is_tracking(&self) -> bool {
         !self.pitch.is_detecting()
+            && self
+                .config
+                .pitch
+                .contains_period(self.rate, self.pitch.period())
     }
     /// Writes the effective ratio and the linear gain of each voice from the
-    /// last frame, and returns the number of voices.
+    /// last frame, and returns the number of active voices.
     ///
     /// Slot zero is the lead. In Harmony mode, slots 1 to 4 are the harmony
-    /// voices, and the gain is the envelope of the harmony controller. In
-    /// Choir mode, the slots after the lead are the secondary voices with a
-    /// gain of 1. Each ratio includes the correction, the global shift and
-    /// the ratio of the voice. The entries after the count do not change.
+    /// voices, the gain includes `harmony_gain`, and the returned count is 1
+    /// plus the number of harmony voices with a positive gain. In Choir mode,
+    /// the slots after the lead are the secondary voices with a gain of 1.
+    /// Each ratio includes the correction, the global shift and the ratio of
+    /// the voice.
     pub(crate) fn voices(&self, ratios: &mut [f32; 16], gains: &mut [f32; 16]) -> u8 {
         let lead = (self.voice_ratios[0].to_bits() as f64 / 16384.0) as f32;
         ratios[0] = lead;
@@ -855,17 +875,24 @@ impl Resynthesis {
             }
             count as u8
         } else {
+            let mut active = 1;
             for voice in 0..HARMONY_VOICES {
                 ratios[voice + 1] =
                     (self.voice_ratios[voice + 1].to_bits() as f64 / 16384.0) as f32;
-                gains[voice + 1] = (self.harmony_gains[voice].to_bits() as f64 / 4096.0) as f32;
+                let gain = ((self.harmony_gains[voice].to_bits() as f64 / 4096.0)
+                    * self.config.harmony_gain as f64) as f32;
+                gains[voice + 1] = gain;
+                if gain > 0.0 {
+                    active += 1;
+                }
             }
-            (HARMONY_VOICES + 1) as u8
+            active
         }
     }
-    /// Returns the wrapping count of formant model designs.
+    /// Returns the wrapping generation of the active formant stamp, plus any
+    /// live width or stretch edits.
     pub(crate) fn formant_generation(&self) -> u32 {
-        self.formant.generation()
+        self.formant.generation(self.formant_position)
     }
     /// Writes the formant envelopes of the model that the audio used for the
     /// last frame. Refer to `Formant::envelope`.
@@ -894,9 +921,14 @@ impl Resynthesis {
     /// global shift is part of the normalization.
     ///
     /// If correction is disabled or the active table is empty, the ratio moves
-    /// toward 1.0. If the target selection starts again and the shifted
-    /// period is not positive, the ratio becomes 1.0 immediately.
+    /// toward 1.0. If the period is outside the configured frequency bounds or
+    /// the shifted period is not positive, the ratio becomes 1.0 immediately.
     fn update_correction(&mut self, period: Q6) {
+        if !self.config.pitch.contains_period(self.rate, period) {
+            self.correction = Q14::ONE;
+            self.scale_initialized = false;
+            return;
+        }
         let mut target_ratio = Q14::ONE;
         if self.config.correction.enabled && self.scale.count != 0 {
             let count = self.scale.count;
@@ -1107,8 +1139,17 @@ impl Resynthesis {
             self.written += 1;
         }
         self.raw[self.write] = sample;
-        let was_tracking = !self.pitch.is_detecting();
+        let was_tracking = !self.pitch.is_detecting()
+            && (self.pitch.period() == Q6::ZERO
+                || self
+                    .config
+                    .pitch
+                    .contains_period(self.rate, self.pitch.period()));
         let step = self.pitch.process_sample(sample.to_bits());
+        let in_bounds = self.config.pitch.contains_period(self.rate, step.period);
+        if in_bounds {
+            self.kept_period = step.period;
+        }
         let write = self.write;
         // Readers have signed fractional coordinates. When the writer wraps,
         // move the origin of these coordinates with it. Do not apply a modulo
@@ -1125,7 +1166,7 @@ impl Resynthesis {
             }
             self.old_position = self.old_position - position_of(HISTORY as i32);
         }
-        if step.restarted {
+        if step.restarted || (step.period != Q6::ZERO && !in_bounds) {
             self.correction = Q14::ONE;
             self.scale_initialized = false;
         }
@@ -1154,8 +1195,8 @@ impl Resynthesis {
                 self.drift_ratio[0] = Q14::ONE;
             }
         }
-        self.periods[write] = step.period;
-        self.previous_periods[write] = step.previous_period;
+        self.periods[write] = if in_bounds { step.period } else { Q6::ZERO };
+        self.previous_periods[write] = self.kept_period;
         self.ratios[write] = self.correction;
         self.overlap_index += 1;
         if self.overlap_index == OVERLAP_FRAMES {
@@ -1168,7 +1209,7 @@ impl Resynthesis {
                 previous.to_bits(),
                 self.periods.as_slice(),
                 write,
-                step.previous_period.to_bits(),
+                self.kept_period.to_bits(),
             ))
         } else {
             self.raw[ring(write as i32 - ANALYSIS_FRAMES as i32)]

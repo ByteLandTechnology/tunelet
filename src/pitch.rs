@@ -2,16 +2,18 @@
 //! estimates.
 //!
 //! Acquisition checks that repeated minima agree. Tracking refines the period
-//! in a window of 40 lags. The reporting bounds filter only the feedback to
-//! the host.
+//! in a window of 40 lags. The frequency bounds filter the feedback, the
+//! tracking state and the pitch correction.
 
 mod search;
 pub(crate) mod tracker;
 
 use crate::error::{check_range, ConfigProblem};
-use crate::Error;
+use crate::numeric::fixed::Q6;
+use crate::{Error, SampleRate};
 
-/// The acquisition sensitivity and the bounds for pitch reports to the host.
+/// The acquisition sensitivity and the frequency bounds for pitch tracking and
+/// correction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -26,18 +28,20 @@ pub struct PitchConfig {
     /// This value controls acquisition. It is not an output gain or an
     /// amplitude gate.
     pub threshold: f32,
-    /// The lower bound of the feedback in hertz (inclusive), 40..=2000.
+    /// The lower bound of tracked pitch in hertz (inclusive), 40..=2000.
     ///
     /// The default is 40. It must be strictly less than `max_frequency_hz`.
-    /// These bounds do not change the tracking, the correction or the
-    /// resampling. A feedback query applies the current bounds to the kept
-    /// analysis. It does not process another sample.
+    /// Estimates outside the inclusive bounds are reported as unvoiced and
+    /// untracked, and they bypass pitch correction. A feedback query applies
+    /// the current bounds to the kept analysis and does not process another
+    /// sample.
     pub min_frequency_hz: f32,
-    /// The upper bound of the feedback in hertz (inclusive), 40..=2000.
+    /// The upper bound of tracked pitch in hertz (inclusive), 40..=2000.
     ///
     /// The default is 1100. It must be strictly greater than
-    /// `min_frequency_hz`. Results outside the bounds are reported as
-    /// unvoiced, with zero frequency and zero period.
+    /// `min_frequency_hz`. Estimates outside the inclusive bounds are reported
+    /// as unvoiced and untracked, with zero frequency and zero period, and
+    /// they bypass pitch correction.
     pub max_frequency_hz: f32,
 }
 
@@ -52,7 +56,18 @@ impl Default for PitchConfig {
 }
 
 impl PitchConfig {
-    /// Applies only the bounds for host reports to a kept estimate.
+    /// Returns `true` if `period` gives a frequency inside the inclusive
+    /// bounds at `rate`.
+    pub(crate) fn contains_period(self, rate: SampleRate, period: Q6) -> bool {
+        if period <= Q6::ZERO {
+            return false;
+        }
+        let period_samples = (period.to_bits() as f64 / 64.0) as f32;
+        let frequency_hz = rate.hz() / period_samples;
+        frequency_hz >= self.min_frequency_hz && frequency_hz <= self.max_frequency_hz
+    }
+
+    /// Applies the frequency bounds for host reports to a kept estimate.
     ///
     /// If the estimate is not voiced or is out of range, the result is the
     /// unvoiced value with all fields zero. The function does not change the

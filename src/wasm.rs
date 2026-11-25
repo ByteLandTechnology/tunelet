@@ -32,7 +32,7 @@
 //!
 //! - The decode of events.
 //! - The conversion of configurations.
-//! - Feedback and telemetry objects.
+//! - Feedback, control-activity and telemetry objects.
 //! - The buffers of the formant envelopes.
 //! - Errors.
 //!
@@ -42,7 +42,8 @@
 //! `free()` method.
 
 use crate::{
-    Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
+    ControlActivity, Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate,
+    Telemetry, TimedEvent,
 };
 use js_sys::{Float32Array, Int16Array};
 use serde::{Deserialize, Serialize};
@@ -366,7 +367,7 @@ impl WasmProcessor {
     ///
     /// - The kept pitch estimate is unvoiced. This includes the time before
     ///   the first detection and after a reset or a drain completion.
-    /// - The estimated frequency is outside the inclusive reporting bounds
+    /// - The estimated frequency is outside the inclusive frequency bounds
     ///   `minFrequencyHz` and `maxFrequencyHz` of the pitch configuration.
     ///
     /// # Errors
@@ -390,6 +391,21 @@ impl WasmProcessor {
         let feedback = self.processor.feedback().into_ts()?;
         self.processor.take_feedback();
         Ok(feedback)
+    }
+
+    /// Returns which choir, harmony and reverb controls change the audio in
+    /// the active configuration.
+    ///
+    /// A `false` flag means that the related control makes no sample change in
+    /// the current voice mode, harmony source or reverb network. The audio
+    /// state does not change.
+    ///
+    /// # Errors
+    ///
+    /// If the conversion to a JavaScript object fails, this method throws.
+    #[wasm_bindgen(js_name = controlActivity)]
+    pub fn control_activity(&self) -> Result<Ts<ControlActivity>, JsError> {
+        Ok(self.processor.control_activity().into_ts()?)
     }
 
     /// Returns a new telemetry object and does not clear its peak windows.
@@ -426,10 +442,11 @@ impl WasmProcessor {
     /// `Float32Array` buffers of equal length.
     ///
     /// `input` gets the vocal-tract envelope that the LPC analysis found.
-    /// `output` gets the envelope after the width and stretch controls. Point
-    /// `k` of `n` is at the frequency `maxFrequencyHz * k / (n - 1)`. The
-    /// values are linear magnitudes with no absolute level. Scale them for a
-    /// display.
+    /// `output` gets the envelope after the current width and stretch
+    /// controls. A change to width or stretch updates `output` immediately,
+    /// also before the next audio block. Point `k` of `n` is at the frequency
+    /// `maxFrequencyHz * k / (n - 1)`. The values are linear magnitudes with
+    /// no absolute level. Scale them for a display.
     ///
     /// `maxFrequencyHz` must be finite, more than zero and not more than half
     /// of the sample rate.

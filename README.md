@@ -295,6 +295,7 @@ These calls read the state of the processor. They do not change the audio.
 
 | Call                 | Data                                                              |
 | -------------------- | ----------------------------------------------------------------- |
+| `control_activity()` | Which choir, harmony and reverb controls are active               |
 | `feedback()`         | The pitch, the stereo peak, the correction ratio, the frame count |
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
@@ -302,13 +303,24 @@ These calls read the state of the processor. They do not change the audio.
 | `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
 
+`Processor::control_activity()` and `ProcessorConfig::control_activity()`
+return a `ControlActivity` struct. A `false` flag means that the related
+control makes no sample change in the active voice mode, harmony source or
+reverb network.
+
 The telemetry includes these items:
 
-- The pitch ratio and the gain of each voice.
+- The active voice count, the pitch ratio and the gain of each voice. In
+  Harmony mode, `voice_gains` includes `harmony_gain`, and `voice_count` is 1
+  plus the number of harmony voices with a positive gain.
 - The peaks of the input, of the two output channels and of the reverb wet
   signal.
-- The pitch clarity, which is a confidence score from 0 to 1.
+- The pitch tracking flag and the pitch clarity, from 0 to 1, inside the
+  frequency bounds of `resynthesis.pitch`.
 - The current gains of Punch and Warm, and the position in the Alien loop.
+- The generation of the active formant model, `formant_generation`. It
+  increases when playback reaches a new analysis bank and when `width` or
+  `stretch` changes.
 
 The peak windows of the telemetry are independent of the peak window of the
 feedback. The latency is nominal. Dry mixes, resampled voices and effects
@@ -317,11 +329,13 @@ have different timing.
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
 - The vocal-tract envelope from the analysis.
-- The envelope after the width and stretch controls.
+- The envelope after the current `width` and `stretch` controls.
 
-The values are linear and have no absolute level. The formant stage must be
-enabled. The envelopes are those of the model that the audio used for the
-last frame. The method returns `Result<bool, Error>`:
+A change to `width` or `stretch` updates the output envelope immediately,
+also before the next audio block. The values are linear and have no absolute
+level. The formant stage must be enabled. The envelopes are those of the
+model that the audio used for the last frame. The method returns
+`Result<bool, Error>`:
 
 | Result      | Description                                                      |
 | ----------- | ---------------------------------------------------------------- |
@@ -419,6 +433,7 @@ page that opens the JavaScript.
 | Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
 | In-place mono downmix             | `processMono(audio, events?)`                            |
 | Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
+| Control activity                  | `controlActivity()`                                      |
 | Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
 | Feedback                          | `feedback()`, `takeFeedback()`                           |
 | Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
@@ -482,23 +497,29 @@ bindings.
 
 ### Feedback, telemetry and formant envelopes
 
-`telemetry()` and `takeTelemetry()` return a `Telemetry` object.
+`controlActivity()` returns a `ControlActivity` object with camelCase boolean
+flags for the choir, harmony and reverb controls. `telemetry()` and
+`takeTelemetry()` return a `Telemetry` object.
 
 In feedback, `targetMidiNote` is `undefined` in these cases, which are also
 the cases where `voiced` is `false`:
 
 - The kept pitch estimate is unvoiced. This includes the time before the
   first detection and after a reset or a drain completion.
-- The estimated frequency is outside the inclusive reporting bounds
+- The estimated frequency is outside the inclusive frequency bounds
   `resynthesis.pitch.minFrequencyHz` and `resynthesis.pitch.maxFrequencyHz`.
+
+Estimates outside those bounds also bypass pitch correction.
 
 `formantEnvelope(maxFrequencyHz, input, output)` fills two `Float32Array`
 buffers of equal length and returns `false` if no envelope is available.
-In that case, it fills both buffers with zeros. If the lengths are not equal
-or the frequency is not valid, it throws and does not change the buffers. The
-frequency must be finite, more than zero and not more than half of the sample
-rate. The class keeps a buffer for the points, so only the first call and a
-call with more points than before reserve memory.
+In that case, it fills both buffers with zeros. A change to `width` or
+`stretch` updates `output` immediately, also before the next audio block. If
+the lengths are not equal or the frequency is not valid, the method throws
+and does not change the buffers. The frequency must be finite, more than zero
+and not more than half of the sample rate. The class keeps a buffer for the
+points, so only the first call and a call with more points than before
+reserve memory.
 
 ### Memory allocation
 
@@ -510,7 +531,7 @@ Wasm. These items can allocate:
 - Object conversion.
 - Supplied events.
 - Errors.
-- Feedback and telemetry.
+- Control activity, feedback and telemetry.
 - The formant envelopes.
 
 The generated glue can also make temporary views. This binding is for general
