@@ -13,6 +13,14 @@
 # publish-github authenticates with GITHUB_TOKEN. The OIDC policies on npm and
 # on crates.io must name this file (release.yml). GitHub links
 # @bytelandtechnology/tunelet to this repository through the repository field.
+#
+# The release-please job uses a GitHub App token from vars.APP_CLIENT_ID and
+# secrets.APP_PRIVATE_KEY. If vars.APP_CLIENT_ID or secrets.APP_PRIVATE_KEY is
+# empty, the workflow skips release-please. Register the GitHub App on this
+# repository with write access only to contents, issues and pull requests. When
+# release-please updates the release pull request, ci.yml runs verify on
+# head_sha automatically. A branch ruleset on main must require verify before
+# merge.
 name: Release
 
 on:
@@ -28,18 +36,32 @@ permissions: {}
 
 jobs:
   release-please:
+    if: ${{ vars.APP_CLIENT_ID != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
-      issues: write
-      pull-requests: write
+    permissions: {}
+    env:
+      HAS_APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY != '' && 'true' || 'false' }}
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
+      # If secrets.APP_PRIVATE_KEY is set, the action gets a one-hour GitHub
+      # App token for this repository and revokes it when the job ends.
+      - id: app-token
+        if: ${{ env.HAS_APP_PRIVATE_KEY == 'true' }}
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
       - id: release
+        if: ${{ steps.app-token.outputs.token != '' }}
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
 
   build-wasm:
     needs: release-please
@@ -53,27 +75,7 @@ jobs:
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
-        with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          cache-bin: "false"
-      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
-        with:
-          tool: wasm-pack@0.15.1
-          checksum: true
-      # Install Binaryen wasm-opt 133 and verify its SHA-256 checksum.
-      - run: |
-          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz
-          echo "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  $RUNNER_TEMP/binaryen.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "24"
-          cache: "npm"
+      - uses: ./.github/actions/setup-wasm
       - run: npm ci
       # Build and check both archives, then write SHA256SUMS.txt.
       - run: npm run verify:pack -- --out-dir "$RUNNER_TEMP/wasm-package-dist"

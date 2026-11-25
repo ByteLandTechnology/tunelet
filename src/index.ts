@@ -4,8 +4,8 @@
  * Call `loadTunelet()` or `initSync()` before you construct processors or read
  * the default configuration. Both environments use the same generated bindings
  * and the same Wasm binary. This module wraps `Tunelet`, `defaultConfig` and
- * `initSync` with lifecycle checks, and re-exports the configuration, event,
- * feedback and telemetry types.
+ * `initSync` with lifecycle checks, and re-exports the configuration,
+ * control-activity, event, feedback and telemetry types.
  */
 import init, {
   Tunelet as WasmTunelet,
@@ -14,6 +14,7 @@ import init, {
 } from "../pkg/tunelet.js";
 import type {
   BlockEvents,
+  ControlActivity,
   Feedback,
   InitInput,
   InitOutput,
@@ -69,15 +70,15 @@ function active(instance: Tunelet): WasmTunelet {
  *
  * For a custom deployment, you can give one of these sources:
  *
- * - A URL.
+ * - A URL or URL string.
  * - A fetch Response.
  * - A byte buffer (BufferSource).
  * - A compiled WebAssembly.Module.
  * - A promise for one of these.
  *
- * A string source obeys fetch rules. For a Node.js `file:` source, use a
- * URL object. A compiled module must use imports that agree with the packaged
- * bindings.
+ * In Node.js, the function reads `file:` URL objects and `"file:"` URL strings
+ * from disk. Other URLs and string sources obey fetch rules. A compiled module
+ * must use imports that agree with the packaged bindings.
  *
  * Concurrent calls share one promise, and the first call selects the source.
  * After a successful initialization, later calls use it again and do not load
@@ -101,6 +102,32 @@ export function loadTunelet(
   return initialization;
 }
 
+/** Converts a `file:` URL string or `URL` object into a local `URL` instance. */
+function resolveFileUrl(input: InitInput): URL | undefined {
+  if (typeof URL === "function" && input instanceof URL) {
+    return input.protocol === "file:" ? input : undefined;
+  }
+  if (typeof input === "string") {
+    if (!/^file:/i.test(input)) {
+      return undefined;
+    }
+    const url = new URL(input);
+    return url.protocol === "file:" ? url : undefined;
+  }
+  if (
+    typeof input === "object" &&
+    input !== null &&
+    "protocol" in input &&
+    input.protocol === "file:" &&
+    "href" in input &&
+    typeof input.href === "string"
+  ) {
+    const url = new URL(input.href);
+    return url.protocol === "file:" ? url : undefined;
+  }
+  return undefined;
+}
+
 /** Awaits the source one time, then initializes the Wasm module from it. */
 async function initialize(
   source: InitInput | Promise<InitInput> | undefined,
@@ -111,7 +138,8 @@ async function initialize(
       : await source;
 
   let output: InitOutput;
-  if (input instanceof URL && input.protocol === "file:") {
+  const fileUrl = resolveFileUrl(input);
+  if (fileUrl !== undefined) {
     // Keep the Node.js built-in module out of browser bundles. TypeScript
     // removes the type-only import. The runtime import runs only for `file:`
     // URLs.
@@ -119,7 +147,7 @@ async function initialize(
     const fs: typeof import("node:fs/promises") = await import(
       /* webpackIgnore: true */ /* @vite-ignore */ moduleName
     );
-    output = await init({ module_or_path: await fs.readFile(input) });
+    output = await init({ module_or_path: await fs.readFile(fileUrl) });
   } else {
     output = await init({ module_or_path: input });
   }
@@ -172,8 +200,8 @@ export class Tunelet {
    * Prepares a processor and its reusable PCM buffers.
    *
    * `sampleRate` must be 44100 or 48000. `maxBlockFrames` must be an integer
-   * in 1..=4294967295. If you omit `config`, the processor uses the default
-   * configuration.
+   * from 1 to 4294967295 (inclusive). If you omit `config`, the processor uses
+   * the default configuration.
    */
   constructor(
     sampleRate: number,
@@ -262,6 +290,14 @@ export class Tunelet {
   /** Returns the feedback and clears only the peak window. */
   takeFeedback(): Feedback {
     return active(this).takeFeedback();
+  }
+
+  /**
+   * Returns which choir, harmony and reverb controls change the audio in the
+   * active configuration.
+   */
+  controlActivity(): ControlActivity {
+    return active(this).controlActivity();
   }
 
   /** Returns a new telemetry object and does not clear its peak windows. */
