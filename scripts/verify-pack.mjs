@@ -1,14 +1,24 @@
 /**
- * This script packs the npm archives, checks their eight files, runs all
- * Wasm loader paths in Node.js and checks consumer TypeScript declarations.
+ * This script builds the package one time and packs `tunelet` and
+ * `@bytelandtechnology/tunelet`. For each archive, it checks the eight files,
+ * runs all Wasm loader paths in Node.js and checks consumer TypeScript
+ * declarations.
+ *
+ * If you give `--out-dir <dir>`, the script writes both `.tgz` archives and
+ * `SHA256SUMS.txt` to `<dir>` after all checks succeed.
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+
+const UNSCOPED_PACKAGE_NAME = "tunelet";
+const SCOPED_PACKAGE_NAME = "@bytelandtechnology/tunelet";
 
 const EXPECTED_ARCHIVE_PATHS = [
   "package/LICENSE",
@@ -21,38 +31,121 @@ const EXPECTED_ARCHIVE_PATHS = [
   "package/pkg/tunelet_bg.wasm",
 ];
 
-const UNSCOPED_PACKAGE_NAME = "tunelet";
-const SCOPED_PACKAGE_NAME = "@bytelandtechnology/tunelet";
-
 const PACKAGE_NAME_PATTERN =
   /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
-/** Read and check the current package name so scoped names also work. */
-function readPackageName() {
-  const packageJsonPath = path.join(repoRoot, "package.json");
-  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-  const packageName = packageJson.name;
+/** Read the optional `--out-dir` flag from `process.argv`. */
+function parseCliOptions(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      "out-dir": { type: "string" },
+    },
+    strict: true,
+  });
   assert.equal(
-    typeof packageName,
+    positionals.length,
+    0,
+    `Unexpected positional arguments: ${positionals.join(" ")}`,
+  );
+  const rawOutDir = values["out-dir"];
+  if (rawOutDir === undefined) {
+    return { outDir: undefined };
+  }
+  assert.ok(
+    rawOutDir.trim().length > 0 && !rawOutDir.startsWith("-"),
+    "--out-dir requires a directory path",
+  );
+  return { outDir: path.resolve(process.cwd(), rawOutDir) };
+}
+
+/** Read and check the manifest in `package.json`. */
+function readPackageManifest() {
+  const packageJsonPath = path.join(repoRoot, "package.json");
+  const manifest = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  assert.equal(
+    typeof manifest.name,
     "string",
     "package.json name must be a string",
   );
+  assert.match(
+    manifest.name,
+    PACKAGE_NAME_PATTERN,
+    `Invalid package name: ${manifest.name}`,
+  );
+  assert.equal(
+    manifest.name,
+    UNSCOPED_PACKAGE_NAME,
+    `Expected package.json name to be ${UNSCOPED_PACKAGE_NAME}, found ${manifest.name}`,
+  );
+  assert.equal(
+    typeof manifest.version,
+    "string",
+    "package.json version must be a string",
+  );
+  assert.ok(
+    manifest.version.trim().length > 0,
+    "package.json version must not be empty",
+  );
+  return manifest;
+}
+
+/** Return the `.tgz` file name that `npm pack` writes for `packageName`. */
+function expectedArchiveFileName(packageName, version) {
+  return `${packageName.replace(/^@/, "").replace(/\//g, "-")}-${version}.tgz`;
+}
+
+/** Copy the built package files into `stageDir` with `packageName`. */
+function stageScopedPackage(stageDir, manifest, packageName) {
   assert.match(
     packageName,
     PACKAGE_NAME_PATTERN,
     `Invalid package name: ${packageName}`,
   );
-  return packageName;
+  fs.mkdirSync(stageDir, { recursive: true });
+
+  const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
+  const topLevelEntries = new Set(["LICENSE", "README.md"]);
+  for (const entry of manifestFiles) {
+    if (typeof entry === "string") {
+      const firstSegment = entry.replace(/^\.\//, "").split("/")[0];
+      if (firstSegment.length > 0) {
+        topLevelEntries.add(firstSegment);
+      }
+    }
+  }
+
+  for (const entry of topLevelEntries) {
+    const sourcePath = path.join(repoRoot, entry);
+    if (fs.existsSync(sourcePath)) {
+      fs.cpSync(sourcePath, path.join(stageDir, entry), { recursive: true });
+    }
+  }
+
+  const stagedManifest = { ...manifest, name: packageName };
+  fs.writeFileSync(
+    path.join(stageDir, "package.json"),
+    `${JSON.stringify(stagedManifest, null, 2)}\n`,
+  );
 }
 
-/** Run `npm pack` without a shell and return the archive file name. */
-function packArchive(sourceDir, packDir, extraArgs = []) {
-  const npmArgs = ["pack", ...extraArgs, "--pack-destination", packDir];
+/** Run `npm pack` without a shell and return the relative archive path. */
+function packArchive(
+  sourceDir,
+  packDir,
+  expectedFileName,
+  { ignoreScripts = false } = {},
+) {
+  const packArgs = ["pack", "--pack-destination", packDir];
+  if (ignoreScripts) {
+    packArgs.push("--ignore-scripts");
+  }
+
   const npmExecPath = process.env.npm_execpath;
   if (npmExecPath) {
-    execFileSync(process.execPath, [npmExecPath, ...npmArgs], {
+    execFileSync(process.execPath, [npmExecPath, ...packArgs], {
       cwd: sourceDir,
       stdio: "inherit",
     });
@@ -67,12 +160,12 @@ function packArchive(sourceDir, packDir, extraArgs = []) {
     if (!fs.existsSync(npmCliPath)) {
       throw new Error(`npm-cli.js was not found at ${npmCliPath}`);
     }
-    execFileSync(process.execPath, [npmCliPath, ...npmArgs], {
+    execFileSync(process.execPath, [npmCliPath, ...packArgs], {
       cwd: sourceDir,
       stdio: "inherit",
     });
   } else {
-    execFileSync("npm", npmArgs, {
+    execFileSync("npm", packArgs, {
       cwd: sourceDir,
       stdio: "inherit",
     });
@@ -86,41 +179,18 @@ function packArchive(sourceDir, packDir, extraArgs = []) {
     1,
     `Expected one archive, found ${archives.length}`,
   );
-  return archives[0];
-}
-
-/** Copy the built package files and set an alternate package name. */
-function stagePackageCopy(stageDir, packageName) {
-  fs.mkdirSync(path.join(stageDir, "pkg"), { recursive: true });
-  fs.cpSync(path.join(repoRoot, "dist"), path.join(stageDir, "dist"), {
-    recursive: true,
-  });
-  for (const pkgFile of ["tunelet.js", "tunelet.d.ts", "tunelet_bg.wasm"]) {
-    fs.copyFileSync(
-      path.join(repoRoot, "pkg", pkgFile),
-      path.join(stageDir, "pkg", pkgFile),
-    );
-  }
-  for (const rootFile of ["LICENSE", "README.md"]) {
-    fs.copyFileSync(
-      path.join(repoRoot, rootFile),
-      path.join(stageDir, rootFile),
-    );
-  }
-  const packageJson = JSON.parse(
-    fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"),
+  assert.equal(
+    archives[0],
+    expectedFileName,
+    `Expected archive ${expectedFileName}, found ${archives[0]}`,
   );
-  packageJson.name = packageName;
-  fs.writeFileSync(
-    path.join(stageDir, "package.json"),
-    `${JSON.stringify(packageJson, null, 2)}\n`,
-  );
+  return path.posix.join("pack", archives[0]);
 }
 
 /** Check that the archive contains only the eight expected files. */
-function verifyArchiveEntries(packDir, archiveFile) {
-  const rawList = execFileSync("tar", ["-tzf", archiveFile], {
-    cwd: packDir,
+function verifyArchiveEntries(workDir, relativeArchivePath) {
+  const rawList = execFileSync("tar", ["-tzf", relativeArchivePath], {
+    cwd: workDir,
     encoding: "utf8",
   });
   const actualPaths = rawList
@@ -133,10 +203,17 @@ function verifyArchiveEntries(packDir, archiveFile) {
 }
 
 /** Extract the archive into an isolated `node_modules` directory. */
-function installArchive(packDir, archiveFile, consumerDir, packageName) {
-  const extractDir = path.join(consumerDir, "extract");
+function installArchive(
+  workDir,
+  relativeArchivePath,
+  consumerDir,
+  packageName,
+) {
+  const extractDir = path.join(workDir, "extract");
   fs.mkdirSync(extractDir, { recursive: true });
-  execFileSync("tar", ["-xzf", path.join(packDir, archiveFile), "-C", extractDir]);
+  execFileSync("tar", ["-xzf", relativeArchivePath, "-C", "extract"], {
+    cwd: workDir,
+  });
 
   const installedDir = path.join(
     consumerDir,
@@ -444,6 +521,7 @@ function buildConsumerCheckSource(packageName, profileScopeLines) {
     "  loadTunelet as namedLoadTunelet,",
     "  Tunelet,",
     "  type ProcessorConfig,",
+    "  type SyncInitInput as RootSyncInitInput,",
     `} from ${pkgLiteral};`,
     "import init, {",
     "  initSync as wasmInitSync,",
@@ -460,11 +538,14 @@ function buildConsumerCheckSource(packageName, profileScopeLines) {
     "  buffer: ArrayBuffer,",
     "  compiledModule: WebAssembly.Module,",
     "  modulePromise: Promise<WebAssembly.Module>,",
-    "  syncSource: SyncInitInput,",
+    "  syncSource: SyncInitInput & RootSyncInitInput,",
     "): Promise<InitOutput> {",
     "  const exportsFromRoot: InitOutput = await loadTunelet(source);",
     "  const exportsFromNamed: InitOutput = await namedLoadTunelet(source);",
-    "  const exportsFromWasm: InitOutput = await init(source);",
+    "  const exportsFromWasm: InitOutput =",
+    "    source === undefined",
+    "      ? await init()",
+    "      : await init({ module_or_path: source });",
     '  await loadTunelet("https://example.invalid/tunelet_bg.wasm");',
     '  await loadTunelet(new Request("https://example.invalid/tunelet_bg.wasm"));',
     '  await loadTunelet(new URL("https://example.invalid/tunelet_bg.wasm"));',
@@ -474,7 +555,8 @@ function buildConsumerCheckSource(packageName, profileScopeLines) {
     "  await loadTunelet(compiledModule);",
     "  await loadTunelet(modulePromise);",
     "  const syncFromRoot: InitOutput = rootInitSync({ module: syncSource });",
-    "  const syncFromWasm: InitOutput = wasmInitSync({ module: bytes });",
+    "  const syncFromWasm: InitOutput = wasmInitSync({ module: syncSource });",
+    "  const syncFromBytes: InitOutput = wasmInitSync({ module: bytes });",
     "  const syncFromModule: InitOutput = wasmInitSync({ module: compiledModule });",
     "  const config: ProcessorConfig = defaultConfig();",
     "  using disposableProcessor = new Tunelet(48000, 128, config);",
@@ -489,6 +571,7 @@ function buildConsumerCheckSource(packageName, profileScopeLines) {
     "  void exportsFromWasm;",
     "  void syncFromRoot;",
     "  void syncFromWasm;",
+    "  void syncFromBytes;",
     "  void syncFromModule;",
     "  return exportsFromRoot;",
     "}",
@@ -597,12 +680,14 @@ function verifyTypeDeclarations(consumerDir, packageName) {
   }
 }
 
-/** Verify archive files, Node.js loaders and consumer types for one archive. */
-async function verifyPackedPackage(packDir, archiveFile, consumerDir, packageName) {
-  verifyArchiveEntries(packDir, archiveFile);
+/** Check the archive list, Node.js loaders and TypeScript declarations. */
+async function verifyPackedArchive(workDir, relativeArchivePath, packageName) {
+  const consumerDir = path.join(workDir, "consumer");
+  fs.mkdirSync(consumerDir);
+  verifyArchiveEntries(workDir, relativeArchivePath);
   const installedDir = installArchive(
-    packDir,
-    archiveFile,
+    workDir,
+    relativeArchivePath,
     consumerDir,
     packageName,
   );
@@ -610,44 +695,80 @@ async function verifyPackedPackage(packDir, archiveFile, consumerDir, packageNam
   verifyTypeDeclarations(consumerDir, packageName);
 }
 
-const primaryPackageName = readPackageName();
-const alternatePackageName =
-  primaryPackageName === SCOPED_PACKAGE_NAME
-    ? UNSCOPED_PACKAGE_NAME
-    : SCOPED_PACKAGE_NAME;
+/** Copy both verified archives and write `SHA256SUMS.txt` in `outDir`. */
+function writeVerifiedOutputs(outDir, archives) {
+  fs.mkdirSync(outDir, { recursive: true });
+  const checksumLines = [];
+  for (const { fileName, sourcePath } of archives) {
+    const destinationPath = path.join(outDir, fileName);
+    fs.copyFileSync(sourcePath, destinationPath);
+    const digest = createHash("sha256")
+      .update(fs.readFileSync(destinationPath))
+      .digest("hex");
+    checksumLines.push(`${digest}  ${fileName}`);
+  }
+  fs.writeFileSync(
+    path.join(outDir, "SHA256SUMS.txt"),
+    `${checksumLines.join("\n")}\n`,
+  );
+}
 
+const { outDir } = parseCliOptions(process.argv.slice(2));
+const manifest = readPackageManifest();
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tunelet-verify-pack-"));
 
 try {
-  const primaryPackDir = path.join(tempDir, "pack-primary");
-  const primaryConsumerDir = path.join(tempDir, "consumer-primary");
-  fs.mkdirSync(primaryPackDir);
-  fs.mkdirSync(primaryConsumerDir);
-
-  const primaryArchive = packArchive(repoRoot, primaryPackDir);
-  await verifyPackedPackage(
-    primaryPackDir,
-    primaryArchive,
-    primaryConsumerDir,
-    primaryPackageName,
+  const unscopedWorkDir = path.join(tempDir, "unscoped");
+  const unscopedPackDir = path.join(unscopedWorkDir, "pack");
+  fs.mkdirSync(unscopedPackDir, { recursive: true });
+  const unscopedFileName = expectedArchiveFileName(
+    UNSCOPED_PACKAGE_NAME,
+    manifest.version,
+  );
+  const unscopedRelativeArchivePath = packArchive(
+    repoRoot,
+    unscopedPackDir,
+    unscopedFileName,
+  );
+  await verifyPackedArchive(
+    unscopedWorkDir,
+    unscopedRelativeArchivePath,
+    UNSCOPED_PACKAGE_NAME,
   );
 
-  const stageDir = path.join(tempDir, "stage-alternate");
-  const alternatePackDir = path.join(tempDir, "pack-alternate");
-  const alternateConsumerDir = path.join(tempDir, "consumer-alternate");
-  fs.mkdirSync(alternatePackDir);
-  fs.mkdirSync(alternateConsumerDir);
-
-  stagePackageCopy(stageDir, alternatePackageName);
-  const alternateArchive = packArchive(stageDir, alternatePackDir, [
-    "--ignore-scripts",
-  ]);
-  await verifyPackedPackage(
-    alternatePackDir,
-    alternateArchive,
-    alternateConsumerDir,
-    alternatePackageName,
+  const scopedWorkDir = path.join(tempDir, "scoped");
+  const scopedStageDir = path.join(scopedWorkDir, "stage");
+  const scopedPackDir = path.join(scopedWorkDir, "pack");
+  fs.mkdirSync(scopedPackDir, { recursive: true });
+  stageScopedPackage(scopedStageDir, manifest, SCOPED_PACKAGE_NAME);
+  const scopedFileName = expectedArchiveFileName(
+    SCOPED_PACKAGE_NAME,
+    manifest.version,
   );
+  const scopedRelativeArchivePath = packArchive(
+    scopedStageDir,
+    scopedPackDir,
+    scopedFileName,
+    { ignoreScripts: true },
+  );
+  await verifyPackedArchive(
+    scopedWorkDir,
+    scopedRelativeArchivePath,
+    SCOPED_PACKAGE_NAME,
+  );
+
+  if (outDir !== undefined) {
+    writeVerifiedOutputs(outDir, [
+      {
+        fileName: unscopedFileName,
+        sourcePath: path.join(unscopedWorkDir, unscopedRelativeArchivePath),
+      },
+      {
+        fileName: scopedFileName,
+        sourcePath: path.join(scopedWorkDir, scopedRelativeArchivePath),
+      },
+    ]);
+  }
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }
