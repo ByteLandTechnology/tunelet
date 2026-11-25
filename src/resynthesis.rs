@@ -1048,22 +1048,6 @@ impl Resynthesis {
         (position, ratio)
     }
 
-    /// Adds a Q14 voice sample to the two channels of `mix`.
-    ///
-    /// If `pan` is `Some`, each channel adds the Q14 product of `sample` and
-    /// its pan gain. If `pan` is `None`, each channel adds `sample` directly.
-    #[inline]
-    fn add_voice(mix: &mut [Q14; 2], sample: Q14, pan: Option<[Q14; 2]>) {
-        for (channel, sum) in mix.iter_mut().enumerate() {
-            *sum = *sum
-                + if let Some(gains) = pan {
-                    sample.mul(gains[channel])
-                } else {
-                    sample
-                };
-        }
-    }
-
     /// Applies the glottal envelope to `sample` and updates `previous_output`
     /// for `channel`.
     ///
@@ -1237,8 +1221,14 @@ impl Resynthesis {
                 let (value, ratio) = self.render_lead(delayed, numeric);
                 final_ratio = ratio;
                 self.voice_ratios[0] = ratio;
-                let pan = self.config.stereo_output.then_some(self.pan[0]);
-                Self::add_voice(&mut mix, value, pan);
+                for (channel, sum) in mix.iter_mut().enumerate() {
+                    *sum = *sum
+                        + if self.config.stereo_output {
+                            value.mul(self.pan[0][channel])
+                        } else {
+                            value
+                        };
+                }
             }
             {
                 let mut voice = 1;
@@ -1253,8 +1243,15 @@ impl Resynthesis {
                         positions.map(|position| history::interpolation(&self.lead, position).0);
                     // Keep the voice and channel order of each sum.
                     for (lane, value) in values.into_iter().enumerate() {
-                        let pan = self.config.stereo_output.then_some(self.pan[voice + lane]);
-                        Self::add_voice(&mut mix, value, pan);
+                        let current_voice = voice + lane;
+                        for (channel, sum) in mix.iter_mut().enumerate() {
+                            *sum = *sum
+                                + if self.config.stereo_output {
+                                    value.mul(self.pan[current_voice][channel])
+                                } else {
+                                    value
+                                };
+                        }
                     }
                     voice += 4;
                 }
@@ -1264,8 +1261,14 @@ impl Resynthesis {
                     let (position, ratio) = self.move_choir_reader(voice, delayed);
                     final_ratio = ratio;
                     let (value, _) = history::interpolation(&self.lead, position);
-                    let pan = self.config.stereo_output.then_some(self.pan[voice]);
-                    Self::add_voice(&mut mix, value, pan);
+                    for (channel, sum) in mix.iter_mut().enumerate() {
+                        *sum = *sum
+                            + if self.config.stereo_output {
+                                value.mul(self.pan[voice][channel])
+                            } else {
+                                value
+                            };
+                    }
                 }
             }
         } else {
@@ -1318,9 +1321,14 @@ impl Resynthesis {
                         value = value.mul(self.harmony_gain);
                     }
                 }
-                let pan =
-                    (self.config.stereo_output && slot > 0).then(|| self.harmony_pan[slot - 1]);
-                Self::add_voice(&mut mix, value, pan);
+                for (channel, sum) in mix.iter_mut().enumerate() {
+                    *sum = *sum
+                        + if self.config.stereo_output && slot > 0 {
+                            value.mul(self.harmony_pan[slot - 1][channel])
+                        } else {
+                            value
+                        };
+                }
             }
             if self.config.formant.enabled {
                 self.formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
