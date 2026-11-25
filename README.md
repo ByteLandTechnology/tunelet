@@ -325,7 +325,9 @@ voices, choir delays and effects use different delays.
 
 The values are linear and have no absolute level. The formant stage must be
 enabled. The envelopes are those of the model that the audio used for the
-last frame. The method returns `Result<bool, Error>`:
+last frame. If the sample rate is above the internal core rate, the method
+writes zero for frequencies above half of the core rate. The method returns
+`Result<bool, Error>`:
 
 | Result      | Description                                                      |
 | ----------- | ---------------------------------------------------------------- |
@@ -501,8 +503,10 @@ buffers of equal length and returns `false` if no envelope is available.
 In that case, it fills both buffers with zeros. If the lengths are not equal
 or the frequency is not valid, it throws and does not change the buffers. The
 frequency must be finite, more than zero and not more than half of the sample
-rate. The class keeps a buffer for the points, so only the first call and a
-call with more points than before reserve memory.
+rate. If the sample rate is above the internal core rate, the method writes
+zero for frequencies above half of the core rate. The class keeps a buffer for
+the points, so only the first call and a call with more points than before
+reserve memory.
 
 ### Memory allocation
 

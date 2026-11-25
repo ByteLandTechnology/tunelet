@@ -441,7 +441,9 @@ impl Processor {
     /// analysis normalizes the signal energy. Scale them for a display.
     ///
     /// `max_frequency_hz` must be finite, more than zero and not more than
-    /// half of the sample rate. The two slices must have the same length.
+    /// half of the sample rate. If the sample rate is above the internal core
+    /// rate, the method writes zero for frequencies above half of the core
+    /// rate. The two slices must have the same length.
     ///
     /// Returns `Ok(true)` if the envelopes are valid. Returns `Ok(false)` and
     /// fills the two slices with zeros in these cases:
@@ -977,7 +979,8 @@ pub struct Feedback {
     /// The count saturates at `u64::MAX`. Drain completion resets it in the
     /// last drain call.
     pub processed_frames: u64,
-    /// The nominal resynthesis latency, as [`Processor::latency_frames`] gives.
+    /// The nominal latency in host frames, as [`Processor::latency_frames`]
+    /// gives.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(serialize_with = "crate::wasm::serialize_frame_count"),

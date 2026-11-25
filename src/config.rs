@@ -17,11 +17,13 @@ pub(crate) const MAX_SAMPLE_RATE_HZ: u32 = 192_000;
 /// The sample rate of the input and the output, 8000..=192000 Hz.
 ///
 /// The default is 44.1 kHz. To convert an integer device rate in
-/// 8000..=192000 Hz, use [`SampleRate::try_from`]. At 44.1 kHz and 48 kHz, the
-/// processor runs directly at that rate. At other rates, a fixed-point
-/// polyphase resampler converts to and from the 44.1 kHz or 48 kHz core. The
-/// rate of a processor is fixed at construction. To change the rate, you must
-/// make a new processor.
+/// 8000..=192000 Hz, use [`SampleRate::try_from`]. The rate of a processor is
+/// fixed at construction. To change the rate, you must make a new processor.
+///
+/// At 44.1 kHz and 48 kHz, the processor runs directly at that rate. At other
+/// rates, a fixed-point polyphase resampler converts to and from an internal
+/// core rate. Multiples and divisors of 44,100 Hz use the 44.1 kHz core. All
+/// other rates use the 48 kHz core.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SampleRate {

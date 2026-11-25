@@ -451,7 +451,8 @@ impl WasmProcessor {
     /// display.
     ///
     /// `maxFrequencyHz` must be finite, more than zero and not more than half
-    /// of the sample rate.
+    /// of the sample rate. If the sample rate is above the internal core rate,
+    /// the method writes zero for frequencies above half of the core rate.
     ///
     /// The method returns `true` if the envelopes are valid. It returns
     /// `false` and fills the two arrays with zeros if the formant stage is
