@@ -3,15 +3,15 @@
 use crate::error::check_range;
 use crate::filter::{Biquad, Design};
 use crate::numeric::fixed::{Fixed, Q14};
+use crate::processor::OutputLayout;
 use crate::{Error, SampleRate};
 
 /// The echo or reverberation network. The default is [`Self::Echo`].
 ///
 /// All modes share one delay buffer. A mode change uses the same buffer
 /// contents and damping filter memories. Thus a transition can play audio
-/// from the previous network. The stereo layout of the buffer does not make
-/// all modes give different left and right signals. Schroeder gives the same
-/// value on the two channels.
+/// from the previous network. All modes keep the stereo dry input. Schroeder
+/// adds the same wet signal to the two channels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -58,9 +58,9 @@ pub struct ReverbConfig {
     pub mode: ReverbMode,
     /// The wet fraction, 0..=1.
     ///
-    /// The default is 0.5. The dry weight is `1 - mix`. Schroeder and Binaural
-    /// use a mono dry signal. The other modes keep the stereo dry input. If
-    /// the network is enabled, a zero mix still advances it.
+    /// The default is 0.5. The dry weight is `1 - mix`. All modes keep the
+    /// stereo dry input. If the network is enabled, a zero mix still advances
+    /// it.
     pub mix: f32,
     /// The diffusion control without a unit, 0..=1.
     ///
@@ -324,9 +324,9 @@ impl Reverb {
     /// Calculates the selected network one time and advances the ring by one
     /// frame.
     /// In bypass, no delay or filter history advances. The internal mono
-    /// averages use integer division toward zero. The PCM downmix in the
-    /// processor uses a shift.
-    pub(crate) fn process_sample(&mut self, frame: [Q14; 2]) -> [Q14; 2] {
+    /// averages use integer division toward zero. `layout` selects the stereo
+    /// or mono wet peak measurement. The mono measurement uses a shift.
+    pub(crate) fn process_sample(&mut self, frame: [Q14; 2], layout: OutputLayout) -> [Q14; 2] {
         if !self.config.enabled {
             return frame;
         }
@@ -344,7 +344,7 @@ impl Reverb {
                 d.comb(t[0], echo.to_bits() as usize, self.decay);
                 [
                     mul(left, dry) + mul(self.mix, d.get(t[25]) - d.get(t[32])),
-                    mul(right, dry) - mul(self.mix, d.get(t[26]) - d.get(t[31])),
+                    mul(right, dry) + mul(self.mix, d.get(t[26]) - d.get(t[31])),
                 ]
             }
             ReverbMode::Schroeder => {
@@ -365,8 +365,8 @@ impl Reverb {
                 );
                 d.allpass(t[40], t[43], self.decay);
                 d.allpass(t[44], t[45], self.decay);
-                let value = mul(mono, dry) + mul(self.mix, d.get(t[45]));
-                [value, value]
+                let wet = mul(self.mix, d.get(t[45]));
+                [mul(left, dry) + wet, mul(right, dry) + wet]
             }
             ReverbMode::SmallRoom => {
                 d.put(left, t[0]);
@@ -402,14 +402,14 @@ impl Reverb {
                 );
                 d.put(a, tap);
                 d.lpf(filter, &mut self.lpf1);
-                let out = mul(mono, dry) + mul(self.mix, d.get(t[40] + filter) + a);
+                let out = mul(left, dry) + mul(self.mix, d.get(t[40] + filter) + a);
                 let b = mul(
                     self.diffuse >> 1,
                     d.get(t[47] + seed) + d.get(t[48] + seed) + d.get(t[54] + seed),
                 );
                 d.put(b, t[40] + tap);
                 d.lpf(t[40] + filter, &mut self.lpf2);
-                [out, mul(mono, dry) + mul(self.mix, d.get(filter) + b)]
+                [out, mul(right, dry) + mul(self.mix, d.get(filter) + b)]
             }
             ReverbMode::MediumHall => {
                 d.put(mono.div::<0, 14>(TWO), t[0]);
@@ -426,16 +426,16 @@ impl Reverb {
                     d.fir(
                         self.scratch,
                         &[
-                            (t[16], q14(-0.25)),
+                            (t[16], q14(0.25)),
                             (t[33], q14(0.25)),
-                            (t[51], q14(-0.25)),
+                            (t[51], q14(0.25)),
                             (t[55], q14(0.25)),
                         ],
                     ),
                     d.fir(
                         self.scratch,
                         &[
-                            (t[16], q14(0.25)),
+                            (t[17], q14(0.25)),
                             (t[32], q14(0.25)),
                             (t[52], q14(0.25)),
                             (t[56], q14(0.2)),
@@ -475,18 +475,23 @@ impl Reverb {
         }
         d.step();
         // Telemetry only. The wet contribution is the output minus the dry
-        // term. Schroeder and Binaural use the mono dry signal.
-        let dry_input = if matches!(
-            self.config.mode,
-            ReverbMode::Schroeder | ReverbMode::Binaural
-        ) {
-            [mono, mono]
-        } else {
-            [left, right]
-        };
-        for (value, input) in result.iter().zip(dry_input) {
-            let wet = (*value - mul(input, dry)).abs().to_bits();
-            self.wet_peak = self.wet_peak.max(wet);
+        // term. Mono calls measure the wet signal after the downmix.
+        let left_wet = result[0] - mul(left, dry);
+        let right_wet = result[1] - mul(right, dry);
+        match layout {
+            OutputLayout::Stereo => {
+                for wet in [left_wet, right_wet] {
+                    self.wet_peak = self.wet_peak.max(wet.abs().to_bits());
+                }
+            }
+            OutputLayout::Mono => {
+                let wet = Q14::from_bits(
+                    ((i64::from(left_wet.to_bits()) + i64::from(right_wet.to_bits())) >> 1) as i32,
+                )
+                .abs()
+                .to_bits();
+                self.wet_peak = self.wet_peak.max(wet);
+            }
         }
         result
     }
