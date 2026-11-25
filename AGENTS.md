@@ -97,8 +97,8 @@ cargo clippy --locked --lib -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
 cargo package --locked
 rustup target add wasm32-unknown-unknown
-cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
+cargo clippy --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --release --no-deps --target wasm32-unknown-unknown --features wasm
 ```
 
 If you run `cargo package --locked` before a commit, add `--allow-dirty`.
@@ -113,11 +113,12 @@ npm run format:check
 ```
 
 If you change the Wasm or TypeScript code, also run these commands.
-`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
-`npm run build` compiles `src/wasm.rs` and `src/index.ts`.
-`npm run verify:pack` runs `npm run build` one time and checks the `tunelet`
-and `@bytelandtechnology/tunelet` archives. Run `npm run build:wasm` before
-`npm run typecheck` so `pkg/tunelet.d.ts` exists:
+`npm run check:wasm` runs Clippy and rustdoc in release mode for
+`wasm32-unknown-unknown`. `npm run build` compiles `src/wasm.rs` and
+`src/index.ts`. `npm run verify:pack` runs `npm run build` one time and
+checks the `tunelet` and `@bytelandtechnology/tunelet` archives. Run
+`npm run build:wasm` before `npm run typecheck` so `pkg/tunelet.d.ts`
+exists:
 
 ```sh
 npm ci
