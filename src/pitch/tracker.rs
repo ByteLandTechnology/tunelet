@@ -17,6 +17,7 @@ use super::search::{tracking_minimum, TRACKING_LAGS};
 use crate::filter::{Biquad, Design};
 use crate::numeric::fixed::{Q14, Q6};
 use crate::numeric::{mul14, mul14_bounded, ring, HISTORY, ONE};
+use crate::resynthesis::history::{clear_dirty_ring, prepare_history, record_history};
 use crate::{PitchConfig, SampleRate};
 
 /// The result of one full-rate input sample.
@@ -115,10 +116,7 @@ impl PitchTracker {
         pre[1].set_design(Design::low_pass(rate.hz(), cutoff * 1.5, 0.707));
         Self {
             pre,
-            raw: vec![0; HISTORY]
-                .into_boxed_slice()
-                .try_into()
-                .expect("prepared pitch history length"),
+            raw: prepare_history(0),
             write: 0,
             detecting: true,
             first: true,
@@ -151,12 +149,7 @@ impl PitchTracker {
     /// The acquisition tables clear at the next decimated call. The previous
     /// usable period stays until another tracking update replaces it.
     pub(crate) fn reset(&mut self) {
-        let written = usize::from(self.written);
-        if written == HISTORY {
-            self.raw.fill(0);
-        } else {
-            self.raw[1..written + 1].fill(0);
-        }
+        clear_dirty_ring(self.raw.as_mut_slice(), usize::from(self.written), 0);
         self.written = 0;
         self.write = 0;
         self.restart();
@@ -581,14 +574,7 @@ impl PitchTracker {
     /// curvature is zero, acquisition starts again. The last usable period is
     /// not discarded.
     pub(crate) fn process_sample(&mut self, sample: i32) -> PitchStep {
-        self.write += 1;
-        if self.write == HISTORY {
-            self.write = 0;
-        }
-        if usize::from(self.written) < HISTORY {
-            self.written += 1;
-        }
-        self.raw[self.write] = sample;
+        record_history(&mut self.raw, &mut self.write, &mut self.written, sample);
         let mut filtered = Q14::from_bits(sample);
         for pre in &mut self.pre {
             filtered = pre.process_sample(filtered);
