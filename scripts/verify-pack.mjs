@@ -1,13 +1,24 @@
 /**
- * This script packs the npm archive, checks its eight files, runs
- * `loadTunelet()` and checks the TypeScript declarations.
+ * This script builds the package one time and packs `tunelet` and
+ * `@bytelandtechnology/tunelet`. For each archive, it checks the eight files,
+ * `loadTunelet()` and the `NodeNext` TypeScript declarations.
+ *
+ * If you give `--ignore-scripts`, the script checks the pre-built `pkg/` and
+ * `dist/` files without a build. If you give `--out-dir <dir>`, the script
+ * writes both `.tgz` archives and `SHA256SUMS.txt` to `<dir>` after all checks
+ * succeed.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+
+const UNSCOPED_PACKAGE_NAME = "tunelet";
+const SCOPED_PACKAGE_NAME = "@bytelandtechnology/tunelet";
 
 const EXPECTED_ARCHIVE_PATHS = [
   "package/LICENSE",
@@ -23,17 +34,9 @@ const EXPECTED_ARCHIVE_PATHS = [
 const PACKAGE_NAME_PATTERN =
   /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
 
-const CHOCOLATEY_PACKAGES = [
-  "npm",
-  "nodejs",
-  "nodejs-lts",
-  "nodejs.commandline",
-  "nodejs.install",
-];
-
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
-/** Return true if `filePath` is a regular file on disk. */
+/** If `filePath` is a regular file on disk, return `true`. */
 function isRegularFile(filePath) {
   try {
     return fs.statSync(filePath).isFile();
@@ -42,20 +45,7 @@ function isRegularFile(filePath) {
   }
 }
 
-/** Parse the CLI flags for `verify-pack.mjs`. */
-function parsePackOptions(argv) {
-  let ignoreScripts = false;
-  for (const arg of argv) {
-    if (arg === "--ignore-scripts") {
-      ignoreScripts = true;
-    } else {
-      throw new Error(`Unknown option: ${arg}`);
-    }
-  }
-  return { ignoreScripts };
-}
-
-/** Check that all archive source files exist before an `--ignore-scripts` pack. */
+/** Check that all expected source files exist in `repoRoot`. */
 function verifyPrebuiltFiles() {
   for (const archivePath of EXPECTED_ARCHIVE_PATHS) {
     const relativeFile = archivePath.slice("package/".length);
@@ -67,272 +57,139 @@ function verifyPrebuiltFiles() {
   }
 }
 
-/** Read and check the current package name so scoped names also work. */
-function readPackageName() {
-  const packageJsonPath = path.join(repoRoot, "package.json");
-  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-  const packageName = packageJson.name;
+/** Read the optional `--ignore-scripts` and `--out-dir` flags from `process.argv`. */
+function parseCliOptions(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      "ignore-scripts": { type: "boolean", default: false },
+      "out-dir": { type: "string" },
+    },
+    strict: true,
+  });
   assert.equal(
-    typeof packageName,
+    positionals.length,
+    0,
+    `Unexpected positional arguments: ${positionals.join(" ")}`,
+  );
+  const ignoreScripts = Boolean(values["ignore-scripts"]);
+  const rawOutDir = values["out-dir"];
+  if (rawOutDir === undefined) {
+    return { ignoreScripts, outDir: undefined };
+  }
+  assert.ok(
+    rawOutDir.trim().length > 0 && !rawOutDir.startsWith("-"),
+    "--out-dir requires a directory path",
+  );
+  return { ignoreScripts, outDir: path.resolve(process.cwd(), rawOutDir) };
+}
+
+/** Read and check the manifest in `package.json`. */
+function readPackageManifest() {
+  const packageJsonPath = path.join(repoRoot, "package.json");
+  const manifest = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  assert.equal(
+    typeof manifest.name,
     "string",
     "package.json name must be a string",
   );
+  assert.match(
+    manifest.name,
+    PACKAGE_NAME_PATTERN,
+    `Invalid package name: ${manifest.name}`,
+  );
+  assert.equal(
+    manifest.name,
+    UNSCOPED_PACKAGE_NAME,
+    `Expected package.json name to be ${UNSCOPED_PACKAGE_NAME}, found ${manifest.name}`,
+  );
+  assert.equal(
+    typeof manifest.version,
+    "string",
+    "package.json version must be a string",
+  );
+  assert.ok(
+    manifest.version.trim().length > 0,
+    "package.json version must not be empty",
+  );
+  return manifest;
+}
+
+/** Return the `.tgz` file name that `npm pack` writes for `packageName`. */
+function expectedArchiveFileName(packageName, version) {
+  return `${packageName.replace(/^@/, "").replace(/\//g, "-")}-${version}.tgz`;
+}
+
+/** Copy the built package files into `stageDir` with `packageName`. */
+function stageScopedPackage(stageDir, manifest, packageName) {
   assert.match(
     packageName,
     PACKAGE_NAME_PATTERN,
     `Invalid package name: ${packageName}`,
   );
-  return packageName;
-}
+  fs.mkdirSync(stageDir, { recursive: true });
 
-/** Check standard and split relative paths from `dir` for `npm-cli.js`. */
-function findNpmCliInDir(dir) {
-  const candidates = [
-    path.join(dir, "node_modules", "npm", "bin", "npm-cli.js"),
-    path.resolve(dir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
-    path.resolve(dir, "..", "node_modules", "npm", "bin", "npm-cli.js"),
-    path.join(dir, "npm-cli.js"),
-    path.join(dir, "bin", "npm-cli.js"),
-    path.resolve(dir, "..", "bin", "npm-cli.js"),
-  ];
-  for (const candidate of candidates) {
-    if (isRegularFile(candidate)) {
-      return candidate;
-    }
-  }
-  return undefined;
-}
-
-/** Check the tool directories of Chocolatey packages in `libDir` for `npm-cli.js`. */
-function findNpmCliInChocolateyLib(libDir) {
-  for (const pkg of CHOCOLATEY_PACKAGES) {
-    const toolsDir = path.join(libDir, pkg, "tools");
-    const direct = findNpmCliInDir(toolsDir);
-    if (direct) {
-      return direct;
-    }
-    try {
-      for (const entry of fs.readdirSync(toolsDir, { withFileTypes: true })) {
-        if (entry.isDirectory() && entry.name !== "node_modules") {
-          const nested = findNpmCliInDir(path.join(toolsDir, entry.name));
-          if (nested) {
-            return nested;
-          }
-        }
-      }
-    } catch {
-      // Ignore absent Chocolatey tool directories.
-    }
-  }
-  return undefined;
-}
-
-/** Check Volta image directories relative to `nodeDir` for `npm`. */
-function findNpmInVoltaImage(nodeDir) {
-  const leafName = path.basename(nodeDir).toLowerCase();
-  const baseNodeDir =
-    leafName === "bin" || leafName === "x64" || leafName === "arm64"
-      ? path.dirname(nodeDir)
-      : nodeDir;
-  const nodeTypeDir = path.dirname(baseNodeDir);
-  const imageDir = path.dirname(nodeTypeDir);
-  if (
-    path.basename(nodeTypeDir).toLowerCase() !== "node" ||
-    path.basename(imageDir).toLowerCase() !== "image"
-  ) {
-    return undefined;
-  }
-
-  for (const imageKind of ["npm", "bundled-npm"]) {
-    const kindDir = path.join(imageDir, imageKind);
-    try {
-      const versions = fs
-        .readdirSync(kindDir, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => entry.name)
-        .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
-      for (const version of versions) {
-        const cliCandidate = findNpmCliInDir(path.join(kindDir, version));
-        if (cliCandidate) {
-          return { command: process.execPath, prefixArgs: [cliCandidate] };
-        }
-      }
-    } catch {
-      // Ignore absent Volta image directories.
-    }
-  }
-
-  const voltaRoot = path.resolve(imageDir, "..", "..");
-  for (const exeCandidate of [
-    path.join(voltaRoot, "bin", "npm.exe"),
-    path.join(voltaRoot, "npm.exe"),
-  ]) {
-    if (isRegularFile(exeCandidate)) {
-      return { command: exeCandidate, prefixArgs: [] };
-    }
-  }
-  return undefined;
-}
-
-/** Check one candidate directory `dir` for `npm-cli.js` or `npm.exe`. */
-function findWindowsNpmInDir(dir) {
-  const cliPath = findNpmCliInDir(dir);
-  if (cliPath) {
-    return { command: process.execPath, prefixArgs: [cliPath] };
-  }
-
-  const dirName = path.basename(dir).toLowerCase();
-  const parentName = path.basename(path.dirname(dir)).toLowerCase();
-  if (dirName === "bin") {
-    const chocoCli = findNpmCliInChocolateyLib(path.resolve(dir, "..", "lib"));
-    if (chocoCli) {
-      return { command: process.execPath, prefixArgs: [chocoCli] };
-    }
-  } else if (dirName === "tools") {
-    const chocoCli = findNpmCliInChocolateyLib(path.resolve(dir, "..", ".."));
-    if (chocoCli) {
-      return { command: process.execPath, prefixArgs: [chocoCli] };
-    }
-  } else if (parentName === "tools") {
-    const chocoCli = findNpmCliInChocolateyLib(
-      path.resolve(dir, "..", "..", ".."),
-    );
-    if (chocoCli) {
-      return { command: process.execPath, prefixArgs: [chocoCli] };
-    }
-  }
-
-  const npmExePath = path.join(dir, "npm.exe");
-  if (
-    isRegularFile(npmExePath) &&
-    path.resolve(npmExePath) !== path.resolve(process.execPath)
-  ) {
-    return { command: npmExePath, prefixArgs: [] };
-  }
-  return undefined;
-}
-
-/** Check a list of directories for `npm` and skip duplicates. */
-function searchWindowsNpmDirs(dirs, seen) {
-  for (const dir of dirs) {
-    const key = path.normalize(dir).toLowerCase();
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    const resolved = findWindowsNpmInDir(dir);
-    if (resolved) {
-      return resolved;
-    }
-  }
-  return undefined;
-}
-
-/** Locate `npm-cli.js` or `npm.exe` across MSI, Chocolatey, MSYS2 and Volta. */
-function resolveWindowsNpm() {
-  const nodeDirs = [path.dirname(process.execPath)];
-  try {
-    const realNodeDir = path.dirname(fs.realpathSync(process.execPath));
-    if (!nodeDirs.includes(realNodeDir)) {
-      nodeDirs.push(realNodeDir);
-    }
-  } catch {
-    // If realpath fails, keep the first directory.
-  }
-
-  const rawPath = process.env.PATH ?? process.env.Path ?? "";
-  const pathDelimiter = rawPath.includes(";") ? ";" : path.delimiter;
-  const pathDirs = rawPath
-    .split(pathDelimiter)
-    .map((entry) => entry.trim().replace(/^"+|"+$/g, ""))
-    .filter((entry) => entry.length > 0);
-
-  const seen = new Set();
-  const fromNodeOrPath = searchWindowsNpmDirs([...nodeDirs, ...pathDirs], seen);
-  if (fromNodeOrPath) {
-    return fromNodeOrPath;
-  }
-
-  for (const nodeDir of nodeDirs) {
-    const voltaMatch = findNpmInVoltaImage(nodeDir);
-    if (voltaMatch) {
-      return voltaMatch;
-    }
-  }
-
-  const envDirs = [];
-  if (process.env.VOLTA_HOME) {
-    envDirs.push(path.join(process.env.VOLTA_HOME, "bin"));
-    envDirs.push(process.env.VOLTA_HOME);
-  }
-  if (process.env.LOCALAPPDATA) {
-    envDirs.push(path.join(process.env.LOCALAPPDATA, "Volta", "bin"));
-  }
-  if (process.env.ChocolateyInstall) {
-    envDirs.push(path.join(process.env.ChocolateyInstall, "bin"));
-  }
-  if (process.env.ProgramData) {
-    envDirs.push(path.join(process.env.ProgramData, "chocolatey", "bin"));
-  }
-  if (process.env.APPDATA) {
-    envDirs.push(path.join(process.env.APPDATA, "npm"));
-  }
-  if (process.env.ProgramFiles) {
-    envDirs.push(path.join(process.env.ProgramFiles, "Volta"));
-    envDirs.push(path.join(process.env.ProgramFiles, "nodejs"));
-  }
-
-  const fromEnvDirs = searchWindowsNpmDirs(envDirs, seen);
-  if (fromEnvDirs) {
-    return fromEnvDirs;
-  }
-
-  for (const chocoRoot of [
-    process.env.ChocolateyInstall,
-    process.env.ProgramData
-      ? path.join(process.env.ProgramData, "chocolatey")
-      : undefined,
-  ]) {
-    if (chocoRoot) {
-      const chocoCli = findNpmCliInChocolateyLib(path.join(chocoRoot, "lib"));
-      if (chocoCli) {
-        return { command: process.execPath, prefixArgs: [chocoCli] };
+  const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
+  const topLevelEntries = new Set(["LICENSE", "README.md"]);
+  for (const entry of manifestFiles) {
+    if (typeof entry === "string") {
+      const firstSegment = entry.replace(/^\.\//, "").split("/")[0];
+      if (firstSegment.length > 0) {
+        topLevelEntries.add(firstSegment);
       }
     }
   }
 
-  throw new Error("Cannot find npm-cli.js or npm.exe on Windows.");
+  for (const entry of topLevelEntries) {
+    const sourcePath = path.join(repoRoot, entry);
+    if (fs.existsSync(sourcePath)) {
+      fs.cpSync(sourcePath, path.join(stageDir, entry), { recursive: true });
+    }
+  }
+
+  const stagedManifest = { ...manifest, name: packageName };
+  fs.writeFileSync(
+    path.join(stageDir, "package.json"),
+    `${JSON.stringify(stagedManifest, null, 2)}\n`,
+  );
 }
 
 /** Run `npm pack` without a shell and return the relative archive path. */
-function packArchive(packDir, { ignoreScripts }) {
+function packArchive(
+  sourceDir,
+  packDir,
+  expectedFileName,
+  { ignoreScripts = false } = {},
+) {
+  const packArgs = ["pack", "--pack-destination", packDir];
   if (ignoreScripts) {
-    verifyPrebuiltFiles();
+    packArgs.push("--ignore-scripts");
   }
-
-  const packArgs = ignoreScripts
-    ? ["pack", "--ignore-scripts", "--pack-destination", packDir]
-    : ["pack", "--pack-destination", packDir];
 
   const npmExecPath = process.env.npm_execpath;
   if (npmExecPath) {
-    if (npmExecPath.toLowerCase().endsWith(".exe")) {
-      execFileSync(npmExecPath, packArgs, { cwd: repoRoot, stdio: "inherit" });
-    } else {
-      execFileSync(process.execPath, [npmExecPath, ...packArgs], {
-        cwd: repoRoot,
-        stdio: "inherit",
-      });
-    }
+    execFileSync(process.execPath, [npmExecPath, ...packArgs], {
+      cwd: sourceDir,
+      stdio: "inherit",
+    });
   } else if (process.platform === "win32") {
-    const { command, prefixArgs } = resolveWindowsNpm();
-    execFileSync(command, [...prefixArgs, ...packArgs], {
-      cwd: repoRoot,
+    const npmCliPath = path.join(
+      path.dirname(process.execPath),
+      "node_modules",
+      "npm",
+      "bin",
+      "npm-cli.js",
+    );
+    if (!fs.existsSync(npmCliPath)) {
+      throw new Error(`npm-cli.js was not found at ${npmCliPath}`);
+    }
+    execFileSync(process.execPath, [npmCliPath, ...packArgs], {
+      cwd: sourceDir,
       stdio: "inherit",
     });
   } else {
     execFileSync("npm", packArgs, {
-      cwd: repoRoot,
+      cwd: sourceDir,
       stdio: "inherit",
     });
   }
@@ -344,6 +201,11 @@ function packArchive(packDir, { ignoreScripts }) {
     archives.length,
     1,
     `Expected one archive, found ${archives.length}`,
+  );
+  assert.equal(
+    archives[0],
+    expectedFileName,
+    `Expected archive ${expectedFileName}, found ${archives[0]}`,
   );
   return path.posix.join("pack", archives[0]);
 }
@@ -464,17 +326,25 @@ function verifyTypeDeclarations(consumerDir, packageName) {
       "  loadTunelet as namedLoadTunelet,",
       "  Tunelet,",
       "  type ProcessorConfig,",
+      "  type SyncInitInput as RootSyncInitInput,",
       `} from ${pkgLiteral};`,
       "import init, {",
       "  initSync as wasmInitSync,",
       "  type InitInput,",
       "  type InitOutput,",
+      "  type SyncInitInput,",
       `} from ${wasmLiteral};`,
       "",
-      "export async function verifyTypes(source?: InitInput): Promise<void> {",
+      "export async function verifyTypes(",
+      "  source?: InitInput,",
+      "  syncSource?: SyncInitInput & RootSyncInitInput,",
+      "): Promise<void> {",
       "  const exportsFromRoot: InitOutput = await loadTunelet(source);",
       "  const exportsFromNamed: InitOutput = await namedLoadTunelet(source);",
-      "  const exportsFromWasm: InitOutput = await init(source);",
+      "  const exportsFromWasm: InitOutput =",
+      "    source === undefined",
+      "      ? await init()",
+      "      : await init({ module_or_path: source });",
       "  const config: ProcessorConfig = defaultConfig();",
       "  const processor = new Tunelet(48000, 128, config);",
       "  const input = new Int16Array(128);",
@@ -482,8 +352,16 @@ function verifyTypeDeclarations(consumerDir, packageName) {
       "  const right = new Int16Array(128);",
       "  processor.process(input, left, right);",
       "  processor.free();",
-      "  void rootInitSync;",
-      "  void wasmInitSync;",
+      "  if (syncSource !== undefined) {",
+      "    const syncExportsFromRoot: InitOutput = rootInitSync({",
+      "      module: syncSource,",
+      "    });",
+      "    const syncExportsFromWasm: InitOutput = wasmInitSync({",
+      "      module: syncSource,",
+      "    });",
+      "    void syncExportsFromRoot;",
+      "    void syncExportsFromWasm;",
+      "  }",
       "  void exportsFromRoot;",
       "  void exportsFromNamed;",
       "  void exportsFromWasm;",
@@ -519,21 +397,94 @@ function verifyTypeDeclarations(consumerDir, packageName) {
   );
 }
 
-const packOptions = parsePackOptions(process.argv.slice(2));
-const packageName = readPackageName();
+/** Check the archive list, runtime imports and TypeScript declarations. */
+function verifyPackedArchive(workDir, relativeArchivePath, packageName) {
+  const consumerDir = path.join(workDir, "consumer");
+  fs.mkdirSync(consumerDir);
+  verifyArchiveEntries(workDir, relativeArchivePath);
+  installArchive(workDir, relativeArchivePath, consumerDir, packageName);
+  verifyRuntimeImport(consumerDir, packageName);
+  verifyTypeDeclarations(consumerDir, packageName);
+}
+
+/** Copy both verified archives and write `SHA256SUMS.txt` in `outDir`. */
+function writeVerifiedOutputs(outDir, archives) {
+  fs.mkdirSync(outDir, { recursive: true });
+  const checksumLines = [];
+  for (const { fileName, sourcePath } of archives) {
+    const destinationPath = path.join(outDir, fileName);
+    fs.copyFileSync(sourcePath, destinationPath);
+    const digest = createHash("sha256")
+      .update(fs.readFileSync(destinationPath))
+      .digest("hex");
+    checksumLines.push(`${digest}  ${fileName}`);
+  }
+  fs.writeFileSync(
+    path.join(outDir, "SHA256SUMS.txt"),
+    `${checksumLines.join("\n")}\n`,
+  );
+}
+
+const { ignoreScripts, outDir } = parseCliOptions(process.argv.slice(2));
+const manifest = readPackageManifest();
+if (ignoreScripts) {
+  verifyPrebuiltFiles();
+}
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tunelet-verify-pack-"));
 
 try {
-  const packDir = path.join(tempDir, "pack");
-  const consumerDir = path.join(tempDir, "consumer");
-  fs.mkdirSync(packDir);
-  fs.mkdirSync(consumerDir);
+  const unscopedWorkDir = path.join(tempDir, "unscoped");
+  const unscopedPackDir = path.join(unscopedWorkDir, "pack");
+  fs.mkdirSync(unscopedPackDir, { recursive: true });
+  const unscopedFileName = expectedArchiveFileName(
+    UNSCOPED_PACKAGE_NAME,
+    manifest.version,
+  );
+  const unscopedRelativeArchivePath = packArchive(
+    repoRoot,
+    unscopedPackDir,
+    unscopedFileName,
+    { ignoreScripts },
+  );
+  verifyPackedArchive(
+    unscopedWorkDir,
+    unscopedRelativeArchivePath,
+    UNSCOPED_PACKAGE_NAME,
+  );
 
-  const relativeArchivePath = packArchive(packDir, packOptions);
-  verifyArchiveEntries(tempDir, relativeArchivePath);
-  installArchive(tempDir, relativeArchivePath, consumerDir, packageName);
-  verifyRuntimeImport(consumerDir, packageName);
-  verifyTypeDeclarations(consumerDir, packageName);
+  const scopedWorkDir = path.join(tempDir, "scoped");
+  const scopedStageDir = path.join(scopedWorkDir, "stage");
+  const scopedPackDir = path.join(scopedWorkDir, "pack");
+  fs.mkdirSync(scopedPackDir, { recursive: true });
+  stageScopedPackage(scopedStageDir, manifest, SCOPED_PACKAGE_NAME);
+  const scopedFileName = expectedArchiveFileName(
+    SCOPED_PACKAGE_NAME,
+    manifest.version,
+  );
+  const scopedRelativeArchivePath = packArchive(
+    scopedStageDir,
+    scopedPackDir,
+    scopedFileName,
+    { ignoreScripts: true },
+  );
+  verifyPackedArchive(
+    scopedWorkDir,
+    scopedRelativeArchivePath,
+    SCOPED_PACKAGE_NAME,
+  );
+
+  if (outDir !== undefined) {
+    writeVerifiedOutputs(outDir, [
+      {
+        fileName: unscopedFileName,
+        sourcePath: path.join(unscopedWorkDir, unscopedRelativeArchivePath),
+      },
+      {
+        fileName: scopedFileName,
+        sourcePath: path.join(scopedWorkDir, scopedRelativeArchivePath),
+      },
+    ]);
+  }
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

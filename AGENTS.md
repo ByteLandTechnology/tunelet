@@ -97,11 +97,13 @@ cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
-cargo package --list --locked
+cargo package --locked
 rustup target add wasm32-unknown-unknown
 cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
 ```
+
+If you run `cargo package --locked` before a commit, add `--allow-dirty`.
 
 In PowerShell on Windows, set `RUSTDOCFLAGS` in the environment before `cargo doc` and `npm run check:wasm`:
 
@@ -118,7 +120,8 @@ In `cmd.exe` on Windows, use `set "RUSTDOCFLAGS=-D warnings"` before the doc com
 If you change the Wasm or TypeScript code, also run these commands.
 `npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
 `npm run build` compiles `src/wasm.rs` and `src/index.ts`.
-`npm run verify:pack` runs `npm run build` and checks the archives:
+`npm run verify:pack` runs `npm run build` one time and checks the `tunelet`
+and `@bytelandtechnology/tunelet` archives:
 
 ```sh
 npm ci
@@ -126,20 +129,18 @@ RUSTDOCFLAGS="-D warnings" npm run check:wasm
 npm run verify:pack
 ```
 
-`node scripts/verify-pack.mjs --ignore-scripts` checks pre-built `pkg/` and
+`npm run verify:pack -- --ignore-scripts` checks the pre-built `pkg/` and
 `dist/` files without a second Wasm build. If `pkg/` is ready, run
-`npm run build:ts` before `node scripts/verify-pack.mjs --ignore-scripts`.
-You can also run `node scripts/verify-pack.mjs` directly outside `npm run`
-on Linux, macOS and Windows.
+`npm run build:ts` before `npm run verify:pack -- --ignore-scripts`.
 
 - `.github/workflows/ci.yml` runs on each pull request and each push to `main`.
-  `build-wasm` checks the format, Clippy, rustdoc, the crate file list and
+  `build-wasm` checks the format, Clippy, rustdoc, the crate archive and
   `check:wasm` on `ubuntu-latest`, then builds and uploads `pkg/`. `check-os`
   runs on `ubuntu-latest`, `macos-latest` and `windows-latest` with isolated
   failures (`fail-fast: false`). Each runner builds `libtunelet.so`,
   `libtunelet.dylib` or `tunelet.dll`, compiles TypeScript and runs
-  `verify-pack.mjs`. `verify` reports the combined status for branch
-  protection.
+  `npm run verify:pack -- --ignore-scripts`. `verify` reports the combined
+  status for branch protection.
 - Make sure that there are no new warnings. This includes broken
   rustdoc links.
 - The crate has no tests (`test = false`). Do not add tests or test
@@ -164,9 +165,12 @@ on Linux, macOS and Windows.
 - Releases: release-please sets the versions and writes `CHANGELOG.md`.
   Do not change the version in `Cargo.toml`, `Cargo.lock`,
   `package.json`, `package-lock.json` or `.release-please-manifest.json`
-  by hand. The commit types and the `!` mark set the next version. The
-  release workflow is `.github/workflows/release.yml`. It publishes to
-  npm and crates.io through trusted publishing, so do not rename it.
+  by hand. The commit types and the `!` mark set the next version. In
+  `.github/workflows/release.yml`, `build-wasm` builds, checks and
+  uploads both `.tgz` archives and `SHA256SUMS.txt`. Then `publish-npm`
+  and `publish-github` verify `SHA256SUMS.txt` and publish those exact
+  `.tgz` archives. The OIDC policies on npm and crates.io name
+  `release.yml`, so do not rename that file.
 
 ## Prohibited changes
 

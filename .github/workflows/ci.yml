@@ -1,10 +1,10 @@
 # Continuous integration for the Rust crate, the Wasm bindings and the
 # npm package.
 #
-# First, build-wasm checks the Rust lints, the docs and the Wasm target on
-# Linux, then uploads pkg/. Next, check-os builds the native library, compiles
-# TypeScript and checks the npm archive on Linux, macOS and Windows. Last,
-# verify reports one status check for branch protection.
+# First, build-wasm checks the Rust lints, the docs, the crate archive and the
+# Wasm target on Linux, then uploads pkg/. Next, check-os builds the native
+# library, compiles TypeScript and checks the npm archives on Linux, macOS and
+# Windows. Last, verify reports one status check for branch protection.
 name: CI
 
 on:
@@ -56,7 +56,7 @@ jobs:
       - run: cargo doc --locked --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
-      - run: cargo package --list --locked
+      - run: cargo package --locked
       - run: npm run check:wasm
         env:
           RUSTDOCFLAGS: "-D warnings"
@@ -117,7 +117,7 @@ jobs:
       - run: npm ci
       - run: npm run build:ts
       # Pack and check the pre-built files without a second Wasm build.
-      - run: node scripts/verify-pack.mjs --ignore-scripts
+      - run: npm run verify:pack -- --ignore-scripts
 
   verify:
     needs:
