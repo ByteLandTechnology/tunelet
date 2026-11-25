@@ -10,22 +10,12 @@ use crate::{Error, EventProblem, ProcessorConfig, ResynthesisConfig};
 
 /// A configuration or MIDI control that applies before a frame in the block.
 ///
-#[cfg_attr(
-    not(all(feature = "wasm", target_arch = "wasm32")),
-    doc = " Give controls to a process call as [`TimedEvent`] values. The call borrows",
-    doc = " the slice only for that call. There is no heap allocation and no deferred",
-    doc = " queue. A stage event replaces all settings of that stage. To change one",
-    doc = " field, start from the current configuration of the processor.",
-    doc = " Configuration changes have the same effects on state as",
-    doc = " [`crate::Processor::set_config`]."
-)]
-#[cfg_attr(
-    all(feature = "wasm", target_arch = "wasm32"),
-    doc = " Give controls to a process call in `TimedEvent` objects. There is no",
-    doc = " deferred queue after the call. A stage event replaces all settings of",
-    doc = " that stage. To change one field, start from `config()`. Configuration",
-    doc = " changes have the same effects on state as `setConfig`."
-)]
+/// Give controls to a process call as [`TimedEvent`] values. The call borrows
+/// the slice only for that call. There is no heap allocation and no deferred
+/// queue. A stage event replaces all settings of that stage. To change one
+/// field, start from the current configuration of the processor.
+/// Configuration changes have the same effects on state as
+/// [`crate::Processor::set_config`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -153,31 +143,23 @@ impl<'a> ValidatedEvents<'a> {
     pub(crate) fn new(events: &'a [TimedEvent], frames: usize) -> Result<Self, Error> {
         let mut previous = 0;
         for (index, event) in events.iter().enumerate() {
-            let offset = event.offset;
-            let problem = if offset >= frames {
-                Some(EventProblem::OffsetOutsideBlock { offset, frames })
-            } else if offset < previous {
-                Some(EventProblem::OffsetDecreasing { offset, previous })
+            let problem = if event.offset >= frames {
+                Some(EventProblem::OffsetOutsideBlock)
+            } else if event.offset < previous {
+                Some(EventProblem::OffsetDecreasing)
             } else {
                 match event.event.validate() {
                     Ok(()) => None,
-                    Err(Error::InvalidConfig {
-                        field,
-                        index,
-                        problem,
-                    }) => Some(EventProblem::Config {
-                        field,
-                        index,
-                        problem,
-                    }),
-                    Err(Error::InvalidMidi { problem }) => Some(EventProblem::Midi { problem }),
-                    Err(_) => None,
+                    Err(Error::InvalidConfig { field, problem }) => {
+                        Some(EventProblem::Config { field, problem })
+                    }
+                    Err(_) => Some(EventProblem::Midi),
                 }
             };
             if let Some(problem) = problem {
                 return Err(Error::InvalidEvent { index, problem });
             }
-            previous = offset;
+            previous = event.offset;
         }
         Ok(Self { remaining: events })
     }

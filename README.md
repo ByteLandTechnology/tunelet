@@ -176,7 +176,8 @@ limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
 multi-voice mixes.
 
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+dry path starts after Warm and has a delay of 1,593 frames. All six reverb
+modes keep the stereo dry signal.
 
 ### Harmony sources
 
@@ -295,7 +296,7 @@ These calls read the state of the processor. They do not change the audio.
 
 | Call                 | Data                                                              |
 | -------------------- | ----------------------------------------------------------------- |
-| `feedback()`         | The pitch, the stereo peak, the correction ratio, the frame count |
+| `feedback()`         | The pitch, the output peak, the correction ratio, the frame count |
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
@@ -311,8 +312,9 @@ The telemetry includes these items:
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
 The peak windows of the telemetry are independent of the peak window of the
-feedback. The latency is nominal. Dry mixes, resampled voices and effects
-have different timing.
+feedback. In mono calls, the output and reverb wet peaks measure the audio
+after the downmix. The dry path has the 1,593-frame delay. Resampled voices,
+choir delays and effects use different delays.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
@@ -389,17 +391,15 @@ For a custom asset location, give one of these sources to
 - A promise for one of these.
 
 For a Node.js `file:` source, use a URL object. A string source obeys fetch
-rules. Calls with the same source share the initialized module. A call with a
-different source rejects with an `Error`. A custom binary must match the
-generated bindings.
+rules. The first concurrent call selects the source. Later arguments do not
+replace an initialized module. A custom binary must match the generated
+bindings.
 
 The package root also exports `loadTunelet` as its default export. For direct
 control of Wasm initialization, `tunelet/wasm` gives the generated default
 initializer and `initSync`. The package root re-exports `initSync` too. Use
-only one initialization entry point for each module instance. Calls before
-initialization or after `free()` throw an `Error`, and duplicate `free()`
-calls do no work. The package gives only ESM exports. CommonJS applications
-can use `await import("tunelet")`.
+only one initialization entry point for each module instance. The package
+gives only ESM exports. CommonJS applications can use `await import("tunelet")`.
 
 ### Deployment
 
@@ -504,13 +504,15 @@ call with more points than before reserve memory.
 
 ### Memory allocation
 
-The constructor allocates reusable PCM buffers. A successful call that
+The constructor allocates reusable PCM buffers. The processor also keeps an
+event buffer and uses its capacity again across calls. A successful call that
 processes audio without events does not allocate new Rust PCM storage.
 However, the call copies the audio across the boundary between JavaScript and
 Wasm. These items can allocate:
 
 - Object conversion.
-- Supplied events.
+- Supplied events when a call gives more events than before, or when an event
+  converts a stage configuration.
 - Errors.
 - Feedback and telemetry.
 - The formant envelopes.
@@ -524,14 +526,15 @@ Rust functions.
 
 ### Rust crate
 
-To build the crate and check the format, the lints and the documentation,
-run these commands:
+To build the crate and check the format, the lints, the documentation and
+the archive, run these commands:
 
 ```sh
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 cargo doc --locked --no-deps
+cargo package --locked
 ```
 
 To check the `wasm` feature for `wasm32-unknown-unknown` with Cargo, run

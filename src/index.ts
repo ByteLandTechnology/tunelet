@@ -3,160 +3,60 @@
  *
  * Call `loadTunelet()` or `initSync()` before you construct processors or read
  * the default configuration. Both environments use the same generated bindings
- * and the same Wasm binary. This module wraps `loadTunelet`, `initSync`,
- * `defaultConfig` and `Tunelet` with lifecycle checks, and re-exports the
- * configuration, event, feedback and telemetry types.
+ * and the same Wasm binary. This module wraps `Tunelet`, `defaultConfig` and
+ * `initSync` with lifecycle checks, and re-exports the configuration, event,
+ * feedback and telemetry types.
  */
-import wasmInit, {
+import init, {
   Tunelet as WasmTunelet,
   defaultConfig as wasmDefaultConfig,
   initSync as wasmInitSync,
 } from "../pkg/tunelet.js";
 import type {
-  AlienConfig,
   BlockEvents,
-  ChordDegree,
-  ChordName,
-  ControlEvent,
-  CorrectionConfig,
-  CorrectionScale,
   Feedback,
-  FormantConfig,
-  HarmonyConfig,
-  HarmonyScale,
-  HarmonySource,
   InitInput,
   InitOutput,
-  Inversion,
-  MidiEvent,
-  MultiVoiceMode,
-  NoteMask,
-  PitchClass,
-  PitchConfig,
   ProcessorConfig,
-  PunchConfig,
-  ResynthesisConfig,
-  ReverbConfig,
-  ReverbMode,
   SyncInitInput,
   Telemetry,
-  TimedEvent,
-  WarmConfig,
 } from "../pkg/tunelet.js";
 
-export type {
-  AlienConfig,
-  BlockEvents,
-  ChordDegree,
-  ChordName,
-  ControlEvent,
-  CorrectionConfig,
-  CorrectionScale,
-  Feedback,
-  FormantConfig,
-  HarmonyConfig,
-  HarmonyScale,
-  HarmonySource,
-  InitInput,
-  InitOutput,
-  Inversion,
-  MidiEvent,
-  MultiVoiceMode,
-  NoteMask,
-  PitchClass,
-  PitchConfig,
-  ProcessorConfig,
-  PunchConfig,
-  ResynthesisConfig,
-  ReverbConfig,
-  ReverbMode,
-  SyncInitInput,
-  Telemetry,
-  TimedEvent,
-  WarmConfig,
-};
+export * from "../pkg/tunelet.js";
 
-/** State for the active or completed Wasm initialization attempt. */
-interface InitAttempt {
-  rawSource: InitInput | Promise<InitInput> | undefined;
-  resolvedInput: InitInput | undefined;
-  inputPromise: Promise<InitInput>;
-  outputPromise: Promise<InitOutput>;
-}
+/** The shared initialization promise, which a failure clears. */
+let initialization: Promise<InitOutput> | undefined;
 
-/** The active or completed initialization state, which a failure clears. */
-let activeAttempt: InitAttempt | undefined;
+/** True after the Wasm module completes initialization. */
+let initialized = false;
 
-/** The initialized Wasm exports after a successful initialization. */
-let initializedOutput: InitOutput | undefined;
+/** Maps each active wrapper instance to its Wasm processor. */
+const instances = new WeakMap<Tunelet, WasmTunelet>();
 
-/** Returns the default URL of the packaged Wasm binary. */
-function defaultWasmUrl(): URL {
-  return new URL("../pkg/tunelet_bg.wasm", import.meta.url);
-}
-
-/** Checks if a value is a Promise-like object. */
-function isPromiseLike(
-  value: InitInput | Promise<InitInput> | undefined,
-): value is Promise<InitInput> {
-  return (
-    (typeof value === "object" || typeof value === "function") &&
-    value !== null &&
-    "then" in value &&
-    typeof (value as { then?: unknown }).then === "function"
-  );
-}
-
-/** Checks if two resolved Wasm sources identify the same input. */
-function sameInput(left: InitInput, right: InitInput): boolean {
-  if (Object.is(left, right)) {
-    return true;
-  }
-  return left instanceof URL && right instanceof URL && left.href === right.href;
-}
-
-/** Checks if two unawaited `loadTunelet` arguments are immediately equal. */
-function sameRawSource(
-  left: InitInput | Promise<InitInput> | undefined,
-  right: InitInput | Promise<InitInput> | undefined,
-): boolean {
-  if (Object.is(left, right)) {
-    return true;
-  }
-  if (isPromiseLike(left) || isPromiseLike(right)) {
-    return false;
-  }
-  const leftInput = left === undefined ? defaultWasmUrl() : left;
-  const rightInput = right === undefined ? defaultWasmUrl() : right;
-  return sameInput(leftInput, rightInput);
-}
-
-/** Resolves an optional `loadTunelet` argument to a concrete `InitInput`. */
-async function resolveInput(
-  source: InitInput | Promise<InitInput> | undefined,
-): Promise<InitInput> {
-  return source === undefined ? defaultWasmUrl() : await source;
-}
-
-/** Throws if the Wasm module has not completed initialization. */
+/** Throws if the Wasm module is not initialized yet. */
 function ensureInitialized(): void {
-  if (initializedOutput === undefined) {
+  if (initialized) {
+    return;
+  }
+  try {
+    wasmInitSync({ module: undefined as never });
+    initialized = true;
+  } catch {
     throw new Error(
-      "Tunelet Wasm is not initialized. Await loadTunelet() or call initSync() first.",
+      "Tunelet Wasm is not initialized. Call loadTunelet() or initSync() first.",
     );
   }
 }
 
-/** Checks if a synchronous init argument uses the `{ module }` wrapper. */
-function isSyncModuleObject(
-  value: { module: SyncInitInput } | SyncInitInput,
-): value is { module: SyncInitInput } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    Object.getPrototypeOf(value) === Object.prototype &&
-    "module" in value
-  );
+/** Returns the active Wasm processor, or throws if it was freed. */
+function active(instance: Tunelet): WasmTunelet {
+  const inner = instances.get(instance);
+  if (inner === undefined) {
+    throw new Error(
+      "Tunelet instance is disposed. Do not use it after free().",
+    );
+  }
+  return inner;
 }
 
 /**
@@ -179,12 +79,12 @@ function isSyncModuleObject(
  * URL object. A compiled module must use imports that agree with the packaged
  * bindings.
  *
- * Concurrent calls with the same source share one promise. After a successful
- * initialization, later calls with the same source return that promise and do
- * not load Wasm again. Calls with a different source reject with an `Error`.
- * If an attempt fails, the promise rejects and the function clears the cached
- * promise. Then you can try again. File, network and Wasm errors go to the
- * caller. The function does not try a different load method after an error.
+ * Concurrent calls share one promise, and the first call selects the source.
+ * After a successful initialization, later calls use it again and do not load
+ * Wasm again, whatever their arguments are. If an attempt fails, the promise
+ * rejects and the function clears the cached promise. Then you can try again.
+ * File, network and Wasm errors go to the caller. The function does not try a
+ * different load method after an error.
  *
  * @param source The optional Wasm source. The default is the binary in this
  * package.
@@ -194,62 +94,21 @@ function isSyncModuleObject(
 export function loadTunelet(
   source?: InitInput | Promise<InitInput>,
 ): Promise<InitOutput> {
-  if (activeAttempt !== undefined) {
-    if (sameRawSource(activeAttempt.rawSource, source)) {
-      return activeAttempt.outputPromise;
-    }
-    if (!isPromiseLike(activeAttempt.rawSource) && !isPromiseLike(source)) {
-      return Promise.reject(
-        new Error(
-          "Cannot call loadTunelet() with a different Wasm source after initialization starts.",
-        ),
-      );
-    }
-    return verifyMatchingSource(activeAttempt, source);
-  }
-
-  const inputPromise = resolveInput(source);
-  const attempt: InitAttempt = {
-    rawSource: source,
-    resolvedInput: undefined,
-    inputPromise,
-    outputPromise: Promise.resolve(undefined as never),
-  };
-  attempt.outputPromise = initializeFromAttempt(attempt).catch(
-    (error: unknown) => {
-      if (activeAttempt === attempt && initializedOutput === undefined) {
-        activeAttempt = undefined;
-      }
-      throw error;
-    },
-  );
-  activeAttempt = attempt;
-  return attempt.outputPromise;
+  initialization ??= initialize(source).catch((error: unknown) => {
+    initialization = undefined;
+    throw error;
+  });
+  return initialization;
 }
 
-/** Verifies that a Promise-wrapped source resolves to the active source. */
-async function verifyMatchingSource(
-  attempt: InitAttempt,
+/** Awaits the source one time, then initializes the Wasm module from it. */
+async function initialize(
   source: InitInput | Promise<InitInput> | undefined,
 ): Promise<InitOutput> {
-  const [expected, actual] = await Promise.all([
-    attempt.inputPromise,
-    resolveInput(source),
-  ]);
-  if (!sameInput(expected, actual)) {
-    throw new Error(
-      "Cannot call loadTunelet() with a different Wasm source after initialization starts.",
-    );
-  }
-  return attempt.outputPromise;
-}
-
-/** Instantiates the Wasm module for a new initialization attempt. */
-async function initializeFromAttempt(
-  attempt: InitAttempt,
-): Promise<InitOutput> {
-  const input = await attempt.inputPromise;
-  attempt.resolvedInput = input;
+  const input =
+    source === undefined
+      ? new URL("../pkg/tunelet_bg.wasm", import.meta.url)
+      : await source;
 
   let output: InitOutput;
   if (input instanceof URL && input.protocol === "file:") {
@@ -260,12 +119,12 @@ async function initializeFromAttempt(
     const fs: typeof import("node:fs/promises") = await import(
       /* webpackIgnore: true */ /* @vite-ignore */ moduleName
     );
-    output = await wasmInit({ module_or_path: await fs.readFile(input) });
+    output = await init({ module_or_path: await fs.readFile(input) });
   } else {
-    output = await wasmInit({ module_or_path: input });
+    output = await init({ module_or_path: input });
   }
 
-  initializedOutput = output;
+  initialized = true;
   return output;
 }
 
@@ -273,37 +132,15 @@ async function initializeFromAttempt(
  * Instantiates the Wasm module synchronously from bytes or a compiled
  * `WebAssembly.Module`.
  *
- * Repeated calls with the same source return the initialized exports. A call
- * with a different source, or while `loadTunelet()` is active, throws an
- * `Error`.
+ * If the module is already initialized, later calls return the active exports
+ * and do not load Wasm again.
  */
 export function initSync(
   module: { module: SyncInitInput } | SyncInitInput,
 ): InitOutput {
-  const input = isSyncModuleObject(module) ? module.module : module;
-  if (activeAttempt !== undefined) {
-    if (
-      initializedOutput !== undefined &&
-      activeAttempt.resolvedInput !== undefined &&
-      sameInput(activeAttempt.resolvedInput, input)
-    ) {
-      return initializedOutput;
-    }
-    throw new Error(
-      "Cannot call initSync() with a different Wasm source after initialization starts.",
-    );
-  }
-
-  const output =
-    input === undefined ? wasmInitSync(module) : wasmInitSync({ module: input });
-  initializedOutput = output;
-  const outputPromise = Promise.resolve(output);
-  activeAttempt = {
-    rawSource: input,
-    resolvedInput: input,
-    inputPromise: Promise.resolve(input),
-    outputPromise,
-  };
+  const output = wasmInitSync(module);
+  initialized = true;
+  initialization ??= Promise.resolve(output);
   return output;
 }
 
@@ -311,25 +148,26 @@ export function initSync(
  * Returns a complete, independent default configuration for JavaScript.
  *
  * Call `loadTunelet()` or `initSync()` before this function. Change the fields
- * of the returned object and give it to `new Tunelet(...)` or `setConfig`.
+ * of the returned object and give it to `Tunelet` or to `setConfig`.
  */
 export function defaultConfig(): ProcessorConfig {
   ensureInitialized();
   return wasmDefaultConfig();
 }
 
+export interface Tunelet {
+  [Symbol.dispose](): void;
+}
+
 /**
- * A stateful PCM processor with lifecycle guards.
+ * A stateful PCM processor for signed 16-bit mono input.
  *
- * Call `loadTunelet()` or `initSync()` before you construct an instance. Call
- * `free()` when you do not need the instance any more. Duplicate `free()`
- * calls do no work, and later method or property calls throw an `Error`.
+ * Call `loadTunelet()` or `initSync()` before you construct an instance. If
+ * you do not need the instance any more, call `free()`. Duplicate `free()`
+ * calls do no work. After `free()`, method and property calls throw an
+ * `Error`.
  */
 export class Tunelet {
-  #inner: WasmTunelet | undefined;
-
-  declare [Symbol.dispose]: () => void;
-
   /**
    * Prepares a processor and its reusable PCM buffers.
    *
@@ -343,51 +181,42 @@ export class Tunelet {
     config?: ProcessorConfig | null,
   ) {
     ensureInitialized();
-    this.#inner = new WasmTunelet(sampleRate, maxBlockFrames, config);
-  }
-
-  #active(): WasmTunelet {
-    if (this.#inner === undefined) {
-      throw new Error(
-        "Tunelet instance is disposed. Do not use it after free().",
-      );
-    }
-    return this.#inner;
+    instances.set(this, new WasmTunelet(sampleRate, maxBlockFrames, config));
   }
 
   /** Releases the Wasm processor memory. Duplicate calls do no work. */
   free(): void {
-    const inner = this.#inner;
+    const inner = instances.get(this);
     if (inner === undefined) {
       return;
     }
-    this.#inner = undefined;
+    instances.delete(this);
     inner.free();
   }
 
   /** The sample rate of the input and the output in hertz. */
   get sampleRate(): number {
-    return this.#active().sampleRate;
+    return active(this).sampleRate;
   }
 
   /** The maximum frame count for each call that processes or drains audio. */
   get maxBlockFrames(): number {
-    return this.#active().maxBlockFrames;
+    return active(this).maxBlockFrames;
   }
 
-  /** The nominal resynthesis delay in frames. */
+  /** The nominal resynthesis latency: 1,593 frames at both sample rates. */
   get latencyFrames(): number {
-    return this.#active().latencyFrames;
+    return active(this).latencyFrames;
   }
 
   /** Returns a copy of the active configuration as a new JavaScript object. */
   config(): ProcessorConfig {
-    return this.#active().config();
+    return active(this).config();
   }
 
   /** Validates a configuration and replaces the complete configuration. */
   setConfig(config: ProcessorConfig): void {
-    this.#active().setConfig(config);
+    active(this).setConfig(config);
   }
 
   /** Processes mono input into left and right `Int16Array` buffers. */
@@ -397,52 +226,52 @@ export class Tunelet {
     right: Int16Array,
     events?: BlockEvents | null,
   ): void {
-    this.#active().process(input, left, right, events);
+    active(this).process(input, left, right, events);
   }
 
   /** Replaces the audio in a mono `Int16Array` with the stereo downmix. */
   processMono(audio: Int16Array, events?: BlockEvents | null): void {
-    this.#active().processMono(audio, events);
+    active(this).processMono(audio, events);
   }
 
   /** Starts a finite tail budget and returns its frame count. */
   beginDrain(): number {
-    return this.#active().beginDrain();
+    return active(this).beginDrain();
   }
 
   /** Returns the tail budget of the current configuration. */
   tailFrames(): number {
-    return this.#active().tailFrames();
+    return active(this).tailFrames();
   }
 
   /** Renders stereo tail frames into `Int16Array` buffers of equal length. */
   drain(left: Int16Array, right: Int16Array): number {
-    return this.#active().drain(left, right);
+    return active(this).drain(left, right);
   }
 
   /** Renders a mono tail block and returns its frame count. */
   drainMono(audio: Int16Array): number {
-    return this.#active().drainMono(audio);
+    return active(this).drainMono(audio);
   }
 
   /** Returns a new feedback object and does not clear the peak window. */
   feedback(): Feedback {
-    return this.#active().feedback();
+    return active(this).feedback();
   }
 
-  /** Returns the feedback and clears only the stereo peak window. */
+  /** Returns the feedback and clears only the peak window. */
   takeFeedback(): Feedback {
-    return this.#active().takeFeedback();
+    return active(this).takeFeedback();
   }
 
   /** Returns a new telemetry object and does not clear its peak windows. */
   telemetry(): Telemetry {
-    return this.#active().telemetry();
+    return active(this).telemetry();
   }
 
   /** Returns the telemetry and clears only its three peak windows. */
   takeTelemetry(): Telemetry {
-    return this.#active().takeTelemetry();
+    return active(this).takeTelemetry();
   }
 
   /** Writes the formant envelopes into two `Float32Array` buffers. */
@@ -451,12 +280,12 @@ export class Tunelet {
     input: Float32Array,
     output: Float32Array,
   ): boolean {
-    return this.#active().formantEnvelope(maxFrequencyHz, input, output);
+    return active(this).formantEnvelope(maxFrequencyHz, input, output);
   }
 
   /** Resets the audio histories and feedback. */
   reset(): void {
-    this.#active().reset();
+    active(this).reset();
   }
 }
 

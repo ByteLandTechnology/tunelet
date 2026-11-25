@@ -35,7 +35,7 @@ use crate::formant::{Formant, FormantConfig, ANALYSIS_FRAMES};
 use crate::harmony::{HarmonyConfig, HarmonyState, HARMONY_VOICES};
 use crate::midi::MidiEvent;
 use crate::numeric::fixed::{Q12, Q14, Q6, Q8};
-use crate::numeric::{clamp_i32, ring, NumericContext, HISTORY};
+use crate::numeric::{clamp_i32, quadratic, ring, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
@@ -73,12 +73,9 @@ pub enum MultiVoiceMode {
 /// mask again. Reset releases the correction keys 0..=126. It keeps key 127
 /// and the active note table. Key 127 has no effect on the note table.
 ///
-/// At construction, the chromatic table uses 44.1 kHz periods, also for a
-/// 48 kHz processor. Each of these events loads the periods for the prepared
-/// rate:
-/// - An initial mask that is not chromatic.
-/// - A later change to the mask or to `enabled`.
-/// - A correction MIDI event.
+/// Construction loads the configured `notes` mask with the periods for the
+/// prepared sample rate. Later changes to `notes`, to `enabled` or from
+/// correction MIDI also use the periods for the prepared sample rate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -89,27 +86,12 @@ pub enum MultiVoiceMode {
 pub struct CorrectionConfig {
     /// Enables the selection of correction targets. The default is `true`.
     ///
-    #[cfg_attr(
-        not(all(feature = "wasm", target_arch = "wasm32")),
-        doc = " If you disable correction, the ratio moves toward 1.0 with `retune_ms`"
-    )]
-    #[cfg_attr(
-        all(feature = "wasm", target_arch = "wasm32"),
-        doc = " If you disable correction, the ratio moves toward 1.0 with `retuneMs`"
-    )]
+    /// If you disable correction, the ratio moves toward 1.0 with `retune_ms`
     /// at the next tracking updates. The ratio does not change to 1.0
     /// immediately.
     pub enabled: bool,
-    #[cfg_attr(
-        not(all(feature = "wasm", target_arch = "wasm32")),
-        doc = " The configured target pitch classes. The default is",
-        doc = " [`NoteMask::CHROMATIC`]."
-    )]
-    #[cfg_attr(
-        all(feature = "wasm", target_arch = "wasm32"),
-        doc = " The configured target pitch classes. The default enables all twelve",
-        doc = " pitch classes."
-    )]
+    /// The configured target pitch classes. The default is
+    /// [`NoteMask::CHROMATIC`].
     ///
     /// All boolean masks are valid. MIDI can replace the active table. This
     /// replacement stays until this mask or `enabled` changes.
@@ -168,10 +150,11 @@ impl CorrectionConfig {
 /// Validation applies to all controls, also when their stage or voice mode
 /// is not active.
 ///
-/// The dry path takes the audio after Punch and Warm and delays it by 1,543
-/// frames. The wet voice readers have more delay, which changes with the
-/// pitch. After this stage, the two paths go through Alien, reverb and the
-/// final output gain.
+/// The dry path takes the audio after Punch and Warm and delays it by 1,593
+/// frames. At unity pitch and zero choir delay, the wet voices have the same
+/// nominal delay. Resampled voices and choir delays use different delays.
+/// After this stage, the two paths go through Alien, reverb and the final
+/// output gain.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -181,16 +164,8 @@ impl CorrectionConfig {
     tsify(large_number_types_as_bigints)
 )]
 pub struct ResynthesisConfig {
-    #[cfg_attr(
-        not(all(feature = "wasm", target_arch = "wasm32")),
-        doc = " The acquisition sensitivity and the reporting bounds. The",
-        doc = " default is [`PitchConfig::default`]."
-    )]
-    #[cfg_attr(
-        all(feature = "wasm", target_arch = "wasm32"),
-        doc = " The acquisition sensitivity and the reporting bounds. See",
-        doc = " `PitchConfig` for the defaults."
-    )]
+    /// The acquisition sensitivity and the reporting bounds. The
+    /// default is [`PitchConfig::default`].
     pub pitch: PitchConfig,
     /// The target notes and the retune time. The default is enabled
     /// chromatic correction with a retune time of zero.
@@ -204,14 +179,7 @@ pub struct ResynthesisConfig {
     pub pitch_ratio: f32,
     /// The vocal-tract changes and aspiration. They are disabled by default.
     pub formant: FormantConfig,
-    #[cfg_attr(
-        not(all(feature = "wasm", target_arch = "wasm32")),
-        doc = " The voice arrangement. The default is [`MultiVoiceMode::Choir`]."
-    )]
-    #[cfg_attr(
-        all(feature = "wasm", target_arch = "wasm32"),
-        doc = " The voice arrangement. The default is `\"choir\"`."
-    )]
+    /// The voice arrangement. The default is [`MultiVoiceMode::Choir`].
     ///
     /// Harmony renders the lead voice and a maximum of four harmony voices.
     pub mode: MultiVoiceMode,
@@ -238,28 +206,14 @@ pub struct ResynthesisConfig {
     pub choir_delay: f32,
     /// The stereo width of the choir, 0..=100%. The default is 100%.
     ///
-    #[cfg_attr(
-        not(all(feature = "wasm", target_arch = "wasm32")),
-        doc = " The code uses this value only if `stereo_output` enables the voice pan"
-    )]
-    #[cfg_attr(
-        all(feature = "wasm", target_arch = "wasm32"),
-        doc = " The code uses this value only if `stereoOutput` enables the voice pan"
-    )]
+    /// The code uses this value only if `stereo_output` enables the voice pan
     /// and the choir has more than one voice.
     pub choir_spread_percent: f32,
     /// Enables a stereo pan for each voice. The default is `false`.
     ///
     /// This value is independent of the buffer layout of the process method.
     /// A change to this value resets some audio histories and the feedback.
-    #[cfg_attr(
-        not(all(feature = "wasm", target_arch = "wasm32")),
-        doc = " [`crate::Processor::set_config`] gives the details."
-    )]
-    #[cfg_attr(
-        all(feature = "wasm", target_arch = "wasm32"),
-        doc = " `setConfig` gives the details."
-    )]
+    /// [`crate::Processor::set_config`] gives the details.
     pub stereo_output: bool,
     /// The controls for the four harmony voices. The default is MIDI-channel
     /// allocation.
@@ -269,16 +223,8 @@ pub struct ResynthesisConfig {
     pub harmony: HarmonyConfig,
     /// The linear gain of the four harmony voices, 0..=1. The default is 0.5.
     ///
-    #[cfg_attr(
-        not(all(feature = "wasm", target_arch = "wasm32")),
-        doc = " If `stereo_output` is `true`, the stereo pan gains include this gain.",
-        doc = " If `stereo_output` is `false`, this gain scales each harmony voice"
-    )]
-    #[cfg_attr(
-        all(feature = "wasm", target_arch = "wasm32"),
-        doc = " If `stereoOutput` is `true`, the stereo pan gains include this gain.",
-        doc = " If `stereoOutput` is `false`, this gain scales each harmony voice"
-    )]
+    /// If `stereo_output` is `true`, the stereo pan gains include this gain.
+    /// If `stereo_output` is `false`, this gain scales each harmony voice
     /// directly. It does not scale the lead voice.
     pub harmony_gain: f32,
     /// The modulation depth, 0..=24, without a unit. The default is 0 (off).
@@ -291,7 +237,7 @@ pub struct ResynthesisConfig {
     ///
     /// The code truncates this value to Q8. The wet weight is 1.0 minus the
     /// Q8 dry weight. The dry path starts after Punch and Warm and has a
-    /// delay of 1,543 frames. Alien, reverb and the output gain still occur
+    /// delay of 1,593 frames. Alien, reverb and the output gain still occur
     /// after this stage.
     pub dry_mix: f32,
     /// The seed for choir drift and aspiration, which use the same stream.
@@ -338,8 +284,8 @@ impl ResynthesisConfig {
     /// # Errors
     ///
     /// Returns the first [`Error::InvalidConfig`], with the dotted path of the
-    /// field and the problem. For an interval array control in `harmony`,
-    /// `index` gives the zero-based voice index `0..=3`.
+    /// field and the problem. For an array control in `harmony`, the error
+    /// identifies the array field, not the index of an element.
     pub fn validate(self) -> Result<(), Error> {
         self.pitch.validate()?;
         self.correction.validate()?;
@@ -373,8 +319,7 @@ const SEEDS: [i32; 16] = [
     0x0dda, 0x01da, 0x167f, 0x0896,
 ];
 
-/// The length of the analysis overlap buffer. The dry path has the same
-/// delay.
+/// The length of the analysis overlap buffer.
 const OVERLAP_FRAMES: usize = 1543;
 /// The offset from the history position of a reader to its position for
 /// formant synthesis.
@@ -384,7 +329,7 @@ const READER_LAG_FRAMES: i32 = 50;
 /// The nominal latency of resynthesis. Each reader moves with the pitch and
 /// the delay.
 ///
-/// The dry path uses only `OVERLAP_FRAMES`.
+/// The dry path also uses `LATENCY_FRAMES`.
 pub(crate) const LATENCY_FRAMES: usize = OVERLAP_FRAMES + READER_LAG_FRAMES as usize;
 /// The counter value at which a control step runs. Usually, a step runs
 /// every 101 eligible frames.
@@ -559,17 +504,7 @@ impl Resynthesis {
             },
             formant: Formant::new(rate, config.formant),
             harmony: HarmonyState::new(rate, config.harmony),
-            scale: {
-                // The initial chromatic table uses 44.1 kHz periods at the two
-                // rates. If the notes load again, the periods for the
-                // configured rate become active.
-                let mut scale = CorrectionTable::new(SampleRate::Hz44100, NoteMask::default());
-                scale.set_sample_rate(rate);
-                if config.correction.notes != NoteMask::default() {
-                    scale.set_notes(config.correction.notes);
-                }
-                scale
-            },
+            scale: CorrectionTable::new(rate, config.correction.notes),
             filtered: prepare_history(Q14::ZERO),
             lead: prepare_history(Q14::ZERO),
             periods: prepare_history(Q6::ZERO),
@@ -712,6 +647,7 @@ impl Resynthesis {
         }
         if old.pitch_ratio != config.pitch_ratio {
             self.configure_shift_filters();
+            self.scale_initialized = false;
         }
         if old.mode != config.mode || old.choir_delay != config.choir_delay {
             self.create_delays();
@@ -946,8 +882,8 @@ impl Resynthesis {
     /// global shift is part of the normalization.
     ///
     /// If correction is disabled or the active table is empty, the ratio moves
-    /// toward 1.0. If the target selection starts again and the shifted
-    /// period is not positive, the ratio becomes 1.0 immediately.
+    /// toward 1.0. If the shifted period is not positive, the ratio becomes
+    /// 1.0 immediately and the target selection starts again.
     fn update_correction(&mut self, period: Q6) {
         let mut target_ratio = Q14::ONE;
         if self.config.correction.enabled && self.scale.count != 0 {
@@ -957,7 +893,6 @@ impl Resynthesis {
             let table_period = |index: usize| Q6::from_bits(self.scale.midpoints[index]);
             let mut target: Q6;
             if !self.scale_initialized {
-                self.scale_initialized = true;
                 self.scale_index = 0;
                 self.octave = 0;
                 target = self.shift.mul(period);
@@ -972,12 +907,22 @@ impl Resynthesis {
                         break;
                     }
                 }
+                if target <= Q6::ZERO {
+                    self.correction = Q14::ONE;
+                    return;
+                }
+                self.scale_initialized = true;
             }
             target = self.shift.mul(if self.octave >= 0 {
                 period << self.octave as u32
             } else {
                 period >> (-self.octave) as u32
             });
+            if target <= Q6::ZERO {
+                self.scale_initialized = false;
+                self.correction = Q14::ONE;
+                return;
+            }
             while table_period(self.scale_index + 1) < target {
                 self.scale_index += 1;
                 if self.scale_index == count {
@@ -1230,12 +1175,18 @@ impl Resynthesis {
         // of the source is OVERLAP_FRAMES in the two formant modes.
         let overlap_read = (self.overlap_index + ANALYSIS_FRAMES) % OVERLAP_FRAMES;
         let mut filtered = self.overlap[overlap_read];
-        for filter in &mut self.post {
-            filtered = filter.process_sample(filtered);
+        if self.config.pitch_ratio > 1.0 {
+            for filter in &mut self.post {
+                filtered = filter.process_sample(filtered);
+            }
+        } else {
+            for filter in &mut self.post {
+                filtered = filter.bypass_sample(filtered);
+            }
         }
         self.filtered[write] = filtered;
         let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
-        let dry = self.raw[delayed];
+        let dry = self.raw[ring(write as i32 - LATENCY_FRAMES as i32)];
         let mut mix = [Q14::ZERO; 2];
         let mut final_ratio = Q14::ONE;
         if self.config.mode == MultiVoiceMode::Choir {
@@ -1410,9 +1361,7 @@ impl Resynthesis {
             let left = self.cosine[(index + 127) % 128];
             let middle = self.cosine[index];
             let right = self.cosine[(index + 1) % 128];
-            let cosine = middle
-                + ((((left + right) >> 1) - middle).mul::<14, 14>(frac) + ((right - left) >> 1))
-                    .mul(frac);
+            let cosine = quadratic(left, middle, right, frac);
             for sum in &mut mix {
                 *sum = sum.mul(cosine);
             }

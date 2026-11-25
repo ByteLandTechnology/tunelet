@@ -1,25 +1,15 @@
-//! MIDI note messages, pitch periods and the conversion of velocity to gain.
+//! MIDI note messages and the conversion of velocity to gain.
 
-use crate::numeric::fixed::{Q12, Q6};
-use crate::{Error, MidiProblem};
+use crate::numeric::fixed::Q12;
+use crate::Error;
 
 /// The supported MIDI note controls, with zero-based channel numbers.
 ///
-#[cfg_attr(
-    not(all(feature = "wasm", target_arch = "wasm32")),
-    doc = " Use [`crate::ControlEvent::Midi`] for harmony. Use",
-    doc = " [`crate::ControlEvent::CorrectionMidi`] for the independent correction",
-    doc = " keyboard. The typed representation can contain `u8` values that are not",
-    doc = " valid. [`Self::validate`] and the event preflight of the processor check",
-    doc = " the MIDI ranges. Note numbers use A4 = 69 at 440 Hz."
-)]
-#[cfg_attr(
-    all(feature = "wasm", target_arch = "wasm32"),
-    doc = " Use a `\"midi\"` control event for harmony. Use a `\"correctionMidi\"`",
-    doc = " control event for the independent correction keyboard. The processor",
-    doc = " checks the channel, note and velocity ranges before it processes a",
-    doc = " block. Note numbers use A4 = 69 at 440 Hz."
-)]
+/// Use [`crate::ControlEvent::Midi`] for harmony. Use
+/// [`crate::ControlEvent::CorrectionMidi`] for the independent correction
+/// keyboard. The typed representation can contain `u8` values that are not
+/// valid. [`Self::validate`] and the event preflight of the processor check
+/// the MIDI ranges. Note numbers use A4 = 69 at 440 Hz.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -35,14 +25,7 @@ pub enum MidiEvent {
         note: u8,
         /// The velocity, 0..=127.
         ///
-        #[cfg_attr(
-            not(all(feature = "wasm", target_arch = "wasm32")),
-            doc = " Zero releases the note, as [`Self::NoteOff`] does."
-        )]
-        #[cfg_attr(
-            all(feature = "wasm", target_arch = "wasm32"),
-            doc = " Zero releases the note, as `\"noteOff\"` does."
-        )]
+        /// Zero releases the note, as [`Self::NoteOff`] does.
         velocity: u8,
     },
     /// A note stops.
@@ -83,14 +66,8 @@ impl MidiEvent {
     /// Returns [`Error::InvalidMidi`] if the status is below `0x80` or a data
     /// byte is more than 127. This also applies to an unsupported message.
     pub fn from_bytes(bytes: [u8; 3]) -> Result<Option<Self>, Error> {
-        if bytes[0] < 0x80 {
-            return Err(Error::midi(MidiProblem::StatusByte { byte: bytes[0] }));
-        }
-        if bytes[1] > 127 {
-            return Err(Error::midi(MidiProblem::DataByte { byte: bytes[1] }));
-        }
-        if bytes[2] > 127 {
-            return Err(Error::midi(MidiProblem::DataByte { byte: bytes[2] }));
+        if bytes[0] < 0x80 || bytes[1] > 127 || bytes[2] > 127 {
+            return Err(Error::InvalidMidi);
         }
         let channel = bytes[0] & 15;
         Ok(match bytes[0] & 0xf0 {
@@ -112,47 +89,22 @@ impl MidiEvent {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidMidi`] with the [`MidiProblem`] if a channel is
-    /// more than 15, or if a note or a velocity is more than 127. Zero
-    /// velocity and All Notes Off are valid.
+    /// Returns [`Error::InvalidMidi`] if a channel is more than 15, or if a
+    /// note or a velocity is more than 127. Zero velocity and All Notes Off
+    /// are valid.
     pub fn validate(&self) -> Result<(), Error> {
         match *self {
             Self::NoteOn {
                 channel,
                 note,
                 velocity,
-            } => {
-                if channel > 15 {
-                    return Err(Error::midi(MidiProblem::Channel { channel }));
-                }
-                if note > 127 {
-                    return Err(Error::midi(MidiProblem::Note { note }));
-                }
-                if velocity > 127 {
-                    return Err(Error::midi(MidiProblem::Velocity { velocity }));
-                }
-                Ok(())
+            } if channel > 15 || note > 127 || velocity > 127 => Err(Error::InvalidMidi),
+            Self::NoteOff { channel, note } if channel > 15 || note > 127 => {
+                Err(Error::InvalidMidi)
             }
-            Self::NoteOff { channel, note } => {
-                if channel > 15 {
-                    return Err(Error::midi(MidiProblem::Channel { channel }));
-                }
-                if note > 127 {
-                    return Err(Error::midi(MidiProblem::Note { note }));
-                }
-                Ok(())
-            }
-            Self::AllNotesOff => Ok(()),
+            _ => Ok(()),
         }
     }
-}
-
-/// Returns the period of MIDI `note` at `rate`, as a Q6 count of samples.
-pub(crate) fn note_period(rate: f32, note: i32) -> Q6 {
-    let period = ((f64::from(rate) / 440.0)
-        / ((f64::from(note as f32 - 69.0) * std::f64::consts::LN_2) / 12.0).exp())
-        as f32;
-    Q6::from_f64(f64::from(period))
 }
 
 /// Returns the MIDI gain for `velocity`, quantized to Q12.
