@@ -49,18 +49,20 @@
 //! # Feedback, latency and lifecycle
 //!
 //! [`Processor::feedback`] gives the pitch, the correction ratio, the
-//! accumulated stereo peak and the frame count.
+//! accumulated output peak and the frame count.
 //! [`Processor::take_feedback`] also clears the peak window. The pitch
 //! reporting bounds change only the reports. They do not change the detection
 //! or the audio signal. [`Processor::latency_frames`] gives a nominal
-//! resynthesis delay. Voice delays, pitch changes and effects have their own
-//! timing.
+//! resynthesis delay, which the dry path also uses. Voice delays, pitch
+//! changes and effects have their own timing.
 //!
 //! [`Processor::telemetry`] gives data for meters and displays. It includes
 //! the pitch, the voice ratios and gains, the peaks, the clarity and the
-//! effect state. [`Processor::take_telemetry`] also clears the peak windows of
-//! the telemetry. [`Processor::formant_envelope`] writes the LPC envelopes
-//! before and after the formant controls. These calls do not change the audio.
+//! effect state. In mono calls, the feedback and telemetry peaks measure the
+//! audio after the downmix. [`Processor::take_telemetry`] also clears the peak
+//! windows of the telemetry. [`Processor::formant_envelope`] writes the LPC
+//! envelopes before and after the formant controls. These calls do not change
+//! the audio.
 //!
 //! After the last input block, call [`Processor::begin_drain`] one time. Then
 //! render drain blocks until a call returns zero. Each call fills the unused
