@@ -51,10 +51,10 @@
 //! [`Processor::feedback`] gives the pitch, the correction ratio, the
 //! accumulated output peak and the frame count.
 //! [`Processor::take_feedback`] also clears the peak window. The pitch
-//! frequency bounds filter the reports, the tracking state and the pitch
-//! correction. [`Processor::latency_frames`] gives a nominal resynthesis
-//! delay, which the dry path also uses. Voice delays, pitch changes and
-//! effects have their own timing.
+//! reporting bounds change only the reports. They do not change the detection
+//! or the audio signal. [`Processor::latency_frames`] gives a nominal
+//! resynthesis delay, which the dry path also uses. Voice delays, pitch
+//! changes and effects have their own timing.
 //!
 //! [`Processor::control_activity`] and [`ProcessorConfig::control_activity`]
 //! give [`ControlActivity`], which shows the active choir, harmony and reverb
@@ -62,10 +62,9 @@
 //! ratio and the gain of each voice, the input and output peaks, the pitch
 //! clarity and the state of the effects. In mono calls, the feedback and
 //! telemetry peaks measure the audio after the downmix.
-//! [`Processor::take_telemetry`] also
-//! clears the peak windows of the telemetry. [`Processor::formant_envelope`]
-//! writes the LPC envelopes before and after the formant controls. These calls
-//! do not change the audio.
+//! [`Processor::take_telemetry`] also clears the peak windows of the
+//! telemetry. [`Processor::formant_envelope`] writes the LPC envelopes before
+//! and after the formant controls. These calls do not change the audio.
 //!
 //! After the last input block, call [`Processor::begin_drain`] one time. Then
 //! render drain blocks until a call returns zero. Each call fills the unused

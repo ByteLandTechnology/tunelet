@@ -5,8 +5,8 @@
  * configuration. Both environments use the same generated bindings and the
  * same Wasm binary. This module re-exports all named exports of the module
  * that wasm-bindgen generates, which include `Tunelet`, `defaultConfig`,
- * `initSync` and the configuration, control-activity, event, feedback and
- * telemetry types.
+ * `initSync` and the configuration, control-activity, event and feedback
+ * types.
  */
 import init from "../pkg/tunelet.js";
 import type { InitInput, InitOutput } from "../pkg/tunelet.js";

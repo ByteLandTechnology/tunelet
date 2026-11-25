@@ -265,13 +265,13 @@ impl ProcessorConfig {
     }
 }
 
-/// Flags that show which choir, harmony and reverb controls are active in a
-/// [`ProcessorConfig`].
+/// The flags that show which choir, harmony and reverb controls are active in
+/// a [`ProcessorConfig`].
 ///
 /// Get this snapshot from [`ProcessorConfig::control_activity`] or
 /// [`crate::Processor::control_activity`]. A `false` flag means that the
-/// related control produces no sample change in the current voice mode,
-/// harmony source or reverb network. `Default` sets all flags to `false`.
+/// related control makes no sample change in the active voice mode, harmony
+/// source or reverb network. `Default` sets all flags to `false`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(

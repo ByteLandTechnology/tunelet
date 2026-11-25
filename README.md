@@ -311,17 +311,11 @@ reverb network.
 
 The telemetry includes these items:
 
-- The active voice count, the pitch ratio and the gain of each voice. In
-  Harmony mode, `voice_gains` includes `harmony_gain`, and `voice_count` is 1
-  plus the number of harmony voices with a positive gain.
+- The pitch ratio and the gain of each voice.
 - The peaks of the input, of the two output channels and of the reverb wet
   signal.
-- The pitch tracking flag and the pitch clarity, from 0 to 1, inside the
-  frequency bounds of `resynthesis.pitch`.
+- The pitch clarity, which is a confidence score from 0 to 1.
 - The current gains of Punch and Warm, and the position in the Alien loop.
-- The generation of the active formant model, `formant_generation`. It
-  increases when playback reaches a new analysis bank and when `width` or
-  `stretch` changes.
 
 The peak windows of the telemetry are independent of the peak window of the
 feedback. In mono calls, the output and reverb wet peaks measure the audio
@@ -331,13 +325,11 @@ choir delays and effects use different delays.
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
 - The vocal-tract envelope from the analysis.
-- The envelope after the current `width` and `stretch` controls.
+- The envelope after the width and stretch controls.
 
-A change to `width` or `stretch` updates the output envelope immediately,
-also before the next audio block. The values are linear and have no absolute
-level. The formant stage must be enabled. The envelopes are those of the
-model that the audio used for the last frame. The method returns
-`Result<bool, Error>`:
+The values are linear and have no absolute level. The formant stage must be
+enabled. The envelopes are those of the model that the audio used for the
+last frame. The method returns `Result<bool, Error>`:
 
 | Result      | Description                                                      |
 | ----------- | ---------------------------------------------------------------- |
@@ -352,6 +344,7 @@ allocate memory, acquire locks or do I/O:
 
 - Processing
 - Configuration
+- Control activity
 - MIDI
 - Feedback
 - Telemetry
@@ -508,20 +501,16 @@ the cases where `voiced` is `false`:
 
 - The kept pitch estimate is unvoiced. This includes the time before the
   first detection and after a reset or a drain completion.
-- The estimated frequency is outside the inclusive frequency bounds
+- The estimated frequency is outside the inclusive reporting bounds
   `resynthesis.pitch.minFrequencyHz` and `resynthesis.pitch.maxFrequencyHz`.
-
-Estimates outside those bounds also bypass pitch correction.
 
 `formantEnvelope(maxFrequencyHz, input, output)` fills two `Float32Array`
 buffers of equal length and returns `false` if no envelope is available.
-In that case, it fills both buffers with zeros. A change to `width` or
-`stretch` updates `output` immediately, also before the next audio block. If
-the lengths are not equal or the frequency is not valid, the method throws
-and does not change the buffers. The frequency must be finite, more than zero
-and not more than half of the sample rate. The class keeps a buffer for the
-points, so only the first call and a call with more points than before
-reserve memory.
+In that case, it fills both buffers with zeros. If the lengths are not equal
+or the frequency is not valid, it throws and does not change the buffers. The
+frequency must be finite, more than zero and not more than half of the sample
+rate. The class keeps a buffer for the points, so only the first call and a
+call with more points than before reserve memory.
 
 ### Memory allocation
 

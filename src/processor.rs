@@ -430,12 +430,10 @@ impl Processor {
     /// last frame.
     ///
     /// `input` gets the vocal-tract envelope that the LPC analysis found.
-    /// `output` gets the envelope after the current width and stretch
-    /// controls. A change to width or stretch updates `output` immediately,
-    /// also before the next audio block. Point `k` of `n` is at the frequency
-    /// `max_frequency_hz * k / (n - 1)`. The values are linear magnitudes.
-    /// They have no absolute level, because the analysis normalizes the signal
-    /// energy. Scale them for a display.
+    /// `output` gets the envelope after the width and stretch controls. Point
+    /// `k` of `n` is at the frequency `max_frequency_hz * k / (n - 1)`. The
+    /// values are linear magnitudes. They have no absolute level, because the
+    /// analysis normalizes the signal energy. Scale them for a display.
     ///
     /// `max_frequency_hz` must be finite, more than zero and not more than
     /// half of the sample rate. The two slices must have the same length.
@@ -750,7 +748,7 @@ pub struct Feedback {
     pub resample_ratio: f32,
     /// The reported input pitch period in samples, with fractional samples.
     ///
-    /// It is zero if the input is unvoiced or outside the frequency bounds of
+    /// It is zero if the input is unvoiced or outside the reporting bounds of
     /// [`crate::PitchConfig`].
     pub period_samples: f32,
     /// The reported input pitch frequency in hertz.
@@ -774,11 +772,11 @@ pub struct Feedback {
     ///
     /// The value is `None` if [`voiced`](Self::voiced) is `false`, and only
     /// then. This occurs if the input is unvoiced or if its frequency is
-    /// outside the current frequency bounds. A target table that has no
+    /// outside the current reporting bounds. A target table that has no
     /// selected target does not give `None`.
     pub target_midi_note: Option<f32>,
     /// This field is `true` if the current pitch estimate is positive and
-    /// inside the current frequency bounds.
+    /// inside the current reporting bounds.
     ///
     /// This is not an amplitude gate or a confidence score. A tracking result
     /// can stay between detector updates.
@@ -849,40 +847,38 @@ pub struct Telemetry {
     /// How periodic the tracked input is, in 0..=1.
     ///
     /// The value is 1 for a signal that repeats exactly at the tracked
-    /// period. It is 0 for a signal with no relation between cycles, during
-    /// pitch acquisition and outside the frequency bounds of
-    /// [`crate::PitchConfig`]. Use it as a confidence score for
+    /// period. It is 0 for a signal with no relation between cycles and
+    /// during pitch acquisition. Use it as a confidence score for
     /// [`Feedback::voiced`]. The tracker updates the related sums on each
     /// frame.
     pub clarity: f32,
-    /// This field is `true` if the pitch tracker follows a period inside the
-    /// frequency bounds of [`crate::PitchConfig`]. It is `false` during pitch
-    /// acquisition and outside those bounds.
+    /// This field is `true` if the pitch tracker follows a period. It is
+    /// `false` during pitch acquisition.
     pub tracking: bool,
-    /// The number of active voices.
+    /// The number of valid entries in [`voice_ratios`](Self::voice_ratios)
+    /// and [`voice_gains`](Self::voice_gains).
     ///
-    /// In Harmony mode, the value is 1 plus the number of harmony voices with
-    /// a positive gain, in 1..=5. In Choir mode, it is
+    /// The value is 5 in Harmony mode. In Choir mode, it is
     /// [`crate::ResynthesisConfig::choir_voices`], in 1..=16.
     pub voice_count: u8,
     /// The pitch ratio of each voice on the last frame, where 1 is the input
     /// pitch.
     ///
     /// Entry zero is the lead voice. In Harmony mode, entries 1 to 4 are the
-    /// four harmony voice slots, and entries 5 to 15 are zero. In Choir mode,
-    /// the entries after the lead are the secondary voices, and the entries
-    /// after [`voice_count`](Self::voice_count) are zero. Each ratio includes
-    /// the correction, the configured pitch shift and the ratio of the voice.
+    /// harmony voices. In Choir mode, the entries after the lead are the
+    /// secondary voices. Each ratio includes the correction, the configured
+    /// pitch shift and the ratio of the voice. The entries after
+    /// [`voice_count`](Self::voice_count) are zero.
     pub voice_ratios: [f32; 16],
     /// The linear gain of each voice, in the order of
     /// [`voice_ratios`](Self::voice_ratios).
     ///
     /// The lead and the choir voices have a gain of 1. The gain of a harmony
-    /// voice includes [`crate::ResynthesisConfig::harmony_gain`] and the MIDI
-    /// velocity gain, in 0..=3.98095703125. MIDI velocity 127 at unity
-    /// `harmony_gain` gives the maximum, approximately +12 dB. The gain is
-    /// zero for a voice that does not sound. It does not include the stereo
-    /// pan. The harmony controller updates its envelope every 101 frames.
+    /// voice includes the MIDI velocity gain, in 0..=3.98095703125. MIDI
+    /// velocity 127 gives the maximum, approximately +12 dB. The gain is zero
+    /// for a voice that does not sound. It does not include the configured
+    /// harmony level or the pan. The harmony controller updates it every 101
+    /// frames.
     pub voice_gains: [f32; 16],
     /// The effective linear gain of Punch at the current envelope level.
     ///
@@ -908,11 +904,10 @@ pub struct Telemetry {
     /// The reverse reader is two times this number of frames behind the
     /// recording position. The value advances also while Alien is disabled.
     pub alien_phase_frames: u32,
-    /// The wrapping generation of the active formant synthesis model.
+    /// The wrapping count of formant analyses since construction.
     ///
-    /// While the formant stage is enabled, the count increases when playback
-    /// reaches a new analysis bank and when width or stretch changes. Compare
-    /// two values to find if [`Processor::formant_envelope`] can give a new
-    /// result.
+    /// The count increases every 441 frames while the formant stage is
+    /// enabled. Compare two values to find if
+    /// [`Processor::formant_envelope`] can give a new result.
     pub formant_generation: u32,
 }

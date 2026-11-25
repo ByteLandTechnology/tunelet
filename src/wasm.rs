@@ -380,7 +380,7 @@ impl WasmProcessor {
     ///
     /// - The kept pitch estimate is unvoiced. This includes the time before
     ///   the first detection and after a reset or a drain completion.
-    /// - The estimated frequency is outside the inclusive frequency bounds
+    /// - The estimated frequency is outside the inclusive reporting bounds
     ///   `minFrequencyHz` and `maxFrequencyHz` of the pitch configuration.
     ///
     /// # Errors
@@ -410,7 +410,7 @@ impl WasmProcessor {
     /// the active configuration.
     ///
     /// A `false` flag means that the related control makes no sample change in
-    /// the current voice mode, harmony source or reverb network. The audio
+    /// the active voice mode, harmony source or reverb network. The audio
     /// state does not change.
     ///
     /// # Errors
@@ -455,11 +455,10 @@ impl WasmProcessor {
     /// `Float32Array` buffers of equal length.
     ///
     /// `input` gets the vocal-tract envelope that the LPC analysis found.
-    /// `output` gets the envelope after the current width and stretch
-    /// controls. A change to width or stretch updates `output` immediately,
-    /// also before the next audio block. Point `k` of `n` is at the frequency
-    /// `maxFrequencyHz * k / (n - 1)`. The values are linear magnitudes with
-    /// no absolute level. Scale them for a display.
+    /// `output` gets the envelope after the width and stretch controls. Point
+    /// `k` of `n` is at the frequency `maxFrequencyHz * k / (n - 1)`. The
+    /// values are linear magnitudes with no absolute level. Scale them for a
+    /// display.
     ///
     /// `maxFrequencyHz` must be finite, more than zero and not more than half
     /// of the sample rate.
