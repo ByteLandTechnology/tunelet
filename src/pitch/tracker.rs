@@ -231,38 +231,25 @@ impl PitchTracker {
                 .try_into()
                 .expect("four acquisition cross lanes");
 
-            update_lag(
-                sample,
-                square,
-                current[3],
-                delayed[6],
-                &mut energy[0],
-                &mut cross[0],
-            );
-            update_lag(
-                sample,
-                square,
-                current[2],
-                delayed[4],
-                &mut energy[1],
-                &mut cross[1],
-            );
-            update_lag(
-                sample,
-                square,
-                current[1],
-                delayed[2],
-                &mut energy[2],
-                &mut cross[2],
-            );
-            update_lag(
-                sample,
-                square,
-                current[0],
-                delayed[0],
-                &mut energy[3],
-                &mut cross[3],
-            );
+            let delta_cross = mul14(sample, current[3]).wrapping_sub(mul14(current[3], delayed[6]));
+            let delta_energy = square.wrapping_sub(mul14(delayed[6], delayed[6]));
+            cross[0] = cross[0].wrapping_add(delta_cross);
+            energy[0] = energy[0].wrapping_add(delta_energy);
+
+            let delta_cross = mul14(sample, current[2]).wrapping_sub(mul14(current[2], delayed[4]));
+            let delta_energy = square.wrapping_sub(mul14(delayed[4], delayed[4]));
+            cross[1] = cross[1].wrapping_add(delta_cross);
+            energy[1] = energy[1].wrapping_add(delta_energy);
+
+            let delta_cross = mul14(sample, current[1]).wrapping_sub(mul14(current[1], delayed[2]));
+            let delta_energy = square.wrapping_sub(mul14(delayed[2], delayed[2]));
+            cross[2] = cross[2].wrapping_add(delta_cross);
+            energy[2] = energy[2].wrapping_add(delta_energy);
+
+            let delta_cross = mul14(sample, current[0]).wrapping_sub(mul14(current[0], delayed[0]));
+            let delta_energy = square.wrapping_sub(mul14(delayed[0], delayed[0]));
+            cross[3] = cross[3].wrapping_add(delta_cross);
+            energy[3] = energy[3].wrapping_add(delta_energy);
             lane += 4;
         }
 
@@ -270,14 +257,10 @@ impl PitchTracker {
         while lane < count {
             let current = current[count - 1 - lane];
             let delayed = delayed[(count - 1 - lane) * 2];
-            update_lag(
-                sample,
-                square,
-                current,
-                delayed,
-                &mut energy[lane],
-                &mut cross[lane],
-            );
+            let delta_cross = mul14(sample, current).wrapping_sub(mul14(current, delayed));
+            let delta_energy = square.wrapping_sub(mul14(delayed, delayed));
+            cross[lane] = cross[lane].wrapping_add(delta_cross);
+            energy[lane] = energy[lane].wrapping_add(delta_energy);
             lane += 1;
         }
     }
@@ -558,18 +541,14 @@ impl PitchTracker {
         energy: &mut [i32; TRACKING_LAGS],
         cross: &mut [i32; TRACKING_LAGS],
     ) {
-        let square = mul14(current, current);
+        let current_sq = mul14(current, current);
         for lag in 0..TRACKING_LAGS {
             let middle = middle[TRACKING_LAGS - 1 - lag];
             let delayed = delayed[2 * (TRACKING_LAGS - 1) - lag * 2];
-            update_lag(
-                current,
-                square,
-                middle,
-                delayed,
-                &mut energy[lag],
-                &mut cross[lag],
-            );
+            energy[lag] =
+                energy[lag].wrapping_add(current_sq.wrapping_sub(mul14(delayed, delayed)));
+            cross[lag] = cross[lag]
+                .wrapping_add(mul14(current, middle).wrapping_sub(mul14(middle, delayed)));
         }
     }
 
@@ -623,7 +602,7 @@ impl PitchTracker {
                     &mut self.tracking_cross,
                 );
             } else {
-                let square = mul14(current, current);
+                let current_sq = mul14(current, current);
                 for lag in 0..TRACKING_LAGS {
                     let middle = self.raw[first];
                     first = previous_history(first);
@@ -633,14 +612,10 @@ impl PitchTracker {
                     } else {
                         second - 2
                     };
-                    update_lag(
-                        current,
-                        square,
-                        middle,
-                        delayed,
-                        &mut self.tracking_energy[lag],
-                        &mut self.tracking_cross[lag],
-                    );
+                    self.tracking_energy[lag] = self.tracking_energy[lag]
+                        .wrapping_add(current_sq.wrapping_sub(mul14(delayed, delayed)));
+                    self.tracking_cross[lag] = self.tracking_cross[lag]
+                        .wrapping_add(mul14(current, middle).wrapping_sub(mul14(middle, delayed)));
                 }
             }
             self.tracking_counter += 1;
@@ -716,24 +691,6 @@ impl PitchTracker {
         step.previous_period = self.previous_period;
         step
     }
-}
-
-/// Adds one sample step to a lag energy and cross product with 32-bit wrap.
-///
-/// `square` must equal `mul14(current, current)`.
-#[inline]
-fn update_lag(
-    current: i32,
-    square: i32,
-    middle: i32,
-    delayed: i32,
-    energy: &mut i32,
-    cross: &mut i32,
-) {
-    let delta_energy = square.wrapping_sub(mul14(delayed, delayed));
-    let delta_cross = mul14(current, middle).wrapping_sub(mul14(middle, delayed));
-    *energy = energy.wrapping_add(delta_energy);
-    *cross = cross.wrapping_add(delta_cross);
 }
 
 /// Returns the previous frame index in the `HISTORY` ring.
