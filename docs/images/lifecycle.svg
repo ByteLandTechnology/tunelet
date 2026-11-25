@@ -2,10 +2,11 @@
   <title id="title">The processor lifecycle</title>
   <desc id="desc">Construction allocates the storage. Then the processor processes blocks. After the last block, begin_drain starts the tail. Drain calls return frames until the budget is zero. Then the next non-empty drain call returns 0, resets the processor and finishes the drain.</desc>
   <style>
-    svg { --text: #1f2328; --muted: #59636e; --line: #8c959f; --fill: #f6f8fa; --accent: #0969da; --accent-fill: #ddf4ff; --warn: #9a6700; --ok: #1a7f37; }
+    svg { --bg: #ffffff; --text: #1f2328; --muted: #59636e; --line: #656d76; --fill: #f6f8fa; --accent: #0969da; --accent-fill: #ddf4ff; --warn: #9a6700; --ok: #1a7f37; }
     @media (prefers-color-scheme: dark) {
-      svg { --text: #e6edf3; --muted: #9198a1; --line: #6e7681; --fill: #161b22; --accent: #4493f8; --accent-fill: #0c2d52; --warn: #d29922; --ok: #3fb950; }
+      svg { --bg: #0d1117; --text: #e6edf3; --muted: #9198a1; --line: #7d8590; --fill: #161b22; --accent: #58a6ff; --accent-fill: #0c2d52; --warn: #d29922; --ok: #3fb950; }
     }
+    .bg { fill: var(--bg); }
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--text); }
     .name { font-size: 15px; font-weight: 600; text-anchor: middle; }
     .item { font-size: 12.5px; fill: var(--muted); text-anchor: middle; }
@@ -29,6 +30,7 @@
       <path class="warnhead" d="M0,0 L10,5 L0,10 z"/>
     </marker>
   </defs>
+  <rect class="bg" width="100%" height="100%" fill="#ffffff"/>
 
   <!-- Real-time zone -->
   <rect class="zone" x="226" y="20" width="664" height="290" rx="14"/>
