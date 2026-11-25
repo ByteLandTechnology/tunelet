@@ -54,52 +54,54 @@ const EXACT_REPLACEMENTS = [
   ["`stereo_output`", "`stereoOutput`"],
   ["`retune_ms`", "`retuneMs`"],
   ["`attack_ms`", "`attackMs`"],
+  ["`gain_db`", "`gainDb`"],
+  ["`ceiling_db`", "`ceilingDb`"],
 ];
 
 /** Multi-line prose replacements for Rust-only traits, methods and borrows. */
 const PROSE_REPLACEMENTS = [
   [
-    /The call borrows\s+the slice only for that call\. There is no heap allocation and no deferred\s+queue\./g,
+    /The\s+call\s+borrows\s+the\s+slice\s+only\s+for\s+that\s+call\.\s+There\s+is\s+no\s+heap\s+allocation\s+and\s+no\s+deferred\s+queue\./g,
     "The processor\napplies controls during that call with no deferred queue.",
   ],
-  [/\bin the event slice\b/g, "in the event array"],
-  [/\bexecute in slice order\b/g, "execute in array order"],
-  [/\bearlier in the slice\b/g, "earlier in the array"],
+  [/\bin\s+the\s+event\s+slice\b/g, "in the event array"],
+  [/\bexecute\s+in\s+slice\s+order\b/g, "execute in array order"],
+  [/\bearlier\s+in\s+the\s+slice\b/g, "earlier in the array"],
   [
-    /A scale for \[`NoteMask::from_key_scale`\]\./g,
+    /A\s+scale\s+for\s+\[`NoteMask::from_key_scale`\]\./g,
     "A major, natural minor or chromatic scale name.",
   ],
   [
-    /\s+`Default` gives a snapshot\s+with all zeros and no target\. It does not read the nominal latency of a\s+prepared processor\./g,
+    /\s+`Default`\s+gives\s+a\s+snapshot\s+with\s+all\s+zeros\s+and\s+no\s+target\.\s+It\s+does\s+not\s+read\s+the\s+nominal\s+latency\s+of\s+a\s+prepared\s+processor\./g,
     "",
   ],
-  [/\s+`Default` gives a snapshot with all zeros\./g, ""],
+  [/\s+`Default`\s+gives\s+a\s+snapshot\s+with\s+all\s+zeros\./g, ""],
   [
-    /The\s+default is \[`PitchConfig::default`\]\./g,
+    /The\s+default\s+is\s+\[`PitchConfig::default`\]\./g,
     "Refer to `PitchConfig` for the field defaults.",
   ],
   [
-    /The default is \[`ResynthesisConfig::default`\]\./g,
+    /The\s+default\s+is\s+\[`ResynthesisConfig::default`\]\./g,
     "Refer to `ResynthesisConfig` for the field defaults.",
   ],
   [
-    /The default is\s+\[`NoteMask::CHROMATIC`\]\./g,
+    /The\s+default\s+is\s+\[`NoteMask::CHROMATIC`\]\./g,
     "The default enables all twelve pitch classes (`true` in every slot).",
   ],
   [
-    /The default is \[`Self::CHROMATIC`\]\. All combinations of flags are valid\.\s+This includes \[`Self::NONE`\]\./g,
+    /The\s+default\s+is\s+\[`Self::CHROMATIC`\]\.\s+All\s+combinations\s+of\s+flags\s+are\s+valid\.\s+This\s+includes\s+\[`Self::NONE`\]\./g,
     "The default enables all twelve pitch classes (`true` in every slot). All\ncombinations of flags are valid, which includes all `false` values.",
   ],
   [
-    /Use \[`crate::ControlEvent::Midi`\] for harmony\. Use\s+\[`crate::ControlEvent::CorrectionMidi`\] for the independent correction\s+keyboard\. The typed representation can contain `u8` values that are not\s+valid\. \[`Self::validate`\] and the event preflight of the processor check\s+the MIDI ranges\./g,
+    /Use\s+\[`crate::ControlEvent::Midi`\]\s+for\s+harmony\.\s+Use\s+\[`crate::ControlEvent::CorrectionMidi`\]\s+for\s+the\s+independent\s+correction\s+keyboard\.\s+The\s+typed\s+representation\s+can\s+contain\s+`u8`\s+values\s+that\s+are\s+not\s+valid\.\s+\[`Self::validate`\]\s+and\s+the\s+event\s+preflight\s+of\s+the\s+processor\s+check\s+the\s+MIDI\s+ranges\./g,
     'Use `{ type: "midi", value }` in `ControlEvent` for harmony. Use\n`{ type: "correctionMidi", value }` for the independent correction\nkeyboard. Number fields can hold values outside the MIDI ranges, and\n`Tunelet` checks the ranges before it processes a block.',
   ],
   [
-    /Change a copy, then apply it with \[`crate::Processor::set_config`\] or\s+\[`crate::ControlEvent::Configure`\]\./g,
+    /Change\s+a\s+copy,\s+then\s+apply\s+it\s+with\s+\[`crate::Processor::set_config`\]\s+or\s+\[`crate::ControlEvent::Configure`\]\./g,
     'Change a copy, then apply it with `Tunelet.setConfig` or\n`{ type: "configure", value }` in `ControlEvent`.',
   ],
   [
-    /The MIDI sources use\s+\[`crate::ControlEvent::Midi`\]\./g,
+    /The\s+MIDI\s+sources\s+use\s+\[`crate::ControlEvent::Midi`\]\./g,
     'The MIDI sources use\n`{ type: "midi", value }` in `ControlEvent`.',
   ],
 ];
@@ -189,15 +191,28 @@ function normalizeBlock(block, filePath) {
   return [`/**`, ...rebuiltLines, `${starPrefix}*/`].join("\n");
 }
 
+/** Normalize all JSDoc blocks in a generated source text. */
+export function normalizeJsDoc(rawSource, filePath = "<memory>") {
+  const newline = rawSource.includes("\r\n") ? "\r\n" : "\n";
+  const lfSource = rawSource.replace(/\r\n/g, "\n");
+  const updated = lfSource.replace(/\/\*\*[\s\S]*?\*\//g, (block) =>
+    normalizeBlock(block, filePath),
+  );
+  return newline === "\r\n" ? updated.replace(/\n/g, "\r\n") : updated;
+}
+
 /** Normalize all JSDoc blocks in one generated file. */
 function normalizeFile(filePath) {
   const original = fs.readFileSync(filePath, "utf8");
-  const updated = original.replace(/\/\*\*[\s\S]*?\*\//g, (block) =>
-    normalizeBlock(block, filePath),
-  );
+  const updated = normalizeJsDoc(original, filePath);
   fs.writeFileSync(filePath, updated, "utf8");
 }
 
-fs.rmSync(path.join(pkgDir, ".gitignore"), { force: true });
-normalizeFile(path.join(pkgDir, "tunelet.d.ts"));
-normalizeFile(path.join(pkgDir, "tunelet.js"));
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  fs.rmSync(path.join(pkgDir, ".gitignore"), { force: true });
+  normalizeFile(path.join(pkgDir, "tunelet.d.ts"));
+  normalizeFile(path.join(pkgDir, "tunelet.js"));
+}
