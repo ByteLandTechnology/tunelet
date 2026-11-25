@@ -465,9 +465,9 @@ impl PitchTracker {
         index = ring(self.write as i32 - period * 2);
         for lag in 1..TRACKING_LAGS {
             let first = self.raw[index];
-            index = if index == 0 { HISTORY - 1 } else { index - 1 };
+            index = previous_history(index);
             let second = self.raw[index];
-            index = if index == 0 { HISTORY - 1 } else { index - 1 };
+            index = previous_history(index);
             energy = energy.wrapping_add(
                 mul14_bounded(first, first).wrapping_add(mul14_bounded(second, second)),
             );
@@ -536,6 +536,12 @@ impl PitchTracker {
             rest -= step;
         }
         cross
+    }
+
+    /// Returns the cycle difference with 32-bit wrap at a lag slot.
+    #[inline]
+    fn tracking_difference(&self, lag: usize) -> i32 {
+        (self.tracking_energy[lag] >> 1).wrapping_sub(self.tracking_cross[lag])
     }
 
     /// Increments the full-rate energy and cross windows when all reads are
@@ -619,7 +625,7 @@ impl PitchTracker {
                 let current_sq = mul14_bounded(current, current);
                 for lag in 0..TRACKING_LAGS {
                     let middle = self.raw[first];
-                    first = if first == 0 { HISTORY - 1 } else { first - 1 };
+                    first = previous_history(first);
                     let delayed = self.raw[second];
                     second = if second < 2 {
                         second + HISTORY - 2
@@ -636,9 +642,7 @@ impl PitchTracker {
             self.tracking_counter += 1;
             if self.tracking_counter == 5 {
                 self.tracking_counter = 0;
-                let mut best = tracking_minimum(|lag| {
-                    (self.tracking_energy[lag] >> 1).wrapping_sub(self.tracking_cross[lag])
-                });
+                let mut best = tracking_minimum(|lag| self.tracking_difference(lag));
                 if best == TRACKING_LAGS - 1 || best == 0 || self.base + best as i32 <= 19 {
                     self.restart();
                     step.restarted = true;
@@ -676,12 +680,9 @@ impl PitchTracker {
                         }
                     }
                     if !self.detecting {
-                        let y0 = (self.tracking_energy[best - 1] >> 1)
-                            .wrapping_sub(self.tracking_cross[best - 1]);
-                        let y1 = (self.tracking_energy[best] >> 1)
-                            .wrapping_sub(self.tracking_cross[best]);
-                        let y2 = (self.tracking_energy[best + 1] >> 1)
-                            .wrapping_sub(self.tracking_cross[best + 1]);
+                        let y0 = self.tracking_difference(best - 1);
+                        let y1 = self.tracking_difference(best);
+                        let y2 = self.tracking_difference(best + 1);
                         let mut numerator = y0.wrapping_sub(y2) >> 1;
                         let mut denominator = y1.wrapping_mul(-2).wrapping_add(y0).wrapping_add(y2);
                         let abs = numerator.wrapping_abs();
@@ -712,5 +713,15 @@ impl PitchTracker {
         step.period = self.period;
         step.previous_period = self.previous_period;
         step
+    }
+}
+
+/// Returns the previous frame index in the `HISTORY` ring.
+#[inline]
+fn previous_history(index: usize) -> usize {
+    if index == 0 {
+        HISTORY - 1
+    } else {
+        index - 1
     }
 }
