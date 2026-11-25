@@ -812,13 +812,13 @@ impl Formant {
             output.fill(0.0);
             return false;
         }
-        let order = synthesis.len();
-        let mut analysis = [0; MAX_ORDER];
-        self.analysis_coefficients(position, &mut analysis);
         let points = input.len();
         if points == 0 {
             return true;
         }
+        let order = synthesis.len();
+        let mut analysis = [0; MAX_ORDER];
+        self.analysis_coefficients(position, &mut analysis);
         let step = if points > 1 {
             std::f64::consts::PI * 2.0 * max_frequency_hz as f64
                 / self.rate.hz() as f64
@@ -842,7 +842,7 @@ impl Formant {
         let (mut bin_cosine, mut bin_sine) = (1.0, 0.0);
         // Refresh the angle from sin_cos every 64 bins to bound recurrence drift.
         let mut next_angle = |k: usize| {
-            if k & 63 == 0 {
+            if k.is_multiple_of(64) {
                 let (sine, cosine) = (step * k as f64).sin_cos();
                 bin_cosine = cosine;
                 bin_sine = sine;
