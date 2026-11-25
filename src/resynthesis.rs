@@ -429,6 +429,8 @@ pub(crate) struct Resynthesis {
     /// The delayed source audio after the two prepared shift filters. If
     /// formants are enabled, the source is inverse-filtered.
     filtered: Box<[Q14; HISTORY]>,
+    /// The delayed raw audio after `raw_post`, for formant transitions.
+    raw_filtered: Box<[Q14; HISTORY]>,
     /// The history of the rendered choir lead. All secondary choir voices
     /// read this history.
     lead: Box<[Q14; HISTORY]>,
@@ -481,6 +483,8 @@ pub(crate) struct Resynthesis {
     /// Two cascaded anti-alias filter sections. If the shift is not upward,
     /// they have coefficients of 1.0 and zero.
     post: [Biquad; 2],
+    /// Two anti-alias filter sections that track the delayed raw audio.
+    raw_post: [Biquad; 2],
     /// The current smoothed Q14 correction ratio. It does not include the
     /// global shift or the voice ratios.
     correction: Q14,
@@ -526,6 +530,12 @@ pub(crate) struct Resynthesis {
     filtered_lpc: bool,
     /// The number of recent contiguous frames in `filtered` of `filtered_lpc`.
     filtered_valid: u16,
+    /// The number of recent contiguous frames in `raw_filtered`.
+    raw_filtered_valid: u16,
+    /// `true` while `raw_filtered` advances each frame.
+    raw_filtered_active: bool,
+    /// `true` if `raw_filtered` holds data since construction or reset.
+    raw_filtered_dirty: bool,
     /// The Q14 crossfade weight of LPC synthesis, in 0..=1.
     formant_fade: Q14,
     /// The Q14 ramp weight of the stereo pan, in 0..=1.
@@ -568,6 +578,7 @@ impl Resynthesis {
             harmony: HarmonyState::new(rate, config.harmony),
             scale: CorrectionTable::new(rate, config.correction.notes),
             filtered: prepare_history(Q14::ZERO),
+            raw_filtered: prepare_history(Q14::ZERO),
             lead: prepare_history(Q14::ZERO),
             periods: prepare_history(Q6::ZERO),
             previous_periods: prepare_history(Q6::ZERO),
@@ -586,6 +597,7 @@ impl Resynthesis {
             voice_ratios: [Q14::ONE; HARMONY_VOICES + 1],
             formant_position: 0,
             post: [Biquad::new(), Biquad::new()],
+            raw_post: [Biquad::new(), Biquad::new()],
             correction: Q14::ONE,
             correction_decay: Q14::ZERO,
             scale_initialized: false,
@@ -604,6 +616,13 @@ impl Resynthesis {
             overlap_mixed: false,
             filtered_lpc: config.formant.enabled,
             filtered_valid: FILTERED_SETTLED,
+            raw_filtered_valid: if config.formant.enabled {
+                HISTORY as u16
+            } else {
+                0
+            },
+            raw_filtered_active: config.formant.enabled,
+            raw_filtered_dirty: false,
             formant_fade: if config.formant.enabled {
                 Q14::ONE
             } else {
@@ -686,12 +705,21 @@ impl Resynthesis {
     /// truncates the numerator of the cutoff before it divides by the pitch
     /// ratio.
     fn configure_shift_filters(&mut self) {
-        for filter in &mut self.post {
-            if self.config.pitch_ratio > 1.0 {
-                let numerator = (self.rate.hz() as f64 * 0.49) as i32;
-                let cutoff = numerator as f32 / self.config.pitch_ratio;
-                filter.set_design(Design::low_pass(self.rate.hz(), cutoff, 0.707));
-            } else {
+        if self.config.pitch_ratio > 1.0 {
+            let numerator = (self.rate.hz() as f64 * 0.49) as i32;
+            let cutoff = numerator as f32 / self.config.pitch_ratio;
+            let design = Design::low_pass(self.rate.hz(), cutoff, 0.707);
+            for filter in &mut self.post {
+                filter.set_design(design);
+            }
+            for filter in &mut self.raw_post {
+                filter.set_design(design);
+            }
+        } else {
+            for filter in &mut self.post {
+                filter.bypass();
+            }
+            for filter in &mut self.raw_post {
                 filter.bypass();
             }
         }
@@ -793,6 +821,10 @@ impl Resynthesis {
         self.pitch.reset();
         clear_dirty_ring(self.raw.as_mut_slice(), written, Q14::ZERO);
         clear_dirty_ring(self.filtered.as_mut_slice(), written, Q14::ZERO);
+        if self.raw_filtered_dirty {
+            clear_dirty_ring(self.raw_filtered.as_mut_slice(), written, Q14::ZERO);
+            self.raw_filtered_dirty = false;
+        }
         clear_dirty_ring(self.lead.as_mut_slice(), written, Q14::ZERO);
         if written > 0 {
             let lead_start = HISTORY - OVERLAP_FRAMES + 1;
@@ -817,6 +849,9 @@ impl Resynthesis {
         for filter in &mut self.post {
             filter.reset();
         }
+        for filter in &mut self.raw_post {
+            filter.reset();
+        }
         self.create_delays();
         self.drift_ratio.fill(Q14::ONE);
         self.old_positions = self.positions;
@@ -831,6 +866,12 @@ impl Resynthesis {
         self.overlap_mixed = false;
         self.filtered_lpc = self.config.formant.enabled;
         self.filtered_valid = FILTERED_SETTLED;
+        self.raw_filtered_valid = if self.config.formant.enabled {
+            HISTORY as u16
+        } else {
+            0
+        };
+        self.raw_filtered_active = self.config.formant.enabled;
         self.formant_fade = if self.config.formant.enabled {
             Q14::ONE
         } else {
@@ -1179,44 +1220,33 @@ impl Resynthesis {
     }
 
     /// Interpolates the delayed raw history at `position` with the anti-alias
-    /// filter rules of `filtered`.
+    /// filter state of `raw_filtered`.
+    #[inline]
     fn interpolate_raw_filtered(&self, position: Q14) -> Q14 {
+        let valid = usize::from(self.raw_filtered_valid);
+        if valid >= HISTORY {
+            return history::interpolation(&self.raw_filtered, position).0;
+        }
+        if !self.raw_filtered_active {
+            return history::interpolation(&self.filtered, position).0;
+        }
         let bits = position.to_bits();
         let center = history::center(position);
         let fraction = Q14::from_bits(bits.wrapping_sub(center.wrapping_shl(14)));
-        let raw_center = center.wrapping_sub(OVERLAP_FRAMES as i32);
-        if self.config.pitch_ratio > 1.0 {
-            let mut filters = self.post.clone();
-            for filter in &mut filters {
-                filter.reset();
-            }
-            let mut left = Q14::ZERO;
-            let mut middle = Q14::ZERO;
-            let mut right = Q14::ZERO;
-            for offset in -POST_WARMUP_FRAMES..=1 {
-                let mut sample = self.raw[ring(raw_center.wrapping_add(offset))];
-                for filter in &mut filters {
-                    sample = filter.process_sample(sample);
-                }
-                match offset {
-                    -1 => left = sample,
-                    0 => middle = sample,
-                    1 => right = sample,
-                    _ => {}
-                }
-            }
-            quadratic(left, middle, right, fraction)
-        } else {
-            let bypass = |sample: Q14| {
-                let mut filters = [Biquad::new(), Biquad::new()];
-                let first = filters[0].bypass_sample(sample);
-                filters[1].bypass_sample(first)
+        let [left_idx, middle_idx, right_idx] = history::interpolation_indices(center);
+        let tap = |index: usize| {
+            let age = if self.write >= index {
+                self.write - index
+            } else {
+                self.write + HISTORY - index
             };
-            let left = bypass(self.raw[ring(raw_center.wrapping_sub(1))]);
-            let middle = bypass(self.raw[ring(raw_center)]);
-            let right = bypass(self.raw[ring(raw_center.wrapping_add(1))]);
-            quadratic(left, middle, right, fraction)
-        }
+            if age < valid {
+                self.raw_filtered[index]
+            } else {
+                self.filtered[index]
+            }
+        };
+        quadratic(tap(left_idx), tap(middle_idx), tap(right_idx), fraction)
     }
 
     /// Reads a sample from `lead` and outputs zero until fresh frames from
@@ -1437,6 +1467,27 @@ impl Resynthesis {
         } else {
             self.raw[ring(write as i32 - ANALYSIS_FRAMES as i32)]
         };
+        if self.config.formant.enabled && !self.raw_filtered_active {
+            self.raw_post = self.post.clone();
+            self.raw_filtered_active = true;
+            self.raw_filtered_valid = 0;
+        }
+        let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
+        if self.raw_filtered_active {
+            let mut raw_sample = self.raw[delayed];
+            if self.config.pitch_ratio > 1.0 {
+                for filter in &mut self.raw_post {
+                    raw_sample = filter.process_sample(raw_sample);
+                }
+            } else {
+                for filter in &mut self.raw_post {
+                    raw_sample = filter.bypass_sample(raw_sample);
+                }
+            }
+            self.raw_filtered[write] = raw_sample;
+            self.raw_filtered_dirty = true;
+            self.raw_filtered_valid = (self.raw_filtered_valid + 1).min(HISTORY as u16);
+        }
         // The inverse analysis adds a delay of ANALYSIS_FRAMES. Read ahead by
         // the same number of frames in the overlap ring. Then the total delay
         // of the source is OVERLAP_FRAMES in the two formant modes.
@@ -1469,7 +1520,6 @@ impl Resynthesis {
             self.stereo_fade = (self.stereo_fade - STAGE_RAMP_STEP).max(Q14::ZERO);
         }
         let stereo_fade = self.stereo_fade;
-        let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
         let dry = self.raw[ring(write as i32 - LATENCY_FRAMES as i32)];
         let mut mix = [Q14::ZERO; 2];
         let mut mono = stereo_fade == Q14::ZERO;
@@ -1788,6 +1838,17 @@ impl Resynthesis {
                     mix = raw_mix;
                 }
             }
+        }
+        if self.raw_filtered_active
+            && !self.config.formant.enabled
+            && self.formant_fade == Q14::ZERO
+            && self.overlap_pending == 0
+            && !self.overlap_mixed
+            && !self.filtered_lpc
+            && self.filtered_valid == FILTERED_SETTLED
+        {
+            self.raw_filtered_active = false;
+            self.raw_filtered_valid = 0;
         }
         if self.modulation != 0 {
             if self.current_output_period != Q6::ZERO {

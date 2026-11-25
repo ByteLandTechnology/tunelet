@@ -60,7 +60,7 @@ pub(crate) fn clear_dirty_ring<T: Copy>(buffer: &mut [T], written: usize, value:
 ///
 /// The center can be negative or more than one full history length.
 #[inline]
-fn interpolation_indices(center: i32) -> [usize; 3] {
+pub(super) fn interpolation_indices(center: i32) -> [usize; 3] {
     let middle = ring(center);
     let left = if middle == 0 { HISTORY - 1 } else { middle - 1 };
     let right = if middle + 1 == HISTORY { 0 } else { middle + 1 };
