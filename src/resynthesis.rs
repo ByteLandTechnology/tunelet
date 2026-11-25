@@ -103,26 +103,30 @@ pub struct CorrectionConfig {
     /// tracking update. A value that is not zero is a half-life. It is not a
     /// fixed time to get exactly to the target.
     pub retune_ms: f32,
-    /// The sustained-note relaxation without a unit, 0..=1. The default is 0.
+    /// The relaxation on sustained notes without a unit, 0..=1. The default
+    /// is 0.
     ///
-    /// While the tracked pitch stays in one target bin, the smoothing
-    /// half-life increases toward `retune_ms + (400 - retune_ms) * humanize`
-    /// milliseconds. A target change, a table reload or a tracker restart
-    /// resets this ramp to `retune_ms`. Zero disables this relaxation. In
-    /// JavaScript, the field is optional and an absent value gives 0.
+    /// While the tracked pitch stays in one target bin, the half-life
+    /// increases smoothly toward `retune_ms + (400 - retune_ms) * humanize`
+    /// milliseconds. If the target bin, the note table or `pitch_ratio`
+    /// changes, or if the pitch tracker starts again, the half-life returns to
+    /// `retune_ms`. Zero disables this relaxation. In JavaScript, the field is
+    /// optional and an absent value gives 0.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(default),
         tsify(optional)
     )]
     pub humanize: f32,
-    /// The expressive deadband width without a unit, 0..=1. The default is 0.
+    /// The outer soft-zone width of each target bin without a unit, 0..=1.
+    /// The default is 0.
     ///
-    /// Pitches inside the `1 - flex_tune` fraction of the half-bin around a
-    /// target period get the full correction ratio. Outside that inner zone,
-    /// the pull toward the target decreases to zero at the midpoint boundary.
-    /// Zero applies the full target ratio across the whole bin. In JavaScript,
-    /// the field is optional and an absent value gives 0.
+    /// Pitches in the inner `1 - flex_tune` fraction of the half-bin around a
+    /// target period get the full pull toward the target. In the outer
+    /// `flex_tune` fraction, the pull decreases to zero at the midpoint
+    /// boundary. Zero applies full pull across the whole bin, and 1 softens
+    /// pull from the target outward. In JavaScript, the field is optional and
+    /// an absent value gives 0.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(default),
@@ -473,14 +477,20 @@ pub(crate) struct Resynthesis {
     /// The Q14 half-life coefficient for correction updates. These updates
     /// usually occur every five frames.
     correction_decay: Q14,
-    /// The Q14 sustained half-life coefficient for `humanize`, to a 400 ms
+    /// The Q14 terminal half-life coefficient for `humanize`, to a 400 ms
     /// limit.
     sustained_decay: Q14,
+    /// The Q20 retune half-life in milliseconds, for the humanize ramp.
+    retune_half_life: i64,
+    /// The Q20 sustained half-life in milliseconds, to a 400 ms limit.
+    sustained_half_life: i64,
+    /// Half of the five-frame period step times `ln(2)`, in Q20 milliseconds.
+    decay_half_step: i64,
     /// The Q14 dwell progress in the current target bin, 0..=1.
     dwell: Q14,
-    /// The Q14 dwell increment for each five-frame tracking update.
+    /// The Q14 dwell increment for each five-frame period update.
     dwell_step: Q14,
-    /// The Q14 flex-tune width, 0..=1.
+    /// The Q14 outer soft-zone width of each half-bin, 0..=1.
     flex_tune: Q14,
     /// If `true`, the current correction target and octave are selected.
     scale_initialized: bool,
@@ -492,9 +502,9 @@ pub(crate) struct Resynthesis {
     /// The signed power-of-two exponent that normalizes the input period
     /// into the range of the correction table.
     octave: i32,
-    /// The target index from the previous tracking update, for dwell resets.
+    /// The target index from the previous period update, for dwell resets.
     previous_scale_index: usize,
-    /// The octave exponent from the previous tracking update, for dwell resets.
+    /// The octave exponent from the previous period update, for dwell resets.
     previous_octave: i32,
     /// The Q14 global pitch multiplier.
     shift: Q14,
@@ -571,6 +581,9 @@ impl Resynthesis {
             correction: Q14::ONE,
             correction_decay: Q14::ZERO,
             sustained_decay: Q14::ZERO,
+            retune_half_life: 0,
+            sustained_half_life: 0,
+            decay_half_step: 0,
             dwell: Q14::ZERO,
             dwell_step: Q14::ZERO,
             flex_tune: Q14::ZERO,
@@ -602,11 +615,12 @@ impl Resynthesis {
     /// Quantizes the controls and calculates the decay coefficients and the
     /// voice pan gains again.
     ///
-    /// The coefficients are the correction decay, the drift decay and the
-    /// drift amount. The histories and the controller phase do not change.
-    /// The stereo pan gains include the harmony gain. The mono harmony path
-    /// uses a separate Q14 gain.
+    /// The coefficients cover correction, humanize, flex-tune and choir drift.
+    /// The histories and the controller phase do not change. The stereo pan
+    /// gains include the harmony gain. The mono harmony path uses a separate
+    /// Q14 gain.
     fn configure_coefficients(&mut self) {
+        const Q20_SCALE: f64 = (1_u32 << 20) as f64;
         self.shift = Q14::from_f64(self.config.pitch_ratio as f64);
         self.modulation = (self.config.harmonic_modulation as f64 / 8.0 * 16.0) as i32;
         self.dry_mix = Q8::from_f64((self.config.dry_mix * 100.0) as f64 / 100.0);
@@ -616,17 +630,23 @@ impl Resynthesis {
             let t = self.config.correction.retune_ms / 1000.0;
             Q14::from_f64(0.5_f64.powf(1.0 / ((self.rate.hz() / 5.0) * t) as f64))
         };
+        let retune_ms = f64::from(self.config.correction.retune_ms);
+        self.retune_half_life = (retune_ms * Q20_SCALE + 0.5) as i64;
+        self.decay_half_step =
+            (2500.0 * std::f64::consts::LN_2 / f64::from(self.rate.hz()) * Q20_SCALE + 0.5) as i64;
         if self.config.correction.humanize == 0.0 {
             self.sustained_decay = self.correction_decay;
+            self.sustained_half_life = self.retune_half_life;
             self.dwell_step = Q14::ZERO;
         } else {
-            let sustained_ms = self.config.correction.retune_ms
-                + (400.0 - self.config.correction.retune_ms) * self.config.correction.humanize;
+            let sustained_ms =
+                retune_ms + (400.0 - retune_ms) * f64::from(self.config.correction.humanize);
             let t = sustained_ms / 1000.0;
             self.sustained_decay =
-                Q14::from_f64(0.5_f64.powf(1.0 / ((self.rate.hz() / 5.0) * t) as f64));
-            self.dwell_step =
-                Q14::from_f64(1.0 / ((self.rate.hz() / 5.0) * 0.16) as f64).max(Q14::from_bits(1));
+                Q14::from_f64(0.5_f64.powf(1.0 / ((f64::from(self.rate.hz()) / 5.0) * t)));
+            self.sustained_half_life = (sustained_ms * Q20_SCALE + 0.5) as i64;
+            self.dwell_step = Q14::from_f64(1.0 / ((f64::from(self.rate.hz()) / 5.0) * 0.18))
+                .max(Q14::from_bits(1));
         }
         self.flex_tune = if self.config.correction.flex_tune == 0.0 {
             Q14::ZERO
@@ -718,6 +738,7 @@ impl Resynthesis {
         if old.pitch_ratio != config.pitch_ratio {
             self.configure_shift_filters();
             self.scale_initialized = false;
+            self.dwell = Q14::ZERO;
         }
         if old.mode != config.mode || old.choir_delay != config.choir_delay {
             self.create_delays();
@@ -948,19 +969,47 @@ impl Resynthesis {
         self.formant
             .envelope(self.formant_position, max_frequency_hz, input, output)
     }
-    /// Selects a target in the period domain and smooths the Q14 correction
-    /// ratio.
+    /// Clears the dwell progress and the previous target bin.
+    fn reset_dwell(&mut self) {
+        self.dwell = Q14::ZERO;
+        self.previous_scale_index = 0;
+        self.previous_octave = 0;
+    }
+
+    /// Maps the current dwell progress to a Q14 half-life decay coefficient.
     ///
-    /// The Q6 input period must be a usable tracking result. The target
-    /// search moves through the midpoints, also across octave limits. The
-    /// global shift is part of the normalization. On a sustained bin,
-    /// `humanize` relaxes the decay toward `sustained_decay`. Outside the
-    /// `1 - flex_tune` inner zone, the pull toward `target_ratio` decreases.
+    /// The Hermite ramp `u^3 * (4 - 3 * u)` interpolates the half-life in Q20
+    /// milliseconds. A Padé `(1, 1)` quotient converts that half-life to Q14.
+    fn humanize_decay(&self) -> Q14 {
+        if self.dwell >= Q14::ONE {
+            return self.sustained_decay;
+        }
+        let u = i64::from(self.dwell.to_bits());
+        let s = (u * u * u * (65_536 - 3 * u)) >> 42;
+        let half_life = self.retune_half_life
+            + (((self.sustained_half_life - self.retune_half_life) * s) >> 14);
+        let raw = if half_life <= self.decay_half_step {
+            0
+        } else {
+            (((half_life - self.decay_half_step) << 14) / (half_life + self.decay_half_step)) as i32
+        };
+        Q14::from_bits(raw).clamp(self.correction_decay, self.sustained_decay)
+    }
+
+    /// Selects a target in the period domain and returns the Q14 target ratio
+    /// and Q14 decay coefficient.
     ///
-    /// If correction is disabled or the active table is empty, the ratio moves
-    /// toward 1.0. If the shifted period is not positive, the ratio becomes
-    /// 1.0 immediately and the target selection starts again.
-    fn update_correction(&mut self, period: Q6) {
+    /// The Q6 input period must be a usable result from the pitch tracker. The
+    /// search moves through the midpoints, also across octave limits, and
+    /// includes the global shift. On a sustained bin, `humanize` increases the
+    /// half-life toward `sustained_half_life`. In the outer `flex_tune` zone,
+    /// the pull toward the target decreases to zero at the midpoint boundary.
+    ///
+    /// If the shifted period is not positive, the function clears
+    /// `scale_initialized` and dwell, and returns `None`. If correction is
+    /// disabled or the active table is empty, the function returns unity ratio
+    /// and `correction_decay`.
+    fn select_target_ratio(&mut self, period: Q6) -> Option<(Q14, Q14)> {
         let mut target_ratio = Q14::ONE;
         let mut decay = self.correction_decay;
         if self.config.correction.enabled && self.scale.count != 0 {
@@ -975,11 +1024,8 @@ impl Resynthesis {
                 self.octave = 0;
                 target = self.shift.mul(period);
                 if target <= Q6::ZERO {
-                    self.previous_scale_index = 0;
-                    self.previous_octave = 0;
-                    self.dwell = Q14::ZERO;
-                    self.correction = Q14::ONE;
-                    return;
+                    self.reset_dwell();
+                    return None;
                 }
                 while table_period(1) > target {
                     self.octave += 1;
@@ -989,8 +1035,8 @@ impl Resynthesis {
                     }
                 }
                 if target <= Q6::ZERO {
-                    self.correction = Q14::ONE;
-                    return;
+                    self.reset_dwell();
+                    return None;
                 }
                 self.scale_initialized = true;
             }
@@ -1001,8 +1047,8 @@ impl Resynthesis {
             });
             if target <= Q6::ZERO {
                 self.scale_initialized = false;
-                self.correction = Q14::ONE;
-                return;
+                self.reset_dwell();
+                return None;
             }
             while table_period(self.scale_index + 1) < target {
                 self.scale_index += 1;
@@ -1030,9 +1076,7 @@ impl Resynthesis {
                 self.dwell = Q14::ZERO;
             } else if self.dwell_step != Q14::ZERO {
                 self.dwell = (self.dwell + self.dwell_step).min(Q14::ONE);
-                let weight = self.dwell.mul::<14, 14>(self.dwell);
-                decay = self.correction_decay
-                    + weight.mul(self.sustained_decay - self.correction_decay);
+                decay = self.humanize_decay();
             }
             let denominator = Q6::from_bits(self.scale.periods[self.scale_index]);
             if denominator != Q6::ZERO {
@@ -1050,8 +1094,8 @@ impl Resynthesis {
                         let inner = span.mul::<14, 6>(Q14::ONE - self.flex_tune);
                         if distance > inner {
                             let outer = span - inner;
-                            let remaining = Q14::ONE - (distance - inner).div::<6, 14>(outer);
-                            let pull = remaining.mul::<14, 14>(remaining);
+                            let taper = Q14::ONE - (distance - inner).div::<6, 14>(outer);
+                            let pull = taper.mul::<14, 14>(taper);
                             target_ratio = Q14::ONE + pull.mul(target_ratio - Q14::ONE);
                         }
                     }
@@ -1060,6 +1104,18 @@ impl Resynthesis {
         } else {
             self.dwell = Q14::ZERO;
         }
+        Some((target_ratio, decay))
+    }
+
+    /// Updates the Q14 correction ratio from `period`.
+    ///
+    /// If `select_target_ratio` finds a non-positive shifted period, the
+    /// correction ratio becomes 1.0 immediately.
+    fn update_correction(&mut self, period: Q6) {
+        let Some((target_ratio, decay)) = self.select_target_ratio(period) else {
+            self.correction = Q14::ONE;
+            return;
+        };
         self.correction = decay.mul(self.correction - target_ratio) + target_ratio;
     }
 
