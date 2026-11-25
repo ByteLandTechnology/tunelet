@@ -17,6 +17,7 @@ use crate::{Error, EventProblem, ProcessorConfig, ResynthesisConfig};
 /// Configuration changes have the same effects on state as
 /// [`crate::Processor::set_config`].
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
@@ -78,10 +79,10 @@ impl ControlEvent {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidConfig`] for an invalid configuration or gain.
-    /// Returns [`Error::InvalidMidi`] for invalid MIDI fields. Reset is always
-    /// valid. The process call that contains the event checks the offset and
-    /// the order.
+    /// Returns [`Error::InvalidConfig`] for an invalid configuration, gain or
+    /// mix. Returns [`Error::InvalidMidi`] for invalid MIDI fields. Bypass and
+    /// reset are always valid. The process call that contains the event checks
+    /// the offset and the order.
     pub fn validate(self) -> Result<(), Error> {
         match self {
             Self::Configure(config) => config.validate(),
