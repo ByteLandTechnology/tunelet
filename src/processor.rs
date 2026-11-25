@@ -396,8 +396,6 @@ impl Processor {
             alien_loop_frames: alien_loop as u32,
             alien_phase_frames: alien_phase as u32,
             formant_generation: self.resynthesis.formant_generation(),
-            ignored_midi_events: self.resynthesis.ignored_midi_events(),
-            correction_midi_active: self.resynthesis.correction_midi_active(),
         }
     }
 
@@ -522,9 +520,9 @@ impl Processor {
     /// This method cancels an active drain. It also clears the correction
     /// ratio, the Punch envelopes, the Warm filters, the Alien recording and
     /// the reverb delays. It releases the harmony MIDI keybed, the correction
-    /// MIDI keys 0..=127, any latched correction chord and the ignored MIDI
-    /// event count. If correction MIDI was active, the configured
-    /// [`crate::CorrectionConfig::notes`] load again. It keeps these items:
+    /// MIDI keys 0..=127 and any latched correction chord. If correction MIDI
+    /// was active, the configured [`crate::CorrectionConfig::notes`] load
+    /// again. It keeps these items:
     ///
     /// - the configuration
     /// - the random stream and the arctangent lookup position of Punch
@@ -903,20 +901,4 @@ pub struct Telemetry {
     /// enabled. Compare two values to find if
     /// [`Processor::formant_envelope`] can give a new result.
     pub formant_generation: u32,
-    /// The count of validated [`crate::ControlEvent::Midi`] events that the
-    /// active harmony source or channel map ignored since construction or the
-    /// last reset.
-    ///
-    /// The count saturates at `u32::MAX`. [`Processor::take_telemetry`] does
-    /// not clear it.
-    pub ignored_midi_events: u32,
-    /// This field is `true` while [`crate::ControlEvent::CorrectionMidi`]
-    /// overrides [`crate::CorrectionConfig::notes`].
-    ///
-    /// In [`crate::CorrectionMidiMode::Momentary`], the field returns to
-    /// `false` when all keys in 0..=127 release. In
-    /// [`crate::CorrectionMidiMode::Latch`], it stays `true` after key release
-    /// until [`crate::MidiEvent::AllNotesOff`], [`Processor::reset`] or a
-    /// scale change.
-    pub correction_midi_active: bool,
 }

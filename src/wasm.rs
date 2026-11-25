@@ -19,8 +19,8 @@
 //! - Field names use camelCase.
 //! - Enum values are strings.
 //! - Each object must contain all required fields.
-//! - Optional fields use their defaults if omitted: harmony `voices` (2),
-//!   `midiChannelMap` (`"wrapFour"`), `midiBaseChannel` (0) and correction
+//! - Optional fields use their defaults if omitted: harmony `voices` (4),
+//!   `midiChannelMap` (`"baseWindow"`), `midiBaseChannel` (0) and correction
 //!   `midiMode` (`"momentary"`).
 //!
 //! [`default_config`] gives a configuration to start from. Control events use

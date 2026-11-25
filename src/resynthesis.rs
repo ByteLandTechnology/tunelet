@@ -230,8 +230,8 @@ pub struct ResynthesisConfig {
     /// A change to this value resets some audio histories and the feedback.
     /// [`crate::Processor::set_config`] gives the details.
     pub stereo_output: bool,
-    /// The controls for the four harmony voices. The default is smart
-    /// intervals with two voices.
+    /// The controls for the four harmony voices. The default is MIDI-channel
+    /// allocation.
     ///
     /// Validation applies to these controls, and they can receive MIDI, also
     /// while Choir is selected.
@@ -690,7 +690,6 @@ impl Resynthesis {
     /// and resets the audio state.
     pub(crate) fn reset(&mut self) {
         self.scale.reset(self.config.correction.notes);
-        self.harmony.reset_ignored_midi_events();
         self.reset_audio();
     }
 
@@ -776,17 +775,6 @@ impl Resynthesis {
             self.config.correction.notes,
         );
         self.scale_initialized = false;
-    }
-
-    /// Returns the count of ignored harmony MIDI events since reset.
-    pub(crate) fn ignored_midi_events(&self) -> u32 {
-        self.harmony.ignored_midi_events()
-    }
-
-    /// Returns `true` if correction MIDI currently overrides the configured
-    /// notes.
-    pub(crate) fn correction_midi_active(&self) -> bool {
-        self.scale.is_midi_active()
     }
 
     /// Returns the finite number of frames for a drain of resynthesis.

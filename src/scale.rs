@@ -225,12 +225,6 @@ impl CorrectionTable {
         result
     }
 
-    /// Returns `true` if correction MIDI currently overrides the configured
-    /// notes.
-    pub(crate) fn is_midi_active(&self) -> bool {
-        self.midi_active
-    }
-
     /// Calculates the period table again for `rate` and builds the active
     /// targets again.
     ///
@@ -333,27 +327,26 @@ impl CorrectionTable {
     ) {
         match event {
             MidiEvent::NoteOn { note, velocity, .. } if velocity != 0 => {
-                self.keyboard |= 1_u128 << note;
-                self.latched = self.keyboard;
+                let bit = 1_u128 << note;
+                let was_empty = self.keyboard == 0;
+                self.keyboard |= bit;
+                self.latched = if was_empty { bit } else { self.latched | bit };
                 self.midi_active = true;
-                self.set_notes(mask_from_bits(self.keyboard));
+                let active = match mode {
+                    CorrectionMidiMode::Momentary => self.keyboard,
+                    CorrectionMidiMode::Latch => self.latched,
+                };
+                self.set_notes(mask_from_bits(active));
             }
             MidiEvent::NoteOn { note, .. } | MidiEvent::NoteOff { note, .. } => {
                 self.keyboard &= !(1_u128 << note);
-                match mode {
-                    CorrectionMidiMode::Momentary => {
-                        if self.keyboard == 0 {
-                            self.midi_active = false;
-                            self.set_notes(fallback);
-                        } else {
-                            self.midi_active = true;
-                            self.set_notes(mask_from_bits(self.keyboard));
-                        }
-                    }
-                    CorrectionMidiMode::Latch => {
-                        if !self.midi_active {
-                            self.set_notes(fallback);
-                        }
+                if mode == CorrectionMidiMode::Momentary {
+                    if self.keyboard == 0 {
+                        self.midi_active = false;
+                        self.set_notes(fallback);
+                    } else {
+                        self.midi_active = true;
+                        self.set_notes(mask_from_bits(self.keyboard));
                     }
                 }
             }

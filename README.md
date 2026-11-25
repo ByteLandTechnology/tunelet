@@ -184,32 +184,32 @@ modes keep the stereo dry signal.
 Set `resynthesis.mode` to `Harmony`. Then select the source of the voices
 with `resynthesis.harmony.source`:
 
-| Source          | The voices follow                                               |
-| --------------- | --------------------------------------------------------------- |
-| `FixedInterval` | A fixed number of semitones from the singer                     |
-| `SmartInterval` | An interval in scale steps, in a key and a scale, default       |
-| `ChordByDegree` | A chord on a scale degree                                       |
-| `ChordByName`   | A named chord, for example `MinorSeventh`                       |
-| `ChordViaMidi`  | The active MIDI notes, as a chord                               |
-| `MidiOmni`      | MIDI notes from all channels, on the first free voice           |
-| `MidiChannels`  | MIDI channels mapped through `midi_channel_map` to four voices  |
+| Source          | The voices follow                                                 |
+| --------------- | ----------------------------------------------------------------- |
+| `FixedInterval` | A fixed number of semitones from the singer                       |
+| `SmartInterval` | An interval in scale steps, in a key and a scale                  |
+| `ChordByDegree` | A chord on a scale degree                                         |
+| `ChordByName`   | A named chord, for example `MinorSeventh`                         |
+| `ChordViaMidi`  | The active MIDI notes, as a chord                                 |
+| `MidiOmni`      | MIDI notes from all channels, on the first free voice             |
+| `MidiChannels`  | MIDI channels from `midi_channel_map` for four voices, default    |
 
 `resynthesis.harmony.voices` sets the number of interval voices, in `0..=4`.
-The default is 2, with diatonic intervals `[2, -2, 4, -4]` and chromatic
-intervals `[4, -5, 7, -12]`. `FixedInterval` and `SmartInterval` use the first
-`voices` voices. The other voices release with the usual gain envelope. The
-chord and MIDI sources ignore this field.
+The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
+voices. The other voices release with the usual gain envelope. The chord
+and MIDI sources ignore this field.
 
-For `MidiChannels`, `resynthesis.harmony.midi_channel_map` selects `WrapFour`
-(default, channel `c` in `0..=15` maps to voice `c % 4`) or `BaseWindow`
-(channels `midi_base_channel..midi_base_channel + 4`, where `midi_base_channel`
-is in `0..=12` and defaults to 0). A 16-channel keybed keeps held notes across
-live switches among `MidiOmni`, `ChordViaMidi` and `MidiChannels`, and resumes
-held notes on legato release.
+For `MidiChannels`, `resynthesis.harmony.midi_channel_map` selects `BaseWindow`
+(default) or `WrapFour`. `BaseWindow` maps channels
+`midi_base_channel..midi_base_channel + 4` to the four voices, with
+`midi_base_channel` in `0..=12` (default 0). `WrapFour` maps channel `c` in
+`0..=15` to voice `c % 4`. A 16-channel keybed keeps held notes across live
+changes among `MidiOmni`, `ChordViaMidi` and `MidiChannels`. On legato release,
+a voice resumes the next newest held note.
 
 For `ControlEvent::CorrectionMidi`, `resynthesis.correction.midi_mode` selects
-`Momentary` (default) or `Latch` across notes `0..=127`. `Momentary` restores
-`resynthesis.correction.notes` when all keys release. `Latch` keeps the last
+`Momentary` (default) or `Latch` across notes `0..=127`. If all keys release in
+`Momentary` mode, `resynthesis.correction.notes` loads again. `Latch` keeps the
 chord after key release until `MidiEvent::AllNotesOff`, `reset()` or a scale
 change.
 
@@ -324,8 +324,6 @@ The telemetry includes these items:
   signal.
 - The pitch clarity, which is a confidence score from 0 to 1.
 - The current gains of Punch and Warm, and the position in the Alien loop.
-- The count of ignored harmony MIDI events and whether correction MIDI is
-  active.
 
 The peak windows of the telemetry are independent of the peak window of the
 feedback. In mono calls, the output and reverb wet peaks measure the audio
@@ -470,8 +468,8 @@ and show enums as string literals. To change the configuration, do these steps:
 
 If a required field is absent or a value is not valid, the call throws a
 JavaScript `Error`. Optional fields use their defaults if absent:
-`resynthesis.harmony.voices` (`2`), `resynthesis.harmony.midiChannelMap`
-(`"wrapFour"`), `resynthesis.harmony.midiBaseChannel` (`0`) and
+`resynthesis.harmony.voices` (`4`), `resynthesis.harmony.midiChannelMap`
+(`"baseWindow"`), `resynthesis.harmony.midiBaseChannel` (`0`) and
 `resynthesis.correction.midiMode` (`"momentary"`). The conversion ignores extra
 object properties. The generated declarations contain the parameter
 documentation from the Rust types.
