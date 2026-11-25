@@ -33,10 +33,11 @@ const GAIN_RELEASE: Q12 = Q12::from_bits(81);
 
 /// The source of target periods for the four harmony voices.
 ///
-/// The default is [`Self::SmartInterval`]. The static interval and chord
+/// The default is [`Self::MidiChannels`]. The static interval and chord
 /// sources use the related [`HarmonyConfig`] fields. The MIDI sources use
 /// [`crate::ControlEvent::Midi`]. The configuration of the sources that are
-/// not selected is still validated and kept.
+/// not selected is still validated and kept. If the selected source changes,
+/// the active MIDI notes release.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -48,9 +49,7 @@ pub enum HarmonySource {
     /// uses `chromatic_intervals`.
     FixedInterval,
     /// Each voice follows an interval in scale steps from the singer. This
-    /// source uses `diatonic_intervals`, `key` and `scale`. This is the
-    /// default.
-    #[default]
+    /// source uses `diatonic_intervals`, `key` and `scale`.
     SmartInterval,
     /// The voices sing a chord on a scale degree. This source uses `degree`,
     /// `key`, `scale` and `inversion`.
@@ -73,13 +72,12 @@ pub enum HarmonySource {
     /// updates its gain and its assignment order. Note Off matches the pitch
     /// on all channels.
     MidiOmni,
-    /// Voice `c % 4` follows MIDI channel `c` for the zero-based channels
-    /// 0..=15.
+    /// Voice `n` follows MIDI channel `n` for the zero-based channels 0..=3.
     ///
-    /// Each channel keeps its held notes. A new Note On on a channel sets the
-    /// active note of its voice. If a Note Off releases the active note of a
-    /// voice, the voice resumes the held note with the newest assignment on
-    /// its channels.
+    /// Other valid MIDI channels do not control voices. Each channel has one
+    /// current note. Note Off releases that note only if the pitch is the
+    /// same. This is the default.
+    #[default]
     MidiChannels,
 }
 
@@ -235,14 +233,13 @@ pub enum Inversion {
 ///
 /// Positive intervals make the pitch higher. The defaults are:
 ///
-/// - Smart intervals as the source.
+/// - MIDI channels 0..=3 as the source.
 /// - The key of C and the major scale.
-/// - Chromatic intervals `[4, -5, 7, -12]` and diatonic intervals
-///   `[2, -2, 4, -4]`.
+/// - Unison intervals.
 /// - A tonic major chord in root position.
 /// - A register of 50%.
 /// - A closed voicing and zero portamento.
-/// - Two voices for the interval sources.
+/// - Four voices for the interval sources.
 ///
 /// These settings configure all sources. Only the fields for the selected
 /// source change the target notes. Validation always checks all fields.
@@ -264,7 +261,7 @@ pub enum Inversion {
     serde(rename_all = "camelCase")
 )]
 pub struct HarmonyConfig {
-    /// The pitch source. The default is [`HarmonySource::SmartInterval`].
+    /// The pitch source. The default is [`HarmonySource::MidiChannels`].
     pub source: HarmonySource,
     /// The pitch class of the tonic. The default is C. Smart intervals, named
     /// chords and degree chords use it. It does not transpose direct MIDI
@@ -272,17 +269,17 @@ pub struct HarmonyConfig {
     pub key: PitchClass,
     /// The scale for smart intervals and degree chords. The default is major.
     pub scale: HarmonyScale,
-    /// Four fixed semitone offsets, each in -24..=24. The default is
-    /// `[4, -5, 7, -12]`. [`HarmonySource::FixedInterval`] uses them. A value
-    /// of 12 makes the pitch one octave higher.
+    /// Four fixed semitone offsets, each in -24..=24. The default is all
+    /// zeros. [`HarmonySource::FixedInterval`] uses them. A value of 12 makes
+    /// the pitch one octave higher.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         tsify(type = "[number, number, number, number]")
     )]
     pub chromatic_intervals: [i8; HARMONY_VOICES],
-    /// Four offsets in scale steps, each in -14..=14. The default is
-    /// `[2, -2, 4, -4]`. [`HarmonySource::SmartInterval`] uses them. Seven
-    /// steps make the pitch one octave higher.
+    /// Four offsets in scale steps, each in -14..=14. The default is all
+    /// zeros. [`HarmonySource::SmartInterval`] uses them. Seven steps make
+    /// the pitch one octave higher.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         tsify(type = "[number, number, number, number]")
@@ -320,7 +317,7 @@ pub struct HarmonyConfig {
     pub portamento_ms: f32,
     /// The number of voices that sound in the interval sources, 0..=4.
     ///
-    /// The default is 2. [`HarmonySource::FixedInterval`] and
+    /// The default is 4. [`HarmonySource::FixedInterval`] and
     /// [`HarmonySource::SmartInterval`] use the first `voices` voices. The
     /// other voices release with the usual gain envelope. The chord and MIDI
     /// sources ignore this field. In JavaScript, the field is optional and
@@ -333,27 +330,27 @@ pub struct HarmonyConfig {
     pub voices: u8,
 }
 
-/// The default count of interval voices: two.
+/// The default count of interval voices: all of them.
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 fn default_voices() -> u8 {
-    2
+    HARMONY_VOICES as u8
 }
 
 impl Default for HarmonyConfig {
     fn default() -> Self {
         Self {
-            source: HarmonySource::SmartInterval,
+            source: HarmonySource::MidiChannels,
             key: PitchClass::C,
             scale: HarmonyScale::Major,
-            chromatic_intervals: [4, -5, 7, -12],
-            diatonic_intervals: [2, -2, 4, -4],
+            chromatic_intervals: [0; HARMONY_VOICES],
+            diatonic_intervals: [0; HARMONY_VOICES],
             chord: ChordName::Major,
             degree: ChordDegree::I,
             inversion: Inversion::Root,
             register_percent: 50.0,
             voicing_spread_percent: 0.0,
             portamento_ms: 0.0,
-            voices: 2,
+            voices: HARMONY_VOICES as u8,
         }
     }
 }
@@ -410,9 +407,6 @@ pub(crate) struct HarmonyState {
     rate: f32,
     /// The validated source and voicing controls.
     config: HarmonyConfig,
-    /// The last MIDI channel for each voice in [`HarmonySource::MidiChannels`].
-    /// It is valid only while the period of the voice is not zero.
-    midi_channel: [u8; HARMONY_VOICES],
     /// The last MIDI note number for each voice. It is valid only while the
     /// period of the voice is not zero.
     midi_note: [i32; HARMONY_VOICES],
@@ -470,12 +464,6 @@ pub(crate) struct HarmonyState {
     /// The signed assignment order of each pending note. The largest positive
     /// value resumes first.
     pending_order: [i32; 128],
-    /// The velocity of each held note on each MIDI channel in
-    /// [`HarmonySource::MidiChannels`]. Zero marks an inactive entry.
-    channel_velocity: [[u8; 128]; 16],
-    /// The signed assignment order of each held note on each MIDI channel in
-    /// [`HarmonySource::MidiChannels`].
-    channel_order: [[i32; 128]; 16],
     /// The wrapping i32 counter of Note On and Note Off events. A reset sets
     /// it to zero. The note assignment compares its signed values.
     event_counter: i32,
@@ -489,7 +477,6 @@ impl HarmonyState {
         let mut result = Self {
             rate: rate.hz(),
             config,
-            midi_channel: [0; HARMONY_VOICES],
             midi_note: [0; HARMONY_VOICES],
             midi_period: [Q6::ZERO; HARMONY_VOICES],
             midi_gain: [Q12::ZERO; HARMONY_VOICES],
@@ -511,8 +498,6 @@ impl HarmonyState {
             porta_decay: Q14::ZERO,
             pending_gain: [Q12::ZERO; 128],
             pending_order: [0; 128],
-            channel_velocity: [[0; 128]; 16],
-            channel_order: [[0; 128]; 16],
             event_counter: 0,
             gains: std::array::from_fn(|i| velocity_gain(i as u8)),
         };
@@ -554,8 +539,7 @@ impl HarmonyState {
     /// The function clears these items:
     ///
     /// - The active MIDI periods, which releases the voices.
-    /// - The pending stolen notes, the held channel notes and their assignment
-    ///   orders.
+    /// - The pending stolen notes and their assignment orders.
     /// - The portamento start state.
     /// - The MIDI event counter.
     ///
@@ -572,8 +556,6 @@ impl HarmonyState {
         self.portamento_period.fill(Q6::ZERO);
         self.pending_gain.fill(Q12::ZERO);
         self.pending_order.fill(0);
-        self.channel_velocity.fill([0; 128]);
-        self.channel_order.fill([0; 128]);
         self.event_counter = 0;
         if self.config.source == HarmonySource::ChordViaMidi {
             self.setup_chord();
@@ -702,13 +684,12 @@ impl HarmonyState {
     /// Applies a MIDI event with channel, note and velocity values that are
     /// already in range.
     /// Returns `true` if resynthesis must make its next control step due.
-    /// This occurs after a new note assignment and after each Note Off in the
-    /// MIDI sources. The omni sources steal the oldest voice and resume the
-    /// newest pending note. [`HarmonySource::MidiChannels`] maps each channel
-    /// `c` to voice `c % 4` and resumes the newest held note on those
-    /// channels. If two orders are equal, strict comparisons keep the lowest
-    /// voice, channel or pitch. All Notes Off calls `reset` and returns
-    /// `false`. The gain releases occur at the next control steps.
+    /// This occurs after a new note assignment and after each Note Off on a
+    /// channel that the MIDI source uses. The omni sources steal the oldest
+    /// voice and resume the newest pending note. If two orders are equal,
+    /// strict comparisons keep the lowest voice index or pitch. Each Note Off
+    /// clears the pending entry of its pitch. All Notes Off calls `reset` and
+    /// returns `false`. The gain releases occur at the next control steps.
     pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent) -> bool {
         let (channel, note, velocity) = match event {
             MidiEvent::AllNotesOff => {
@@ -781,48 +762,16 @@ impl HarmonyState {
                     true
                 }
             }
-            HarmonySource::MidiChannels => {
-                let channel_index = usize::from(channel);
-                let voice = channel_index % HARMONY_VOICES;
+            HarmonySource::MidiChannels if channel < 4 => {
+                let voice = usize::from(channel);
                 if velocity == 0 {
-                    self.channel_velocity[channel_index][note] = 0;
-                    self.channel_order[channel_index][note] = 0;
-                    if self.midi_period[voice] != Q6::ZERO
-                        && self.midi_channel[voice] == channel
-                        && self.midi_note[voice] == note as i32
-                    {
-                        let mut best: Option<(usize, usize, i32)> = None;
-                        for candidate_channel in (voice..16).step_by(HARMONY_VOICES) {
-                            for candidate_note in 0..128 {
-                                if self.channel_velocity[candidate_channel][candidate_note] != 0 {
-                                    let order =
-                                        self.channel_order[candidate_channel][candidate_note];
-                                    let is_newer = match best {
-                                        None => true,
-                                        Some((_, _, best_order)) => order > best_order,
-                                    };
-                                    if is_newer {
-                                        best = Some((candidate_channel, candidate_note, order));
-                                    }
-                                }
-                            }
-                        }
-                        if let Some((next_channel, next_note, next_order)) = best {
-                            let next_velocity =
-                                usize::from(self.channel_velocity[next_channel][next_note]);
-                            self.midi_channel[voice] = next_channel as u8;
-                            self.assign(voice, next_note, self.gains[next_velocity], next_order);
-                        } else {
-                            self.midi_period[voice] = Q6::ZERO;
-                        }
+                    if self.voice_has_note(voice, note) {
+                        self.midi_period[voice] = Q6::ZERO;
                     }
                 } else {
                     if self.midi_period[voice] == Q6::ZERO {
                         self.portamento_period[voice] = Q6::ZERO;
                     }
-                    self.channel_velocity[channel_index][note] = velocity as u8;
-                    self.channel_order[channel_index][note] = self.event_counter;
-                    self.midi_channel[voice] = channel;
                     self.assign(voice, note, gain, self.event_counter);
                 }
                 true

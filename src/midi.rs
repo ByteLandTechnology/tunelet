@@ -37,8 +37,8 @@ pub enum MidiEvent {
     },
     /// All notes stop (controller 123).
     ///
-    /// For harmony, it clears the active MIDI assignments, the stolen notes
-    /// and the held channel notes on all channels. In MIDI-chord mode, it also
+    /// For harmony, it clears the active MIDI assignments and the stolen notes
+    /// that are still held, on all channels. In MIDI-chord mode, it also
     /// releases the chord voices. The gain envelopes do not change, so the
     /// released voices decay. The prepared targets of the named and degree
     /// chord sources do not change. For the correction keyboard, it clears

@@ -43,16 +43,17 @@ pub enum ControlEvent {
     /// This event sends a note control to the harmony source that
     /// [`crate::HarmonyConfig`] selects.
     ///
-    /// MIDI-channel mode maps channel `c` in 0..=15 to voice `c % 4`. Omni
-    /// mode and MIDI-chord mode combine channels.
+    /// MIDI-channel mode uses channels 0..=3. Omni mode and MIDI-chord mode
+    /// combine channels.
     Midi(MidiEvent),
     /// This event changes the correction keyboard independently of harmony MIDI.
     ///
     /// While at least one key in 0..=127 is held, the held keys become the
     /// active pitch classes. Channels and nonzero velocities do not change the
     /// selected classes. When all keys release, or on All Notes Off, the
-    /// configured mask loads again. A resynthesis configuration update or a
-    /// reset also loads the configured mask again after a MIDI override.
+    /// configured mask loads again. If a later change sets new configured
+    /// notes, or enables or disables correction, the configured mask also
+    /// loads again.
     CorrectionMidi(MidiEvent),
     /// This event resets immediately before the event frame, with the semantics of
     /// [`crate::Processor::reset`].

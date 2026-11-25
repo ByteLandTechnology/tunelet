@@ -181,25 +181,23 @@ modes keep the stereo dry signal.
 
 ### Harmony sources
 
-Set `resynthesis.mode` to `Harmony`. The default configuration renders two
-smart-interval voices in C major. Select the source of the voices with
-`resynthesis.harmony.source`:
+Set `resynthesis.mode` to `Harmony`. Then select the source of the voices
+with `resynthesis.harmony.source`:
 
-| Source          | The voices follow                                               |
-| --------------- | --------------------------------------------------------------- |
-| `FixedInterval` | A fixed number of semitones from the singer                     |
-| `SmartInterval` | An interval in scale steps, in a key and a scale, default       |
-| `ChordByDegree` | A chord on a scale degree                                       |
-| `ChordByName`   | A named chord, for example `MinorSeventh`                       |
-| `ChordViaMidi`  | The active MIDI notes, as a chord                               |
-| `MidiOmni`      | MIDI notes from all channels, on the first free voice           |
-| `MidiChannels`  | MIDI channel `c` for voice `c % 4` (channels 0–15), with legato |
+| Source          | The voices follow                                      |
+| --------------- | ------------------------------------------------------ |
+| `FixedInterval` | A fixed number of semitones from the singer            |
+| `SmartInterval` | An interval in scale steps, in a key and a scale       |
+| `ChordByDegree` | A chord on a scale degree                              |
+| `ChordByName`   | A named chord, for example `MinorSeventh`              |
+| `ChordViaMidi`  | The active MIDI notes, as a chord                      |
+| `MidiOmni`      | MIDI notes from all channels, on the first free voice  |
+| `MidiChannels`  | MIDI channel `n` for voice `n` (channels 0–3), default |
 
 `resynthesis.harmony.voices` sets the number of interval voices, in `0..=4`.
-The default is 2. `FixedInterval` and `SmartInterval` use the first `voices`
+The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
 voices. The other voices release with the usual gain envelope. The chord
-and MIDI sources ignore this field. If `resynthesis.harmony.source` changes,
-the active MIDI voices release.
+and MIDI sources ignore this field.
 
 `resynthesis.harmony_gain` scales the four harmony voices in mono and in
 stereo. It does not scale the lead voice.
@@ -251,10 +249,8 @@ events. A stage event replaces all settings of that stage. To change one
 field, start from `processor.config()`.
 
 Harmony MIDI uses `ControlEvent::Midi`. MIDI for the correction keyboard uses
-`ControlEvent::CorrectionMidi`. Held keys in `0..=127` override the correction
-scale temporarily, and a release of all keys loads
-`resynthesis.correction.notes` again. For example, this event starts a harmony
-note at frame 256:
+`ControlEvent::CorrectionMidi`. For example, this event starts a harmony note
+at frame 256:
 
 ```rust
 use tunelet::{ControlEvent, MidiEvent, TimedEvent};
@@ -458,7 +454,7 @@ and show enums as string literals. To change the configuration, do these steps:
 
 If a required field is absent or a value is not valid, the call throws a
 JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 2 if it is absent. The conversion ignores extra object properties. The
+to 4 if it is absent. The conversion ignores extra object properties. The
 generated declarations contain the parameter documentation from the Rust
 types.
 
