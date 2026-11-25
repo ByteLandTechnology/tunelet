@@ -162,9 +162,7 @@ pub(crate) struct CorrectionTable {
     /// If the sample rate changes, `set_sample_rate` builds the active targets
     /// again from these periods.
     base_periods: [i32; 12],
-    /// The held MIDI keys.
-    ///
-    /// A reset clears all 128 keys, and mask creation excludes key 127.
+    /// The held MIDI keys 0..=127.
     pub keyboard: [bool; 128],
 }
 
@@ -228,24 +226,33 @@ impl CorrectionTable {
             self.midpoints[0] = self.midpoints[self.count] / 2;
         }
     }
-    /// Clears all 128 keys on the correction keyboard.
-    pub(crate) fn reset(&mut self) {
+    /// Releases keys 0..=127 and loads `notes` again.
+    pub(crate) fn reset(&mut self, notes: NoteMask) {
         self.keyboard.fill(false);
+        self.set_notes(notes);
     }
     /// Applies an event whose MIDI ranges were already checked.
-    pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent) {
+    ///
+    /// If no key in 0..=127 is held, this method loads `notes` again.
+    pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent, notes: NoteMask) {
         match event {
             MidiEvent::NoteOn { note, velocity, .. } => {
-                self.keyboard[note as usize] = velocity != 0
+                self.keyboard[usize::from(note)] = velocity != 0
             }
-            MidiEvent::NoteOff { note, .. } => self.keyboard[note as usize] = false,
-            MidiEvent::AllNotesOff => self.keyboard[..127].fill(false),
+            MidiEvent::NoteOff { note, .. } => self.keyboard[usize::from(note)] = false,
+            MidiEvent::AllNotesOff => {
+                self.reset(notes);
+                return;
+            }
         }
         let mut mask = [false; 12];
-        // Correction excludes key 127, and All Notes Off keeps that key.
-        for i in 0..127 {
-            mask[i % 12] |= self.keyboard[i];
+        for (i, &held) in self.keyboard.iter().enumerate() {
+            mask[i % 12] |= held;
         }
-        self.set_notes(NoteMask(mask));
+        if mask == [false; 12] {
+            self.set_notes(notes);
+        } else {
+            self.set_notes(NoteMask(mask));
+        }
     }
 }
