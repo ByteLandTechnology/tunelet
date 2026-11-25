@@ -7,13 +7,13 @@
 //! sorted. If two candidates have the same score, the traversal order selects
 //! the result.
 
-use super::{HarmonyConfig, HarmonySource, HARMONY_VOICES};
+use super::{HarmonyConfig, HarmonyScale, HarmonySource, HARMONY_VOICES};
 use crate::numeric::fixed::{Q12, Q6};
 
 /// Seven semitone offsets of the degrees for each `HarmonyScale`.
 /// `MajorWithoutSeventh` repeats its sixth in the last slot to keep seven
 /// degrees.
-pub(super) const SCALE_TONES: [[i32; 7]; 7] = [
+const SCALE_TONES: [[i32; 7]; 7] = [
     [0, 2, 4, 5, 7, 9, 11],
     [0, 2, 4, 5, 7, 9, 9],
     [0, 2, 4, 5, 7, 9, 10],
@@ -22,6 +22,13 @@ pub(super) const SCALE_TONES: [[i32; 7]; 7] = [
     [0, 2, 3, 5, 7, 9, 10],
     [0, 2, 3, 5, 7, 9, 11],
 ];
+
+/// Maps a zero-based degree to a semitone offset in `scale`.
+///
+/// Euclidean division keeps the octave offset for negative degrees.
+pub(super) fn scale_degree_semitones(scale: HarmonyScale, degree: i32) -> i32 {
+    degree.div_euclid(7) * 12 + SCALE_TONES[scale as usize][degree.rem_euclid(7) as usize]
+}
 /// Semitone offsets for each `ChordName` in discriminant order. Each row has
 /// three or four tones.
 const NAMED: [&[i32]; 17] = [
@@ -90,7 +97,7 @@ pub(super) fn voice_chord(
         HarmonySource::ChordByDegree => {
             let chord = DEGREE[config.degree as usize];
             for (tone, &degree) in tones.iter_mut().zip(chord) {
-                *tone = degree / 7 * 12 + SCALE_TONES[config.scale as usize][(degree % 7) as usize];
+                *tone = scale_degree_semitones(config.scale, degree);
             }
             chord.len()
         }
