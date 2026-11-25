@@ -42,7 +42,7 @@ pub enum MidiEvent {
     /// voices. The gain envelopes do not change, so the released voices decay.
     /// The prepared targets of the named and degree chord sources do not
     /// change. For the correction keyboard, it clears keys 0..=127 and any
-    /// latched chord, and restores [`crate::CorrectionConfig::notes`].
+    /// latched chord, and loads [`crate::CorrectionConfig::notes`] again.
     AllNotesOff,
 }
 

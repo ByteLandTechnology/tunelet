@@ -43,18 +43,18 @@ pub enum ControlEvent {
     /// This event sends a note control to the MIDI keybed of
     /// [`crate::HarmonyConfig`].
     ///
-    /// The keybed records all 16 channels. MIDI-channel mode maps channels
+    /// The keybed records all 16 channels. MIDI-channel mode assigns channels
     /// with [`crate::HarmonyConfig::midi_channel_map`]. Omni mode and
     /// MIDI-chord mode combine all channels.
     Midi(MidiEvent),
     /// This event changes the correction keyboard independently of harmony MIDI.
     ///
-    /// The held notes 0..=127 become pitch classes. Channels and nonzero
-    /// velocities do not change the selected classes. In
+    /// The held keys 0..=127 select the active pitch classes. Channels and
+    /// nonzero velocities do not change the selected classes. In
     /// [`crate::CorrectionMidiMode::Momentary`], when all keys release, the
     /// configured [`crate::CorrectionConfig::notes`] load again. In
     /// [`crate::CorrectionMidiMode::Latch`], the chord stays active until
-    /// [`MidiEvent::AllNotesOff`], a reset or a scale change.
+    /// [`MidiEvent::AllNotesOff`], a reset or a change to `notes` or `enabled`.
     CorrectionMidi(MidiEvent),
     /// This event resets immediately before the event frame, with the semantics of
     /// [`crate::Processor::reset`].

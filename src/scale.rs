@@ -83,13 +83,14 @@ pub enum CorrectionScale {
 
 /// How [`crate::ControlEvent::CorrectionMidi`] keeps or releases notes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
     serde(rename_all = "camelCase")
 )]
 pub enum CorrectionMidiMode {
-    /// Held MIDI keys override the configured scale until all keys in 0..=127
+    /// Held MIDI keys replace the configured scale until all keys in 0..=127
     /// release. This is the default.
     #[default]
     Momentary,
@@ -203,7 +204,7 @@ pub(crate) struct CorrectionTable {
     keyboard: u128,
     /// The latched MIDI keys 0..=127 for [`CorrectionMidiMode::Latch`].
     latched: u128,
-    /// If `true`, correction MIDI currently overrides the configured notes.
+    /// If `true`, correction MIDI currently replaces the configured notes.
     midi_active: bool,
 }
 
@@ -275,7 +276,7 @@ impl CorrectionTable {
         self.midi_active = false;
         self.set_notes(fallback);
     }
-    /// Updates the override state for a new `mode`, and returns `true` if the
+    /// Updates the active table for a new `mode`, and returns `true` if the
     /// active target table changed.
     pub(crate) fn apply_mode(&mut self, mode: CorrectionMidiMode, fallback: NoteMask) -> bool {
         match mode {
@@ -305,11 +306,11 @@ impl CorrectionTable {
             }
         }
     }
-    /// Releases all keys 0..=127 and, if a MIDI override was active, restores
-    /// `fallback`.
+    /// Releases all keys 0..=127 and, if correction MIDI was active, loads
+    /// `fallback` again.
     ///
-    /// If no MIDI override was active, the prepared target table does not
-    /// reload.
+    /// If correction MIDI was not active, the prepared target table does not
+    /// load again.
     pub(crate) fn reset(&mut self, fallback: NoteMask) {
         self.keyboard = 0;
         self.latched = 0;

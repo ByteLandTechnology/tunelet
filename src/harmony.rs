@@ -36,7 +36,9 @@ const GAIN_RELEASE: Q12 = Q12::from_bits(81);
 /// The default is [`Self::MidiChannels`]. The static interval and chord
 /// sources use the related [`HarmonyConfig`] fields. The MIDI sources use
 /// [`crate::ControlEvent::Midi`]. The configuration of the sources that are
-/// not selected is still validated and kept.
+/// not selected is still validated and kept. If the selected source changes,
+/// the keybed projects its held notes onto the new source, and unselected MIDI
+/// voices release.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -73,28 +75,29 @@ pub enum HarmonySource {
     /// Voices follow MIDI channels through [`HarmonyConfig::midi_channel_map`]
     /// and [`HarmonyConfig::midi_base_channel`].
     ///
-    /// Each voice plays the newest held note across the channels mapped to it.
-    /// If that note stops, the voice resumes the next newest held note on its
-    /// mapped channels. This is the default.
+    /// Each voice plays the newest held note across the channels for that
+    /// voice. If that note stops, the voice resumes the next newest held note
+    /// on those channels. This is the default.
     #[default]
     MidiChannels,
 }
 
-/// How [`HarmonySource::MidiChannels`] maps the 16 MIDI channels to the four
-/// harmony voices.
+/// How [`HarmonySource::MidiChannels`] assigns the 16 MIDI channels to the
+/// four harmony voices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
     serde(rename_all = "camelCase")
 )]
 pub enum MidiChannelMap {
-    /// Channel `c` in `midi_base_channel..midi_base_channel + 4` maps to
+    /// Channel `c` in `midi_base_channel..midi_base_channel + 4` controls
     /// voice `c - midi_base_channel`. Other channels do not control voices.
     /// This is the default.
     #[default]
     BaseWindow,
-    /// Channel `c` in 0..=15 maps to voice `c % 4`.
+    /// Channel `c` in 0..=15 controls voice `c % 4`.
     WrapFour,
 }
 
@@ -339,22 +342,22 @@ pub struct HarmonyConfig {
     /// [`HarmonySource::SmartInterval`] use the first `voices` voices. The
     /// other voices release with the usual gain envelope. The chord and MIDI
     /// sources ignore this field. In JavaScript, the field is optional and
-    /// a missing value gives the default.
+    /// an absent or `undefined` value gives the default.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(default = "default_voices"),
-        tsify(optional)
+        serde(default = "default_voices", deserialize_with = "deserialize_voices"),
+        tsify(optional, type = "number | undefined")
     )]
     pub voices: u8,
-    /// How [`HarmonySource::MidiChannels`] maps channels to voices.
+    /// How [`HarmonySource::MidiChannels`] assigns channels to voices.
     ///
     /// The default is [`MidiChannelMap::BaseWindow`]. Other harmony sources
     /// ignore this field. In JavaScript, the field is optional and an absent
-    /// value gives the default.
+    /// or `undefined` value gives the default.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(default),
-        tsify(optional)
+        serde(default, deserialize_with = "deserialize_default"),
+        tsify(optional, type = "MidiChannelMap | undefined")
     )]
     pub midi_channel_map: MidiChannelMap,
     /// The first MIDI channel of the four-channel window for
@@ -362,11 +365,11 @@ pub struct HarmonyConfig {
     ///
     /// The default is 0. Voice `n` follows `midi_base_channel + n`. Validation
     /// checks this range for all sources and channel maps. In JavaScript, the
-    /// field is optional and an absent value gives 0.
+    /// field is optional and an absent or `undefined` value gives 0.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(default),
-        tsify(optional)
+        serde(default, deserialize_with = "deserialize_default"),
+        tsify(optional, type = "number | undefined")
     )]
     pub midi_base_channel: u8,
 }
@@ -375,6 +378,25 @@ pub struct HarmonyConfig {
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 fn default_voices() -> u8 {
     HARMONY_VOICES as u8
+}
+
+/// Decodes an optional interval voice count and maps an absent value to 4.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn deserialize_voices<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<u8>::deserialize(deserializer)?.unwrap_or_else(default_voices))
+}
+
+/// Decodes an optional field and maps an absent or `undefined` value to its
+/// default.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub(crate) fn deserialize_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::Deserialize<'de>,
+{
+    use serde::Deserialize;
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl Default for HarmonyConfig {
@@ -993,8 +1015,10 @@ impl HarmonyState {
     /// already in range.
     ///
     /// Every event updates the 16-channel keybed. Returns `true` if resynthesis
-    /// must make its next control step due. All Notes Off calls `reset` and
-    /// returns `false`.
+    /// must make its next control step due. This occurs after a new note
+    /// assignment and after each Note Off on a channel that the MIDI source
+    /// uses. All Notes Off calls `reset` and returns `false`. The gain releases
+    /// occur at the next control steps.
     pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent) -> bool {
         let (channel, note, velocity) = match event {
             MidiEvent::AllNotesOff => {
@@ -1017,17 +1041,11 @@ impl HarmonyState {
                 !already_active
             }
             HarmonySource::MidiChannels => {
-                let Some(voice) = self.config.map_channel(channel) else {
-                    return false;
-                };
-                let old_period = self.midi_period[voice];
-                let old_note = self.midi_note[voice];
-                self.reproject_channels();
-                if velocity != 0 {
+                if self.config.map_channel(channel).is_some() {
+                    self.reproject_channels();
                     true
                 } else {
-                    self.midi_period[voice] != Q6::ZERO
-                        && (old_period == Q6::ZERO || self.midi_note[voice] != old_note)
+                    false
                 }
             }
             HarmonySource::FixedInterval
