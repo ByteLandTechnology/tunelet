@@ -29,9 +29,11 @@
 //! that validation uses.
 //!
 //! The class allocates the PCM storage at construction and uses it again for
-//! each block. These operations can allocate:
+//! each block. It also keeps an event buffer and uses that capacity again
+//! across calls. These operations can allocate:
 //!
-//! - The decode of events.
+//! - Event decode when a call gives more events than before, or when an event
+//!   converts a stage configuration.
 //! - The conversion of configurations.
 //! - Feedback and telemetry objects.
 //! - The buffers of the formant envelopes.
@@ -42,12 +44,14 @@
 //! allocation. If you do not need a processor any more, call the generated
 //! `free()` method.
 
+use crate::events::ValidatedEvents;
 use crate::{
-    Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
+    ControlEvent, Error, Feedback, MidiEvent, PrepareConfig, Processor, ProcessorConfig,
+    SampleRate, Telemetry, TimedEvent,
 };
-use js_sys::{Float32Array, Int16Array};
+use js_sys::{Array, Float32Array, Int16Array, Reflect};
 use serde::{Deserialize, Serialize};
-use tsify::{Ts, Tsify};
+use tsify::{serde_wasm_bindgen, Ts, Tsify};
 use wasm_bindgen::prelude::*;
 
 /// The events for one call that processes audio (`TimedEvent[]` in TypeScript).
@@ -114,6 +118,9 @@ pub struct WasmProcessor {
     /// when a call needs more points, and they do not become shorter.
     envelope_input: Vec<f32>,
     envelope_output: Vec<f32>,
+    /// The reusable buffer for block events. It becomes longer when a call
+    /// gives more events, and it does not become shorter.
+    events: Vec<TimedEvent>,
 }
 
 #[wasm_bindgen(js_class = Tunelet)]
@@ -173,6 +180,7 @@ impl WasmProcessor {
             right: pcm_buffer(max_block_frames)?,
             envelope_input: Vec::new(),
             envelope_output: Vec::new(),
+            events: Vec::new(),
         })
     }
 
@@ -195,8 +203,7 @@ impl WasmProcessor {
     /// The nominal resynthesis latency: 1,593 frames in `"standard"` mode or
     /// 50 frames in `"lowLatency"` mode at both sample rates.
     ///
-    /// The dry path has a delay of 1,543 frames in `"standard"` mode and zero
-    /// frames in `"lowLatency"` mode. Resampled voices, choir delays and
+    /// The dry path also uses this delay. Resampled voices, choir delays and
     /// effects have their own timing. Thus, this value does not align all
     /// paths.
     #[wasm_bindgen(getter, js_name = latencyFrames)]
@@ -259,13 +266,16 @@ impl WasmProcessor {
         Error::check_length(frames, left.length() as usize)?;
         Error::check_length(frames, right.length() as usize)?;
         self.processor.check_block(frames)?;
-        let events = decode_events(events)?;
+        let events = match events {
+            Some(events) => decode_events(&mut self.events, events, frames)?,
+            None => &[],
+        };
         input.copy_to(&mut self.input[..frames]);
         self.processor.process_planar(
             &self.input[..frames],
             &mut self.left[..frames],
             &mut self.right[..frames],
-            &events.0,
+            events,
         )?;
         left.copy_from(&self.left[..frames]);
         right.copy_from(&self.right[..frames]);
@@ -275,8 +285,8 @@ impl WasmProcessor {
     /// Replaces the audio in a mono `Int16Array` with the stereo downmix.
     ///
     /// The timing, the events and the drain cancellation are the same as for
-    /// `process`. Peak feedback measures the stereo output before the downmix,
-    /// as in the native processor.
+    /// `process`. Peak feedback and telemetry measure the mono signal after the
+    /// downmix, as in the native processor.
     ///
     /// # Errors
     ///
@@ -290,10 +300,13 @@ impl WasmProcessor {
     ) -> Result<(), JsError> {
         let frames = audio.length() as usize;
         self.processor.check_block(frames)?;
-        let events = decode_events(events)?;
+        let events = match events {
+            Some(events) => decode_events(&mut self.events, events, frames)?,
+            None => &[],
+        };
         audio.copy_to(&mut self.input[..frames]);
         self.processor
-            .process_mono_in_place(&mut self.input[..frames], &events.0)?;
+            .process_mono_in_place(&mut self.input[..frames], events)?;
         audio.copy_from(&self.input[..frames]);
         Ok(())
     }
@@ -343,7 +356,7 @@ impl WasmProcessor {
     /// Renders a mono tail block and returns its frame count.
     ///
     /// The method fills the unused output with zeros. The downmix and the peak
-    /// feedback are the same as for `processMono`. The return values, empty
+    /// measurements are the same as for `processMono`. The return values, empty
     /// arrays and completion are the same as for `drain`.
     ///
     /// # Errors
@@ -379,7 +392,7 @@ impl WasmProcessor {
         Ok(self.processor.feedback().into_ts()?)
     }
 
-    /// Returns the feedback and clears only the stereo peak window.
+    /// Returns the feedback and clears only the peak window.
     ///
     /// The other feedback fields and all audio histories do not change.
     ///
@@ -480,15 +493,207 @@ impl WasmProcessor {
     }
 }
 
-/// Decodes the optional block controls before the audio state changes.
+/// The cached property keys and variant names for JavaScript events.
+struct EventKeys {
+    offset: JsValue,
+    event: JsValue,
+    kind: JsValue,
+    value: JsValue,
+    channel: JsValue,
+    note: JsValue,
+    velocity: JsValue,
+    midi: JsValue,
+    correction_midi: JsValue,
+    output_gain: JsValue,
+    reset: JsValue,
+    configure: JsValue,
+    resynthesis: JsValue,
+    punch: JsValue,
+    warm: JsValue,
+    alien: JsValue,
+    reverb: JsValue,
+    note_on: JsValue,
+    note_off: JsValue,
+    all_notes_off: JsValue,
+}
+
+impl EventKeys {
+    /// Allocates the property keys and variant names one time for this thread.
+    fn new() -> Self {
+        Self {
+            offset: JsValue::from_str("offset"),
+            event: JsValue::from_str("event"),
+            kind: JsValue::from_str("type"),
+            value: JsValue::from_str("value"),
+            channel: JsValue::from_str("channel"),
+            note: JsValue::from_str("note"),
+            velocity: JsValue::from_str("velocity"),
+            midi: JsValue::from_str("midi"),
+            correction_midi: JsValue::from_str("correctionMidi"),
+            output_gain: JsValue::from_str("outputGain"),
+            reset: JsValue::from_str("reset"),
+            configure: JsValue::from_str("configure"),
+            resynthesis: JsValue::from_str("resynthesis"),
+            punch: JsValue::from_str("punch"),
+            warm: JsValue::from_str("warm"),
+            alien: JsValue::from_str("alien"),
+            reverb: JsValue::from_str("reverb"),
+            note_on: JsValue::from_str("noteOn"),
+            note_off: JsValue::from_str("noteOff"),
+            all_notes_off: JsValue::from_str("allNotesOff"),
+        }
+    }
+}
+
+thread_local! {
+    static EVENT_KEYS: EventKeys = EventKeys::new();
+}
+
+/// Decodes and validates the block controls before the audio or the state
+/// changes.
 ///
-/// If there is no value, the result is an empty `Vec`, and no allocation
-/// occurs. If the caller gives an array, the decode can allocate storage.
-fn decode_events(events: Option<Ts<BlockEvents>>) -> Result<BlockEvents, JsError> {
-    Ok(match events {
-        Some(value) => value.to_rust()?,
-        None => BlockEvents::default(),
+/// The function clears `buffer` and uses its capacity again. Only a call with
+/// more events than the current capacity reserves more space.
+fn decode_events(
+    buffer: &mut Vec<TimedEvent>,
+    events: Ts<BlockEvents>,
+    frames: usize,
+) -> Result<&[TimedEvent], JsError> {
+    let value = JsValue::from(events);
+    let Some(array) = value.dyn_ref::<Array>() else {
+        return Err(JsError::new("events must be an Array"));
+    };
+    buffer.clear();
+    let count = array.length();
+    if count > 0 {
+        buffer.try_reserve(count as usize)?;
+        EVENT_KEYS.with(|keys| -> Result<(), JsError> {
+            for index in 0..count {
+                buffer.push(decode_timed_event(&array.get(index), keys)?);
+            }
+            Ok(())
+        })?;
+    }
+    ValidatedEvents::new(buffer, frames)?;
+    Ok(buffer)
+}
+
+/// Decodes one JavaScript object into a `TimedEvent`.
+fn decode_timed_event(item: &JsValue, keys: &EventKeys) -> Result<TimedEvent, JsError> {
+    let offset = decode_offset(&get_property(item, &keys.offset)?)?;
+    let event = decode_control_event(&get_property(item, &keys.event)?, keys)?;
+    Ok(TimedEvent { offset, event })
+}
+
+/// Decodes one `ControlEvent` from its cached discriminant.
+fn decode_control_event(event: &JsValue, keys: &EventKeys) -> Result<ControlEvent, JsError> {
+    let kind = get_property(event, &keys.kind)?;
+    if kind == keys.midi {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Midi(decode_midi_event(&value, keys)?))
+    } else if kind == keys.correction_midi {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::CorrectionMidi(decode_midi_event(
+            &value, keys,
+        )?))
+    } else if kind == keys.output_gain {
+        let value = get_property(event, &keys.value)?;
+        let Some(gain) = value.as_f64() else {
+            return Err(JsError::new("outputGain value must be a number"));
+        };
+        Ok(ControlEvent::OutputGain(gain as f32))
+    } else if kind == keys.reset {
+        let value = get_property(event, &keys.value)?;
+        if !value.is_undefined() && !value.is_null() {
+            return Err(JsError::new("reset event must not have a value"));
+        }
+        Ok(ControlEvent::Reset)
+    } else if kind == keys.configure {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Configure(serde_wasm_bindgen::from_value(
+            value,
+        )?))
+    } else if kind == keys.resynthesis {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Resynthesis(serde_wasm_bindgen::from_value(
+            value,
+        )?))
+    } else if kind == keys.punch {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Punch(serde_wasm_bindgen::from_value(value)?))
+    } else if kind == keys.warm {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Warm(serde_wasm_bindgen::from_value(value)?))
+    } else if kind == keys.alien {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Alien(serde_wasm_bindgen::from_value(value)?))
+    } else if kind == keys.reverb {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Reverb(serde_wasm_bindgen::from_value(value)?))
+    } else {
+        Err(JsError::new("event type is absent or unknown"))
+    }
+}
+
+/// Decodes one `MidiEvent` object from its cached discriminant.
+fn decode_midi_event(value: &JsValue, keys: &EventKeys) -> Result<MidiEvent, JsError> {
+    let kind = get_property(value, &keys.kind)?;
+    if kind == keys.note_on {
+        let channel = decode_u8(&get_property(value, &keys.channel)?, "MIDI channel")?;
+        let note = decode_u8(&get_property(value, &keys.note)?, "MIDI note")?;
+        let velocity = decode_u8(&get_property(value, &keys.velocity)?, "MIDI velocity")?;
+        Ok(MidiEvent::NoteOn {
+            channel,
+            note,
+            velocity,
+        })
+    } else if kind == keys.note_off {
+        let channel = decode_u8(&get_property(value, &keys.channel)?, "MIDI channel")?;
+        let note = decode_u8(&get_property(value, &keys.note)?, "MIDI note")?;
+        Ok(MidiEvent::NoteOff { channel, note })
+    } else if kind == keys.all_notes_off {
+        Ok(MidiEvent::AllNotesOff)
+    } else {
+        Err(JsError::new("MIDI event type is absent or unknown"))
+    }
+}
+
+/// Reads a property from a JavaScript object and converts any exception.
+fn get_property(target: &JsValue, key: &JsValue) -> Result<JsValue, JsError> {
+    Reflect::get(target, key).map_err(|err| match err.dyn_ref::<js_sys::Error>() {
+        Some(error) => JsError::new(&String::from(error.message())),
+        None => JsError::new("event must be an object"),
     })
+}
+
+/// Converts a JavaScript number into a valid wasm32 frame offset.
+fn decode_offset(value: &JsValue) -> Result<usize, JsError> {
+    let Some(number) = value.as_f64() else {
+        return Err(JsError::new(
+            "event offset must be an integer in 0..=4294967295",
+        ));
+    };
+    if !(0.0..=f64::from(u32::MAX)).contains(&number) || number.fract() != 0.0 {
+        return Err(JsError::new(
+            "event offset must be an integer in 0..=4294967295",
+        ));
+    }
+    Ok(number as usize)
+}
+
+/// Converts a JavaScript number into a `u8` integer.
+fn decode_u8(value: &JsValue, field: &str) -> Result<u8, JsError> {
+    let Some(number) = value.as_f64() else {
+        return Err(JsError::new(&format!(
+            "{field} must be an integer in 0..=255"
+        )));
+    };
+    if !(0.0..=255.0).contains(&number) || number.fract() != 0.0 {
+        return Err(JsError::new(&format!(
+            "{field} must be an integer in 0..=255"
+        )));
+    }
+    Ok(number as u8)
 }
 
 /// Returns the first `points` entries of a reusable envelope buffer. If the
