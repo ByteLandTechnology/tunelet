@@ -176,7 +176,8 @@ limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
 multi-voice mixes.
 
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+dry path starts after Warm and has a delay of 1,593 frames. All six reverb
+modes keep the stereo dry signal.
 
 ### Harmony sources
 
@@ -303,7 +304,7 @@ These calls read the state of the processor. They do not change the audio.
 
 | Call                 | Data                                                              |
 | -------------------- | ----------------------------------------------------------------- |
-| `feedback()`         | The pitch, the stereo peak, the correction ratio, the frame count |
+| `feedback()`         | The pitch, the output peak, the correction ratio, the frame count |
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
@@ -319,8 +320,9 @@ The telemetry includes these items:
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
 The peak windows of the telemetry are independent of the peak window of the
-feedback. The latency is nominal. Dry mixes, resampled voices and effects
-have different timing.
+feedback. In mono calls, the output and reverb wet peaks measure the audio
+after the downmix. The dry path has the 1,593-frame delay. Resampled voices,
+choir delays and effects use different delays.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
@@ -541,21 +543,21 @@ call with more points than before reserve memory.
 
 ### Memory allocation
 
-The constructor allocates reusable PCM buffers. `Tunelet` also keeps reusable
-vectors for decoded `TimedEvent` controls, packed `u32` MIDI words and formant
-envelope points. Each vector reserves exact capacity on its first use or when a
-call needs more entries than before, and keeps that capacity across calls.
-
+The constructor allocates reusable PCM buffers. The processor also keeps event
+and `u32` MIDI buffers and uses their capacity again across calls.
 `processWithMidi` and `processMonoWithMidi` copy the `Uint32Array` in one
-`copy_to` call and create no JavaScript event objects. After the `u32` buffer
-reserves enough capacity, packed MIDI calls do not allocate new Rust vector
-storage. These items can allocate:
+`copy_to` call and make no JavaScript event objects. A successful call that
+processes audio without events does not allocate new Rust PCM storage.
+However, the call copies the audio across the boundary between JavaScript and
+Wasm. These items can allocate:
 
 - Object conversion.
-- Supplied `TimedEvent[]` arrays and initial growth of reusable buffers.
+- Supplied events when a call gives more events than before, or when an event
+  converts a stage configuration.
+- Packed MIDI words when a call gives more words than before.
 - Errors.
 - Feedback and telemetry.
-- The formant envelopes on first growth.
+- The formant envelopes.
 
 The generated glue can also make temporary views. This binding is for general
 use, and it does not guarantee hard real-time behavior for allocation or
@@ -566,14 +568,15 @@ Rust functions.
 
 ### Rust crate
 
-To build the crate and check the format, the lints and the documentation,
-run these commands:
+To build the crate and check the format, the lints, the documentation and
+the archive, run these commands:
 
 ```sh
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 cargo doc --locked --no-deps
+cargo package --locked
 ```
 
 To check the `wasm` feature for `wasm32-unknown-unknown` with Cargo, run
