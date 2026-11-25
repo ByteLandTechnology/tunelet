@@ -1,13 +1,22 @@
 /**
- * This script packs the npm archive, checks its eight files, runs
- * `loadTunelet()` and checks the TypeScript declarations.
+ * This script builds the package one time and packs `tunelet` and
+ * `@bytelandtechnology/tunelet`. For each archive, it checks the eight files,
+ * `loadTunelet()` and the `NodeNext` TypeScript declarations.
+ *
+ * If you give `--out-dir <dir>`, the script writes both `.tgz` archives and
+ * `SHA256SUMS.txt` to `<dir>` after all checks succeed.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+
+const UNSCOPED_PACKAGE_NAME = "tunelet";
+const SCOPED_PACKAGE_NAME = "@bytelandtechnology/tunelet";
 
 const EXPECTED_ARCHIVE_PATHS = [
   "package/LICENSE",
@@ -25,33 +34,119 @@ const PACKAGE_NAME_PATTERN =
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
-/** Read and check the current package name so scoped names also work. */
-function readPackageName() {
-  const packageJsonPath = path.join(repoRoot, "package.json");
-  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-  const packageName = packageJson.name;
+/** Read the optional `--out-dir` flag from `process.argv`. */
+function parseCliOptions(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      "out-dir": { type: "string" },
+    },
+    strict: true,
+  });
   assert.equal(
-    typeof packageName,
+    positionals.length,
+    0,
+    `Unexpected positional arguments: ${positionals.join(" ")}`,
+  );
+  const rawOutDir = values["out-dir"];
+  if (rawOutDir === undefined) {
+    return { outDir: undefined };
+  }
+  assert.ok(
+    rawOutDir.trim().length > 0 && !rawOutDir.startsWith("-"),
+    "--out-dir requires a directory path",
+  );
+  return { outDir: path.resolve(process.cwd(), rawOutDir) };
+}
+
+/** Read and check the manifest in `package.json`. */
+function readPackageManifest() {
+  const packageJsonPath = path.join(repoRoot, "package.json");
+  const manifest = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  assert.equal(
+    typeof manifest.name,
     "string",
     "package.json name must be a string",
   );
+  assert.match(
+    manifest.name,
+    PACKAGE_NAME_PATTERN,
+    `Invalid package name: ${manifest.name}`,
+  );
+  assert.equal(
+    manifest.name,
+    UNSCOPED_PACKAGE_NAME,
+    `Expected package.json name to be ${UNSCOPED_PACKAGE_NAME}, found ${manifest.name}`,
+  );
+  assert.equal(
+    typeof manifest.version,
+    "string",
+    "package.json version must be a string",
+  );
+  assert.ok(
+    manifest.version.trim().length > 0,
+    "package.json version must not be empty",
+  );
+  return manifest;
+}
+
+/** Return the `.tgz` file name that `npm pack` writes for `packageName`. */
+function expectedArchiveFileName(packageName, version) {
+  return `${packageName.replace(/^@/, "").replace(/\//g, "-")}-${version}.tgz`;
+}
+
+/** Copy the built package files into `stageDir` with `packageName`. */
+function stageScopedPackage(stageDir, manifest, packageName) {
   assert.match(
     packageName,
     PACKAGE_NAME_PATTERN,
     `Invalid package name: ${packageName}`,
   );
-  return packageName;
+  fs.mkdirSync(stageDir, { recursive: true });
+
+  const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
+  const topLevelEntries = new Set(["LICENSE", "README.md"]);
+  for (const entry of manifestFiles) {
+    if (typeof entry === "string") {
+      const firstSegment = entry.replace(/^\.\//, "").split("/")[0];
+      if (firstSegment.length > 0) {
+        topLevelEntries.add(firstSegment);
+      }
+    }
+  }
+
+  for (const entry of topLevelEntries) {
+    const sourcePath = path.join(repoRoot, entry);
+    if (fs.existsSync(sourcePath)) {
+      fs.cpSync(sourcePath, path.join(stageDir, entry), { recursive: true });
+    }
+  }
+
+  const stagedManifest = { ...manifest, name: packageName };
+  fs.writeFileSync(
+    path.join(stageDir, "package.json"),
+    `${JSON.stringify(stagedManifest, null, 2)}\n`,
+  );
 }
 
 /** Run `npm pack` without a shell and return the relative archive path. */
-function packArchive(packDir) {
+function packArchive(
+  sourceDir,
+  packDir,
+  expectedFileName,
+  { ignoreScripts = false } = {},
+) {
+  const packArgs = ["pack", "--pack-destination", packDir];
+  if (ignoreScripts) {
+    packArgs.push("--ignore-scripts");
+  }
+
   const npmExecPath = process.env.npm_execpath;
   if (npmExecPath) {
-    execFileSync(
-      process.execPath,
-      [npmExecPath, "pack", "--pack-destination", packDir],
-      { cwd: repoRoot, stdio: "inherit" },
-    );
+    execFileSync(process.execPath, [npmExecPath, ...packArgs], {
+      cwd: sourceDir,
+      stdio: "inherit",
+    });
   } else if (process.platform === "win32") {
     const npmCliPath = path.join(
       path.dirname(process.execPath),
@@ -63,14 +158,13 @@ function packArchive(packDir) {
     if (!fs.existsSync(npmCliPath)) {
       throw new Error(`npm-cli.js was not found at ${npmCliPath}`);
     }
-    execFileSync(
-      process.execPath,
-      [npmCliPath, "pack", "--pack-destination", packDir],
-      { cwd: repoRoot, stdio: "inherit" },
-    );
+    execFileSync(process.execPath, [npmCliPath, ...packArgs], {
+      cwd: sourceDir,
+      stdio: "inherit",
+    });
   } else {
-    execFileSync("npm", ["pack", "--pack-destination", packDir], {
-      cwd: repoRoot,
+    execFileSync("npm", packArgs, {
+      cwd: sourceDir,
       stdio: "inherit",
     });
   }
@@ -82,6 +176,11 @@ function packArchive(packDir) {
     archives.length,
     1,
     `Expected one archive, found ${archives.length}`,
+  );
+  assert.equal(
+    archives[0],
+    expectedFileName,
+    `Expected archive ${expectedFileName}, found ${archives[0]}`,
   );
   return path.posix.join("pack", archives[0]);
 }
@@ -301,6 +400,7 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "  Tunelet,",
     "  type ProcessorConfig,",
     "  type ResynthesisConfig,",
+    "  type SyncInitInput as RootSyncInitInput,",
     `} from ${pkgLiteral};`,
     "import init, {",
     "  initSync as wasmInitSync,",
@@ -311,14 +411,21 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "",
     "async function verifySharedApi(",
     "  source: InitInput | undefined,",
-    "  syncSource: SyncInitInput,",
+    "  syncSource: SyncInitInput & RootSyncInitInput,",
     "  optionalVoices: number | undefined,",
     "): Promise<InitOutput> {",
     "  const exportsFromRoot: InitOutput = await loadTunelet(source);",
     "  const exportsFromNamed: InitOutput = await namedLoadTunelet(source);",
-    "  const exportsFromWasm: InitOutput = await init(source);",
-    "  const syncFromRoot: InitOutput = rootInitSync({ module: syncSource });",
-    "  const syncFromWasm: InitOutput = wasmInitSync(syncSource);",
+    "  const exportsFromWasm: InitOutput =",
+    "    source === undefined",
+    "      ? await init()",
+    "      : await init({ module_or_path: source });",
+    "  const syncExportsFromRoot: InitOutput = rootInitSync({",
+    "    module: syncSource,",
+    "  });",
+    "  const syncExportsFromWasm: InitOutput = wasmInitSync({",
+    "    module: syncSource,",
+    "  });",
     "  const baseConfig: ProcessorConfig = defaultConfig();",
     "  const configWithUndefined: ProcessorConfig = {",
     "    ...baseConfig,",
@@ -349,8 +456,8 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "  processor.free();",
     "  void exportsFromNamed;",
     "  void exportsFromWasm;",
-    "  void syncFromRoot;",
-    "  void syncFromWasm;",
+    "  void syncExportsFromRoot;",
+    "  void syncExportsFromWasm;",
     "  return exportsFromRoot;",
     "}",
   ];
@@ -536,20 +643,90 @@ function verifyTypeDeclarations(consumerDir, packageName) {
   }
 }
 
-const packageName = readPackageName();
+/** Check the archive list, runtime imports and TypeScript declarations. */
+function verifyPackedArchive(workDir, relativeArchivePath, packageName) {
+  const consumerDir = path.join(workDir, "consumer");
+  fs.mkdirSync(consumerDir);
+  verifyArchiveEntries(workDir, relativeArchivePath);
+  installArchive(workDir, relativeArchivePath, consumerDir, packageName);
+  verifyRuntimeImport(consumerDir, packageName);
+  verifyTypeDeclarations(consumerDir, packageName);
+}
+
+/** Copy both verified archives and write `SHA256SUMS.txt` in `outDir`. */
+function writeVerifiedOutputs(outDir, archives) {
+  fs.mkdirSync(outDir, { recursive: true });
+  const checksumLines = [];
+  for (const { fileName, sourcePath } of archives) {
+    const destinationPath = path.join(outDir, fileName);
+    fs.copyFileSync(sourcePath, destinationPath);
+    const digest = createHash("sha256")
+      .update(fs.readFileSync(destinationPath))
+      .digest("hex");
+    checksumLines.push(`${digest}  ${fileName}`);
+  }
+  fs.writeFileSync(
+    path.join(outDir, "SHA256SUMS.txt"),
+    `${checksumLines.join("\n")}\n`,
+  );
+}
+
+const { outDir } = parseCliOptions(process.argv.slice(2));
+const manifest = readPackageManifest();
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tunelet-verify-pack-"));
 
 try {
-  const packDir = path.join(tempDir, "pack");
-  const consumerDir = path.join(tempDir, "consumer");
-  fs.mkdirSync(packDir);
-  fs.mkdirSync(consumerDir);
+  const unscopedWorkDir = path.join(tempDir, "unscoped");
+  const unscopedPackDir = path.join(unscopedWorkDir, "pack");
+  fs.mkdirSync(unscopedPackDir, { recursive: true });
+  const unscopedFileName = expectedArchiveFileName(
+    UNSCOPED_PACKAGE_NAME,
+    manifest.version,
+  );
+  const unscopedRelativeArchivePath = packArchive(
+    repoRoot,
+    unscopedPackDir,
+    unscopedFileName,
+  );
+  verifyPackedArchive(
+    unscopedWorkDir,
+    unscopedRelativeArchivePath,
+    UNSCOPED_PACKAGE_NAME,
+  );
 
-  const relativeArchivePath = packArchive(packDir);
-  verifyArchiveEntries(tempDir, relativeArchivePath);
-  installArchive(tempDir, relativeArchivePath, consumerDir, packageName);
-  verifyRuntimeImport(consumerDir, packageName);
-  verifyTypeDeclarations(consumerDir, packageName);
+  const scopedWorkDir = path.join(tempDir, "scoped");
+  const scopedStageDir = path.join(scopedWorkDir, "stage");
+  const scopedPackDir = path.join(scopedWorkDir, "pack");
+  fs.mkdirSync(scopedPackDir, { recursive: true });
+  stageScopedPackage(scopedStageDir, manifest, SCOPED_PACKAGE_NAME);
+  const scopedFileName = expectedArchiveFileName(
+    SCOPED_PACKAGE_NAME,
+    manifest.version,
+  );
+  const scopedRelativeArchivePath = packArchive(
+    scopedStageDir,
+    scopedPackDir,
+    scopedFileName,
+    { ignoreScripts: true },
+  );
+  verifyPackedArchive(
+    scopedWorkDir,
+    scopedRelativeArchivePath,
+    SCOPED_PACKAGE_NAME,
+  );
+
+  if (outDir !== undefined) {
+    writeVerifiedOutputs(outDir, [
+      {
+        fileName: unscopedFileName,
+        sourcePath: path.join(unscopedWorkDir, unscopedRelativeArchivePath),
+      },
+      {
+        fileName: scopedFileName,
+        sourcePath: path.join(scopedWorkDir, scopedRelativeArchivePath),
+      },
+    ]);
+  }
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }
