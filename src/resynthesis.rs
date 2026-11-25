@@ -346,14 +346,29 @@ const CONTROL_DUE: i32 = 100;
 const DRIFT_LIMIT: Q14 = Q14::from_bits(3276);
 /// The step for each frame of the crossfade after a reader jump.
 const FADE_STEP: Q14 = Q14::from_bits(0x333);
+/// The number of frames in a full Q14 stage ramp (`16384 / 64`).
+const FORMANT_RAMP_FRAMES: usize = 256;
 /// The step for each frame of a 256-frame stage ramp (`16384 / 256`).
 const STAGE_RAMP_STEP: Q14 = Q14::from_bits(64);
+/// The number of `u64` words that store one bit for each `overlap` slot.
+const OVERLAP_WORDS: usize = OVERLAP_FRAMES.div_ceil(64);
 /// The number of input frames that warm the anti-alias filters during a
 /// formant transition.
 const POST_WARMUP_FRAMES: i32 = 128;
 /// The `filtered_valid` count when all ring entries and anti-alias filter
 /// states are settled.
 const FILTERED_SETTLED: u16 = HISTORY as u16 + POST_WARMUP_FRAMES as u16;
+
+/// Returns a bitset where all `OVERLAP_FRAMES` slots are `true`.
+#[inline]
+fn full_overlap_lpc() -> [u64; OVERLAP_WORDS] {
+    let mut bits = [!0_u64; OVERLAP_WORDS];
+    let tail = OVERLAP_FRAMES & 63;
+    if tail != 0 {
+        bits[OVERLAP_WORDS - 1] = (1_u64 << tail) - 1;
+    }
+    bits
+}
 
 /// Returns the stereo pair for one voice sample and its Q14 pan weights.
 #[inline]
@@ -522,10 +537,10 @@ pub(crate) struct Resynthesis {
     lead_valid: usize,
     /// The state of `formant.enabled` from the previous frame.
     was_formant_enabled: bool,
-    /// The frames that are left before a formant switch reaches `filtered`.
-    overlap_pending: u16,
-    /// `true` if `overlap` holds both raw and formant-analyzed frames.
-    overlap_mixed: bool,
+    /// A bitset of `overlap` slots that hold formant-analyzed samples.
+    overlap_lpc: [u64; OVERLAP_WORDS],
+    /// The count of raw slots in the next `FORMANT_RAMP_FRAMES` of `overlap`.
+    lookahead_raw: u16,
     /// `true` if the frames that enter `filtered` come from formant analysis.
     filtered_lpc: bool,
     /// The number of recent contiguous frames in `filtered` of `filtered_lpc`.
@@ -612,8 +627,16 @@ impl Resynthesis {
             fades: [Q14::ONE; 16],
             lead_valid: HISTORY,
             was_formant_enabled: config.formant.enabled,
-            overlap_pending: 0,
-            overlap_mixed: false,
+            overlap_lpc: if config.formant.enabled {
+                full_overlap_lpc()
+            } else {
+                [0; OVERLAP_WORDS]
+            },
+            lookahead_raw: if config.formant.enabled {
+                0
+            } else {
+                FORMANT_RAMP_FRAMES as u16
+            },
             filtered_lpc: config.formant.enabled,
             filtered_valid: FILTERED_SETTLED,
             raw_filtered_valid: if config.formant.enabled {
@@ -862,8 +885,16 @@ impl Resynthesis {
             0
         };
         self.was_formant_enabled = self.config.formant.enabled;
-        self.overlap_pending = 0;
-        self.overlap_mixed = false;
+        self.overlap_lpc = if self.config.formant.enabled {
+            full_overlap_lpc()
+        } else {
+            [0; OVERLAP_WORDS]
+        };
+        self.lookahead_raw = if self.config.formant.enabled {
+            0
+        } else {
+            FORMANT_RAMP_FRAMES as u16
+        };
         self.filtered_lpc = self.config.formant.enabled;
         self.filtered_valid = FILTERED_SETTLED;
         self.raw_filtered_valid = if self.config.formant.enabled {
@@ -1219,6 +1250,44 @@ impl Resynthesis {
         age_minus < valid && age_plus < valid
     }
 
+    /// Returns `true` if `overlap[slot]` holds a formant-analyzed sample.
+    #[inline]
+    fn overlap_is_lpc(&self, slot: usize) -> bool {
+        ((self.overlap_lpc[slot >> 6] >> (slot & 63)) & 1) != 0
+    }
+
+    /// Records whether `overlap[slot]` holds a formant-analyzed sample.
+    #[inline]
+    fn set_overlap_lpc(&mut self, slot: usize, is_lpc: bool) {
+        let mask = 1_u64 << (slot & 63);
+        if is_lpc {
+            self.overlap_lpc[slot >> 6] |= mask;
+        } else {
+            self.overlap_lpc[slot >> 6] &= !mask;
+        }
+    }
+
+    /// Advances `formant_fade` by one ramp step and resets synthesis at the
+    /// start of a new fade-in.
+    fn step_formant_fade(&mut self, lpc_ready: bool, lower: Q14) -> Q14 {
+        let prev = self.formant_fade;
+        let min_lower = position_of((self.write as i32).wrapping_sub(FORMANT_RAMP_FRAMES as i32));
+        let lower_ready = prev > Q14::ZERO
+            || self.filtered_tap_ready(history::center(lower.min(min_lower)), true);
+        let next =
+            if self.config.formant.enabled && self.lookahead_raw == 0 && lpc_ready && lower_ready {
+                (prev + STAGE_RAMP_STEP).min(Q14::ONE)
+            } else {
+                (prev - STAGE_RAMP_STEP).max(Q14::ZERO)
+            };
+        if prev == Q14::ZERO && next > Q14::ZERO {
+            self.formant.reset_synthesis();
+            self.previous_output = [Q14::ZERO; 2];
+        }
+        self.formant_fade = next;
+        next
+    }
+
     /// Interpolates the delayed raw history at `position` with the anti-alias
     /// filter state of `raw_filtered`.
     #[inline]
@@ -1294,22 +1363,32 @@ impl Resynthesis {
             self.periods[delay] = period.div(ratio);
         }
         self.old_positions[0] = self.old_positions[0] + ratio;
-        let position = self.move_reader(0, ratio, period, self.delays[0]);
+        let bounds = self.reader_bounds(period, self.delays[0]);
+        let position = self.step_reader(0, ratio, bounds);
         let reader_fade = self.fades[0];
         if reader_fade < Q14::ONE {
             self.fades[0] = (reader_fade + FADE_STEP).min(Q14::ONE);
         }
-        let (mut value, center) = history::interpolation(&self.filtered, position);
+        let (new_value, center) = history::interpolation(&self.filtered, position);
+        let mut value = new_value;
         let mut raw_ready = self.filtered_tap_ready(center, false);
-        let mut lpc_ready = self.filtered_tap_ready(center, true);
+        let new_lpc = self.filtered_tap_ready(center, true);
+        let mut lpc_ready = new_lpc;
+        let mut old_value = Q14::ZERO;
+        let mut old_lpc = true;
         if reader_fade < Q14::ONE {
             let (old, old_center) = history::interpolation(&self.filtered, self.old_positions[0]);
+            old_value = old;
             value = value.mul(reader_fade) + old.mul(Q14::ONE - reader_fade);
             raw_ready &= self.filtered_tap_ready(old_center, false);
-            lpc_ready &= self.filtered_tap_ready(old_center, true);
+            old_lpc = self.filtered_tap_ready(old_center, true);
+            lpc_ready &= old_lpc;
         }
         let steady_off = self.formant_fade == Q14::ZERO && raw_ready;
-        let steady_on = self.config.formant.enabled && self.formant_fade == Q14::ONE && lpc_ready;
+        let steady_on = self.config.formant.enabled
+            && self.lookahead_raw == 0
+            && self.formant_fade == Q14::ONE
+            && lpc_ready;
         if steady_on {
             self.formant_position = center - FORMANT_OFFSET_FRAMES;
             value = Q14::from_bits(self.formant.forward(
@@ -1328,21 +1407,25 @@ impl Resynthesis {
                 let old_raw = self.interpolate_raw_filtered(self.old_positions[0]);
                 raw_value = raw_value.mul(reader_fade) + old_raw.mul(Q14::ONE - reader_fade);
             }
-            if self.config.formant.enabled {
-                if lpc_ready {
-                    self.formant_fade = (self.formant_fade + STAGE_RAMP_STEP).min(Q14::ONE);
+            let fade = self.step_formant_fade(lpc_ready, bounds.1);
+            if fade > Q14::ZERO {
+                let lpc_in = if lpc_ready {
+                    self.formant_position = center - FORMANT_OFFSET_FRAMES;
+                    value
                 } else {
-                    self.formant_fade = Q14::ZERO;
-                }
-            } else if lpc_ready && self.formant_fade > Q14::ZERO {
-                self.formant_fade = (self.formant_fade - STAGE_RAMP_STEP).max(Q14::ZERO);
-            } else {
-                self.formant_fade = Q14::ZERO;
-            }
-            if lpc_ready && self.formant_fade > Q14::ZERO {
-                self.formant_position = center - FORMANT_OFFSET_FRAMES;
+                    if new_lpc {
+                        self.formant_position = center - FORMANT_OFFSET_FRAMES;
+                    }
+                    let new_part = if new_lpc { new_value } else { Q14::ZERO };
+                    if reader_fade < Q14::ONE {
+                        let old_part = if old_lpc { old_value } else { Q14::ZERO };
+                        new_part.mul(reader_fade) + old_part.mul(Q14::ONE - reader_fade)
+                    } else {
+                        new_part
+                    }
+                };
                 let mut lpc_value = Q14::from_bits(self.formant.forward(
-                    value.to_bits(),
+                    lpc_in.to_bits(),
                     self.formant_position,
                     numeric,
                 ));
@@ -1351,8 +1434,7 @@ impl Resynthesis {
                         .model_glottal(lpc_value.to_bits(), self.previous_output[0].to_bits()),
                 );
                 self.previous_output[0] = lpc_value;
-                value =
-                    raw_value.mul(Q14::ONE - self.formant_fade) + lpc_value.mul(self.formant_fade);
+                value = raw_value.mul(Q14::ONE - fade) + lpc_value.mul(fade);
             } else {
                 value = raw_value;
             }
@@ -1431,30 +1513,18 @@ impl Resynthesis {
         self.periods[write] = step.period;
         self.previous_periods[write] = step.previous_period;
         self.ratios[write] = self.correction;
+        let prev_read = (self.overlap_index + ANALYSIS_FRAMES) % OVERLAP_FRAMES;
         self.overlap_index += 1;
         if self.overlap_index == OVERLAP_FRAMES {
             self.overlap_index = 0;
         }
-        let mut pending_finished = false;
-        if self.overlap_pending > 0 {
-            self.overlap_pending -= 1;
-            if self.overlap_pending == 0 {
-                pending_finished = true;
-            }
-        }
         if self.config.formant.enabled != self.was_formant_enabled {
             self.was_formant_enabled = self.config.formant.enabled;
-            if self.overlap_pending > 0 || pending_finished {
-                self.overlap_mixed = true;
-                self.filtered_valid = 0;
-            }
-            pending_finished = false;
-            self.overlap_pending = (OVERLAP_FRAMES - ANALYSIS_FRAMES) as u16;
             if self.config.formant.enabled {
                 self.formant.prepare_enable(&self.raw, write);
-                self.previous_output = [Q14::ZERO; 2];
             }
         }
+        self.set_overlap_lpc(self.overlap_index, self.config.formant.enabled);
         self.overlap[self.overlap_index] = if self.config.formant.enabled {
             let previous = self.raw[ring(write as i32 - 1)];
             Q14::from_bits(self.formant.process_analysis(
@@ -1492,6 +1562,14 @@ impl Resynthesis {
         // the same number of frames in the overlap ring. Then the total delay
         // of the source is OVERLAP_FRAMES in the two formant modes.
         let overlap_read = (self.overlap_index + ANALYSIS_FRAMES) % OVERLAP_FRAMES;
+        if !self.overlap_is_lpc(prev_read) {
+            self.lookahead_raw -= 1;
+        }
+        let lookahead_tail = (prev_read + FORMANT_RAMP_FRAMES) % OVERLAP_FRAMES;
+        if !self.overlap_is_lpc(lookahead_tail) {
+            self.lookahead_raw += 1;
+        }
+        let slot_lpc = self.overlap_is_lpc(overlap_read);
         let mut filtered = self.overlap[overlap_read];
         if self.config.pitch_ratio > 1.0 {
             for filter in &mut self.post {
@@ -1503,16 +1581,11 @@ impl Resynthesis {
             }
         }
         self.filtered[write] = filtered;
-        if pending_finished {
-            self.overlap_mixed = false;
-            if self.filtered_lpc != self.config.formant.enabled {
-                self.filtered_lpc = self.config.formant.enabled;
-                self.filtered_valid = 1;
-            } else {
-                self.filtered_valid = self.filtered_valid.saturating_add(1).min(FILTERED_SETTLED);
-            }
-        } else if !self.overlap_mixed {
+        if self.filtered_lpc == slot_lpc {
             self.filtered_valid = self.filtered_valid.saturating_add(1).min(FILTERED_SETTLED);
+        } else {
+            self.filtered_lpc = slot_lpc;
+            self.filtered_valid = 1;
         }
         if self.config.stereo_output && self.stereo_fade < Q14::ONE {
             self.stereo_fade = (self.stereo_fade + STAGE_RAMP_STEP).min(Q14::ONE);
@@ -1710,8 +1783,10 @@ impl Resynthesis {
                 }
             }
             let steady_off = self.formant_fade == Q14::ZERO && raw_ready;
-            let steady_on =
-                self.config.formant.enabled && self.formant_fade == Q14::ONE && lpc_ready;
+            let steady_on = self.config.formant.enabled
+                && self.lookahead_raw == 0
+                && self.formant_fade == Q14::ONE
+                && lpc_ready;
             if steady_on {
                 self.formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
                 // If Choir changed only channel zero before a switch to
@@ -1784,20 +1859,66 @@ impl Resynthesis {
                         }
                     }
                 }
-                if self.config.formant.enabled {
+                let fade = self.step_formant_fade(lpc_ready, bounds.1);
+                if fade > Q14::ZERO {
+                    let lead_center = self.positions[0].to_bits() >> 14;
                     if lpc_ready {
-                        self.formant_fade = (self.formant_fade + STAGE_RAMP_STEP).min(Q14::ONE);
+                        self.formant_position = lead_center - FORMANT_OFFSET_FRAMES;
                     } else {
-                        self.formant_fade = Q14::ZERO;
+                        if self.filtered_tap_ready(history::center(self.positions[0]), true) {
+                            self.formant_position = lead_center - FORMANT_OFFSET_FRAMES;
+                        }
+                        mix = [Q14::ZERO; 2];
+                        for slot in 0..5 {
+                            if slot > 0 && self.is_harmony_voice_silent(slot - 1, stereo_fade) {
+                                continue;
+                            }
+                            let (new_val, new_c) =
+                                history::interpolation(&self.filtered, slot_positions[slot]);
+                            let new_part = if self.filtered_tap_ready(new_c, true) {
+                                new_val
+                            } else {
+                                Q14::ZERO
+                            };
+                            let vfade = slot_fades[slot];
+                            let mut value = if vfade < Q14::ONE {
+                                let (old_val, old_c) = history::interpolation(
+                                    &self.filtered,
+                                    self.old_positions[slot],
+                                );
+                                let old_part = if self.filtered_tap_ready(old_c, true) {
+                                    old_val
+                                } else {
+                                    Q14::ZERO
+                                };
+                                new_part.mul(vfade) + old_part.mul(Q14::ONE - vfade)
+                            } else {
+                                new_part
+                            };
+                            if mono {
+                                if slot > 0 {
+                                    value = value.mul(self.harmony_gains[slot - 1]);
+                                    value = value.mul(self.harmony_gain);
+                                }
+                                mix[0] = mix[0] + value;
+                            } else {
+                                let panned = if slot > 0 {
+                                    value = value.mul(self.harmony_gains[slot - 1]);
+                                    apply_harmony_pan(
+                                        value,
+                                        self.harmony_gain,
+                                        self.harmony_pan[slot - 1],
+                                        stereo_fade,
+                                    )
+                                } else {
+                                    [value, value]
+                                };
+                                for (channel, sum) in mix.iter_mut().enumerate() {
+                                    *sum = *sum + panned[channel];
+                                }
+                            }
+                        }
                     }
-                } else if lpc_ready && self.formant_fade > Q14::ZERO {
-                    self.formant_fade = (self.formant_fade - STAGE_RAMP_STEP).max(Q14::ZERO);
-                } else {
-                    self.formant_fade = Q14::ZERO;
-                }
-                if lpc_ready && self.formant_fade > Q14::ZERO {
-                    self.formant_position =
-                        (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
                     if mono
                         && self.formant.histories_match()
                         && self.previous_output[0] == self.previous_output[1]
@@ -1812,8 +1933,7 @@ impl Resynthesis {
                                 .model_glottal(value.to_bits(), self.previous_output[0].to_bits()),
                         );
                         self.previous_output = [value; 2];
-                        mix[0] = raw_mix[0].mul(Q14::ONE - self.formant_fade)
-                            + value.mul(self.formant_fade);
+                        mix[0] = raw_mix[0].mul(Q14::ONE - fade) + value.mul(fade);
                     } else {
                         if mono {
                             mix[1] = mix[0];
@@ -1829,8 +1949,8 @@ impl Resynthesis {
                                 self.previous_output[channel].to_bits(),
                             ));
                             self.previous_output[channel] = *value;
-                            mix[channel] = raw_mix[channel].mul(Q14::ONE - self.formant_fade)
-                                + (*value).mul(self.formant_fade);
+                            mix[channel] =
+                                raw_mix[channel].mul(Q14::ONE - fade) + (*value).mul(fade);
                         }
                         mono = mono && mix[0] == mix[1];
                     }
@@ -1842,8 +1962,7 @@ impl Resynthesis {
         if self.raw_filtered_active
             && !self.config.formant.enabled
             && self.formant_fade == Q14::ZERO
-            && self.overlap_pending == 0
-            && !self.overlap_mixed
+            && self.overlap_lpc == [0; OVERLAP_WORDS]
             && !self.filtered_lpc
             && self.filtered_valid == FILTERED_SETTLED
         {

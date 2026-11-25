@@ -346,19 +346,23 @@ impl Formant {
         self.input.fill(0_i32);
 
         self.stamps.fill(Stamp::default());
-        self.history = [[0; MAX_ORDER * 2]; 2];
-        self.histories_match = true;
-        self.history_index = 0;
+        self.reset_synthesis();
         self.current = BANKS - 1;
         self.next_filter();
         self.next_filter();
         self.design_counter = 0;
-        self.noise_filter.reset();
         self.smooth_reset = true;
         self.snap_blend = false;
     }
-    /// Prepares the stage when the formant stage becomes active and fills the
-    /// pre-emphasized input history from `raw`.
+    /// Clears the synthesis feedback history and the aspiration filter memory.
+    pub(crate) fn reset_synthesis(&mut self) {
+        self.history = [[0; MAX_ORDER * 2]; 2];
+        self.histories_match = true;
+        self.history_index = 0;
+        self.noise_filter.reset();
+    }
+    /// Prepares the analysis history from `raw` when the formant stage becomes
+    /// active, and keeps active synthesis banks intact.
     pub(crate) fn prepare_enable(&mut self, raw: &[Q14; HISTORY_FRAMES], write: usize) {
         self.dirty = true;
         let max_period = (self.rate.as_u32() as usize / 40).max(1);
@@ -380,15 +384,7 @@ impl Formant {
                 self.input[reverse_index + HISTORY_FRAMES] = filtered;
             }
         }
-        self.history = [[0; MAX_ORDER * 2]; 2];
-        self.histories_match = true;
-        self.history_index = 0;
-        self.orders = [0; BANKS];
-        self.current = BANKS - 1;
-        self.next_filter();
-        self.next_filter();
         self.design_counter = 0;
-        self.noise_filter.reset();
         self.smooth_reset = true;
         self.snap_blend = true;
     }
