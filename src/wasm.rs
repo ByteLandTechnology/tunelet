@@ -426,10 +426,11 @@ impl WasmProcessor {
     /// `Float32Array` buffers of equal length.
     ///
     /// `input` gets the vocal-tract envelope that the LPC analysis found.
-    /// `output` gets the envelope after the width and stretch controls. Point
-    /// `k` of `n` is at the frequency `maxFrequencyHz * k / (n - 1)`. The
-    /// values are linear magnitudes with no absolute level. Scale them for a
-    /// display.
+    /// `output` gets the envelope after the current width and stretch
+    /// controls. If `width` or `stretch` changes, `output` updates
+    /// immediately. Point `k` of `n` is at the frequency
+    /// `maxFrequencyHz * k / (n - 1)`. The values are linear magnitudes with
+    /// no absolute level. Scale them for a display.
     ///
     /// `maxFrequencyHz` must be finite, more than zero and not more than half
     /// of the sample rate.

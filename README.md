@@ -309,6 +309,7 @@ The telemetry includes these items:
 - The `tracking` flag and the pitch clarity, inside the `resynthesis.pitch`
   bounds.
 - The current gains of Punch and Warm, and the position in the Alien loop.
+- The generation tag of the active formant model.
 
 The peak windows of the telemetry are independent of the peak window of the
 feedback. If a pitch is outside `min_frequency_hz..=max_frequency_hz`, it
@@ -319,11 +320,12 @@ timing.
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
 - The vocal-tract envelope from the analysis.
-- The envelope after the width and stretch controls.
+- The envelope after the current width and stretch controls.
 
 The values are linear and have no absolute level. The formant stage must be
-enabled. The envelopes are those of the model that the audio used for the
-last frame. The method returns `Result<bool, Error>`:
+enabled. The envelopes come from the model stamp of the last audio frame. If
+`width` or `stretch` changes, the output envelope and `formant_generation`
+update immediately. The method returns `Result<bool, Error>`:
 
 | Result      | Description                                                      |
 | ----------- | ---------------------------------------------------------------- |

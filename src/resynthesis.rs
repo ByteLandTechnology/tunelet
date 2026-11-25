@@ -870,9 +870,12 @@ impl Resynthesis {
             count as u8
         }
     }
-    /// Returns the wrapping count of formant model designs.
+    /// Returns the generation tag of the active formant stamp.
     pub(crate) fn formant_generation(&self) -> u32 {
-        self.formant.generation()
+        if !self.config.formant.enabled {
+            return 0;
+        }
+        self.formant.generation(self.formant_position)
     }
     /// Writes the formant envelopes of the model that the audio used for the
     /// last frame. Refer to `Formant::envelope`.
