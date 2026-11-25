@@ -25,27 +25,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+      - uses: ./.github/actions/setup-wasm
         with:
-          toolchain: stable
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          cache-bin: "false"
-          shared-key: "rust-wasm"
-      - uses: ./.github/actions/setup-wasm-tools
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "24"
-          cache: "npm"
       - run: cargo fmt --check
       - run: cargo clippy --locked --lib -- -D warnings
       - run: cargo build --locked --release
       - run: cargo doc --locked --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
-      - run: cargo package --list --locked
+      - run: cargo package --locked
       - run: npm ci
       - run: npm run check:wasm
         env:

@@ -4,13 +4,15 @@
 # Concurrency puts runs on main in a queue and does not cancel active runs.
 # Each push to main updates the release pull request. When you merge the
 # release pull request, release-please makes the tag and the GitHub release.
-# Then build-wasm compiles and checks the package artifacts one time. After
-# that, publish-npm publishes the npm package through OIDC, and publish-github
-# publishes @bytelandtechnology/tunelet with GITHUB_TOKEN. In parallel,
-# publish-crate publishes the crate to crates.io through OIDC. The trusted
-# publishers on npm and on crates.io must name this file (release.yml).
-# GitHub links @bytelandtechnology/tunelet to this repository through the
-# repository field.
+# Then build-wasm builds, checks and uploads both .tgz archives and
+# SHA256SUMS.txt. After that, publish-npm and publish-github verify
+# SHA256SUMS.txt and publish those archives, and publish-crate publishes to
+# crates.io.
+#
+# Both publish-npm and publish-crate authenticate through OIDC, and
+# publish-github authenticates with GITHUB_TOKEN. The OIDC policies on npm and
+# on crates.io must name this file (release.yml). GitHub links
+# @bytelandtechnology/tunelet to this repository through the repository field.
 name: Release
 
 on:
@@ -51,31 +53,18 @@ jobs:
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
-        with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          cache-bin: "false"
-          shared-key: "rust-wasm"
-      - uses: ./.github/actions/setup-wasm-tools
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "24"
-          cache: "npm"
+      - uses: ./.github/actions/setup-wasm
       - run: npm ci
-      # Check the archive files and loadTunelet() before upload.
-      - run: npm run verify:pack
-      # Upload the built dist/ and pkg/ files for the publish jobs.
+      # Build and check both archives, then write SHA256SUMS.txt.
+      - run: npm run verify:pack -- --out-dir "$RUNNER_TEMP/wasm-package-dist"
+      # Upload both verified archives and SHA256SUMS.txt for the publish jobs.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wasm-package-dist
           path: |
-            dist/
-            pkg/tunelet.js
-            pkg/tunelet.d.ts
-            pkg/tunelet_bg.wasm
+            ${{ runner.temp }}/wasm-package-dist/tunelet-*.tgz
+            ${{ runner.temp }}/wasm-package-dist/bytelandtechnology-tunelet-*.tgz
+            ${{ runner.temp }}/wasm-package-dist/SHA256SUMS.txt
           retention-days: 1
           if-no-files-found: error
 
@@ -85,13 +74,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
-          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wasm-package-dist
@@ -103,8 +87,12 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       # Trusted publishing needs npm 11.5.1 or later.
       - run: npm install --global --ignore-scripts npm@latest
-      # Publish the built files without a second prepack build.
-      - run: npm publish --ignore-scripts
+      # Check SHA256SUMS.txt and publish the verified unscoped archive.
+      - run: |
+          sha256sum --check --strict SHA256SUMS.txt
+          npm publish --ignore-scripts "./tunelet-${TAG_NAME#v}.tgz"
+        env:
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
 
   publish-github:
     needs: [release-please, build-wasm]
@@ -112,13 +100,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
       packages: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
-          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wasm-package-dist
@@ -129,12 +112,13 @@ jobs:
           node-version: "24"
           registry-url: "https://npm.pkg.github.com"
           scope: "@bytelandtechnology"
-      # GitHub Packages accepts only names in the scope of the owner.
-      - run: npm pkg set name=@bytelandtechnology/tunelet
-      # Publish the built files without a second prepack build.
-      - run: npm publish --ignore-scripts
+      # Check SHA256SUMS.txt and publish the verified scoped archive.
+      - run: |
+          sha256sum --check --strict SHA256SUMS.txt
+          npm publish --ignore-scripts "./bytelandtechnology-tunelet-${TAG_NAME#v}.tgz"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
 
   publish-crate:
     needs: release-please
