@@ -140,6 +140,21 @@ impl Biquad {
         self.b = [Q14::ONE, Q14::default(), Q14::default()];
         self.a = [Q14::default(); 2];
     }
+    /// Applies the bypass rule to one sample and advances the two-sample
+    /// history.
+    ///
+    /// If the input is negative and above `i32::MIN`, the output is one Q14
+    /// unit lower. Inputs that are `i32::MIN`, zero or positive do not change.
+    #[inline]
+    pub(crate) fn bypass_sample(&mut self, input: Q14) -> Q14 {
+        let bits = input.to_bits();
+        let output = Q14::from_bits(bits - i32::from(bits < 0 && bits > i32::MIN));
+        self.x[1] = self.x[0];
+        self.x[0] = input;
+        self.y[1] = self.y[0];
+        self.y[0] = output;
+        output
+    }
     /// Clears the input and output history. The coefficients do not change.
     pub(crate) fn reset(&mut self) {
         self.x = [Q14::default(); 2];
@@ -162,11 +177,11 @@ impl Biquad {
     /// separately.
     #[inline]
     pub(crate) fn process_sample(&mut self, input: Q14) -> Q14 {
-        let sum = (i64::from(self.b[0].to_bits()) * i64::from(input.to_bits()))
-            .saturating_add(i64::from(self.b[1].to_bits()) * i64::from(self.x[0].to_bits()))
-            .saturating_add(i64::from(self.b[2].to_bits()) * i64::from(self.x[1].to_bits()))
-            .saturating_sub(i64::from(self.a[0].to_bits()) * i64::from(self.y[0].to_bits()))
-            .saturating_sub(i64::from(self.a[1].to_bits()) * i64::from(self.y[1].to_bits()));
+        let sum = i64::from(self.b[0].to_bits()) * i64::from(input.to_bits())
+            + i64::from(self.b[1].to_bits()) * i64::from(self.x[0].to_bits())
+            + i64::from(self.b[2].to_bits()) * i64::from(self.x[1].to_bits())
+            - i64::from(self.a[0].to_bits()) * i64::from(self.y[0].to_bits())
+            - i64::from(self.a[1].to_bits()) * i64::from(self.y[1].to_bits());
         let output = Q14::from_bits(round_q14(sum));
         self.x[1] = self.x[0];
         self.x[0] = input;

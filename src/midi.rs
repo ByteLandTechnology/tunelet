@@ -1,6 +1,6 @@
-//! MIDI messages, pitch periods, pitch-bend ratios and velocity gains.
+//! MIDI messages, pitch-bend ratios and the conversion of velocity to gain.
 
-use crate::numeric::fixed::{Q12, Q14, Q6};
+use crate::numeric::fixed::{Q12, Q14};
 use crate::Error;
 
 /// The supported MIDI controls, with zero-based channel numbers.
@@ -11,6 +11,7 @@ use crate::Error;
 /// are not valid. [`Self::validate`] and the event preflight of the processor
 /// check the MIDI ranges. Note numbers use A4 = 69 at 440 Hz.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
@@ -161,14 +162,6 @@ pub(crate) fn bend_ratio(value: i16, semitones: f32) -> Q14 {
     let scale = if value < 0 { 8192.0 } else { 8191.0 };
     let offset = (f64::from(value) / scale) * f64::from(semitones);
     Q14::from_f64((offset * std::f64::consts::LN_2 / 12.0).exp())
-}
-
-/// Returns the period of MIDI `note` at `rate`, as a Q6 count of samples.
-pub(crate) fn note_period(rate: f32, note: i32) -> Q6 {
-    let period = ((f64::from(rate) / 440.0)
-        / ((f64::from(note as f32 - 69.0) * std::f64::consts::LN_2) / 12.0).exp())
-        as f32;
-    Q6::from_f64(f64::from(period))
 }
 
 /// Returns the MIDI gain for `velocity`, quantized to Q12.
