@@ -299,8 +299,11 @@ pub(crate) struct Formant {
     /// stage tries to make a model.
     design_counter: i32,
     /// The separate Q14 feedback rings of the synthesis, each with two copies
-    /// of `MAX_ORDER` entries. Mono synthesis uses channel zero.
+    /// of `MAX_ORDER` entries. Choir uses channel zero, and mono harmony
+    /// copies to channel one.
     history: [[i32; MAX_ORDER * 2]; 2],
+    /// If `true`, the two channels of `history` hold equal samples.
+    histories_match: bool,
     /// The start slot in the synthesis history. The two channels use the same
     /// slot.
     history_index: usize,
@@ -351,6 +354,8 @@ pub(crate) struct Formant {
     /// The wrapping count of model designs that the stage tried. Only the
     /// telemetry reads it.
     generation: u32,
+    /// The count of bank advances from model designs and resets.
+    bank_epoch: u64,
 }
 
 /// Multiplies `coefficients` with `samples` in tap order and returns the
@@ -388,6 +393,7 @@ impl Formant {
             blend: 0,
             design_counter: 0,
             history: [[0; MAX_ORDER * 2]; 2],
+            histories_match: true,
             history_index: 0,
             correlation_history: [[0; 111]; 2],
             correlation_sum: [0; 111],
@@ -407,6 +413,7 @@ impl Formant {
             noise_gain: 0_i32,
             noise_amplitude: 0_i32,
             generation: 0,
+            bank_epoch: 0,
         };
         result.set_config(config);
         result
@@ -452,6 +459,7 @@ impl Formant {
 
         self.stamps.fill(Stamp::default());
         self.history = [[0; MAX_ORDER * 2]; 2];
+        self.histories_match = true;
         self.history_index = 0;
         self.current = BANKS - 1;
         self.next_filter();
@@ -516,6 +524,7 @@ impl Formant {
     /// The function clears the inverse coefficients, the forward coefficients
     /// and the active order of the new bank.
     fn next_filter(&mut self) {
+        self.bank_epoch = self.bank_epoch.wrapping_add(1);
         self.previous = self.current;
         self.current += 1;
         if self.current == BANKS {
@@ -861,6 +870,18 @@ impl Formant {
     pub(crate) fn generation(&self) -> u32 {
         self.generation
     }
+    /// Returns the bank epoch, the stamp at a signed history frame and the Q14
+    /// width.
+    pub(crate) fn envelope_stamp(&self, position: i32) -> (u64, u8, u8, u16, i32) {
+        let stamp = self.stamps[position.rem_euclid(HISTORY_FRAMES as i32) as usize];
+        (
+            self.bank_epoch,
+            stamp.current,
+            stamp.previous,
+            stamp.blend,
+            self.width,
+        )
+    }
     /// Finds and blends the analysis coefficients of the stamp at a signed
     /// history frame, in the same way as [`Self::coefficients`].
     ///
@@ -911,9 +932,13 @@ impl Formant {
             output.fill(0.0);
             return false;
         }
+        let points = input.len();
+        if points == 0 {
+            return true;
+        }
+        let order = synthesis.len();
         let mut analysis = [0; MAX_ORDER];
         self.analysis_coefficients(position, &mut analysis);
-        let points = input.len();
         let step = if points > 1 {
             std::f64::consts::PI * 2.0 * max_frequency_hz as f64
                 / self.rate.hz() as f64
@@ -921,28 +946,141 @@ impl Formant {
         } else {
             0.0
         };
-        let glottal = self.glottal as f64 / 16384.0;
-        let width = self.width as f64 / 16384.0;
+        const SCALE: f64 = 1.0 / 16384.0;
+        let glottal = self.glottal as f64 * SCALE;
+        let width = self.width as f64 * SCALE;
+        let mut analysis_taps = [0.0; ORDER];
+        for (tap, &coefficient) in analysis_taps.iter_mut().zip(&analysis[..ORDER]) {
+            *tap = coefficient as f64 * SCALE;
+        }
+        let mut synthesis_taps = [0.0; MAX_ORDER];
+        for (tap, &coefficient) in synthesis_taps[..order].iter_mut().zip(synthesis) {
+            *tap = coefficient as f64 * SCALE;
+        }
+        let shared = ORDER.min(order);
+        let (step_sine, step_cosine) = step.sin_cos();
+        let (mut bin_cosine, mut bin_sine) = (1.0, 0.0);
+        // Refresh the angle from sin_cos every 64 bins to bound recurrence drift.
+        let mut next_angle = |k: usize| {
+            if k.is_multiple_of(64) {
+                let (sine, cosine) = (step * k as f64).sin_cos();
+                bin_cosine = cosine;
+                bin_sine = sine;
+            } else {
+                (bin_cosine, bin_sine) = (
+                    bin_cosine * step_cosine - bin_sine * step_sine,
+                    bin_sine * step_cosine + bin_cosine * step_sine,
+                );
+            }
+            (bin_cosine, bin_sine)
+        };
         // |1 - sum(c[i] * z^-(i+1))| at z = e^(j * omega).
-        let magnitude = |coefficients: &[i32], cosine: f64, sine: f64| {
-            let (mut real, mut imaginary) = (1.0, 0.0);
+        let (input_chunks, input_tail) = input.as_chunks_mut::<4>();
+        let (output_chunks, output_tail) = output.as_chunks_mut::<4>();
+        for (chunk_index, (in_chunk, out_chunk)) in
+            input_chunks.iter_mut().zip(output_chunks).enumerate()
+        {
+            let base = chunk_index * 4;
+            let mut cosine = [0.0; 4];
+            let mut sine = [0.0; 4];
+            for (lane, (cos, sin)) in cosine.iter_mut().zip(&mut sine).enumerate() {
+                (*cos, *sin) = next_angle(base + lane);
+            }
+            let mut c = cosine;
+            let mut s = sine;
+            let mut analysis_real = [1.0; 4];
+            let mut analysis_imag = [0.0; 4];
+            let mut synthesis_real = [1.0; 4];
+            let mut synthesis_imag = [0.0; 4];
+            for (&analysis_tap, &synthesis_tap) in analysis_taps[..shared]
+                .iter()
+                .zip(&synthesis_taps[..shared])
+            {
+                for lane in 0..4 {
+                    analysis_real[lane] -= analysis_tap * c[lane];
+                    analysis_imag[lane] += analysis_tap * s[lane];
+                    synthesis_real[lane] -= synthesis_tap * c[lane];
+                    synthesis_imag[lane] += synthesis_tap * s[lane];
+                    (c[lane], s[lane]) = (
+                        c[lane] * cosine[lane] - s[lane] * sine[lane],
+                        s[lane] * cosine[lane] + c[lane] * sine[lane],
+                    );
+                }
+            }
+            for &analysis_tap in &analysis_taps[shared..ORDER] {
+                for lane in 0..4 {
+                    analysis_real[lane] -= analysis_tap * c[lane];
+                    analysis_imag[lane] += analysis_tap * s[lane];
+                    (c[lane], s[lane]) = (
+                        c[lane] * cosine[lane] - s[lane] * sine[lane],
+                        s[lane] * cosine[lane] + c[lane] * sine[lane],
+                    );
+                }
+            }
+            for &synthesis_tap in &synthesis_taps[shared..order] {
+                for lane in 0..4 {
+                    synthesis_real[lane] -= synthesis_tap * c[lane];
+                    synthesis_imag[lane] += synthesis_tap * s[lane];
+                    (c[lane], s[lane]) = (
+                        c[lane] * cosine[lane] - s[lane] * sine[lane],
+                        s[lane] * cosine[lane] + c[lane] * sine[lane],
+                    );
+                }
+            }
+            for lane in 0..4 {
+                let emphasis = ((1.0 - glottal * cosine[lane]).powi(2)
+                    + (glottal * sine[lane]).powi(2))
+                .sqrt()
+                .max(1e-6);
+                let analysis_mag = (analysis_real[lane] * analysis_real[lane]
+                    + analysis_imag[lane] * analysis_imag[lane])
+                    .sqrt()
+                    .max(1e-6);
+                let synthesis_mag = (synthesis_real[lane] * synthesis_real[lane]
+                    + synthesis_imag[lane] * synthesis_imag[lane])
+                    .sqrt()
+                    .max(1e-6);
+                in_chunk[lane] = (1.0 / (analysis_mag * emphasis)) as f32;
+                out_chunk[lane] = (width / (synthesis_mag * emphasis)) as f32;
+            }
+        }
+        let tail_base = input_chunks.len() * 4;
+        for (offset, (in_bin, out_bin)) in input_tail.iter_mut().zip(output_tail).enumerate() {
+            let (cosine, sine) = next_angle(tail_base + offset);
             let (mut c, mut s) = (cosine, sine);
-            for &coefficient in coefficients {
-                let value = coefficient as f64 / 16384.0;
-                real -= value * c;
-                imaginary += value * s;
+            let (mut analysis_real, mut analysis_imag) = (1.0, 0.0);
+            let (mut synthesis_real, mut synthesis_imag) = (1.0, 0.0);
+            for (&analysis_tap, &synthesis_tap) in analysis_taps[..shared]
+                .iter()
+                .zip(&synthesis_taps[..shared])
+            {
+                analysis_real -= analysis_tap * c;
+                analysis_imag += analysis_tap * s;
+                synthesis_real -= synthesis_tap * c;
+                synthesis_imag += synthesis_tap * s;
                 (c, s) = (c * cosine - s * sine, s * cosine + c * sine);
             }
-            (real * real + imaginary * imaginary).sqrt().max(1e-6)
-        };
-        for (k, (input, output)) in input.iter_mut().zip(output.iter_mut()).enumerate() {
-            let omega = step * k as f64;
-            let (sine, cosine) = omega.sin_cos();
+            for &analysis_tap in &analysis_taps[shared..ORDER] {
+                analysis_real -= analysis_tap * c;
+                analysis_imag += analysis_tap * s;
+                (c, s) = (c * cosine - s * sine, s * cosine + c * sine);
+            }
+            for &synthesis_tap in &synthesis_taps[shared..order] {
+                synthesis_real -= synthesis_tap * c;
+                synthesis_imag += synthesis_tap * s;
+                (c, s) = (c * cosine - s * sine, s * cosine + c * sine);
+            }
             let emphasis = ((1.0 - glottal * cosine).powi(2) + (glottal * sine).powi(2))
                 .sqrt()
                 .max(1e-6);
-            *input = (1.0 / (magnitude(&analysis[..ORDER], cosine, sine) * emphasis)) as f32;
-            *output = (width / (magnitude(synthesis, cosine, sine) * emphasis)) as f32;
+            let analysis_mag = (analysis_real * analysis_real + analysis_imag * analysis_imag)
+                .sqrt()
+                .max(1e-6);
+            let synthesis_mag = (synthesis_real * synthesis_real + synthesis_imag * synthesis_imag)
+                .sqrt()
+                .max(1e-6);
+            *in_bin = (1.0 / (analysis_mag * emphasis)) as f32;
+            *out_bin = (width / (synthesis_mag * emphasis)) as f32;
         }
         true
     }
@@ -972,8 +1110,55 @@ impl Formant {
             self.history_index = MAX_ORDER;
         }
         self.history_index -= 1;
-        self.history[0][self.history_index] = sample;
-        self.history[0][self.history_index + MAX_ORDER] = sample;
+        let index = self.history_index;
+        self.history[0][index] = sample;
+        self.history[0][index + MAX_ORDER] = sample;
+        if self.histories_match {
+            self.histories_match = sample == self.history[1][index];
+        } else if sample == self.history[1][index] {
+            self.histories_match = self.history[0][..MAX_ORDER] == self.history[1][..MAX_ORDER];
+        }
+        round_q14(i64::from(sample) * i64::from(self.width))
+    }
+    /// Returns `true` if the two channels of `history` hold equal samples.
+    #[inline]
+    pub(crate) fn histories_match(&self) -> bool {
+        self.histories_match
+    }
+    /// Synthesizes one Q14 channel and copies the new feedback sample to
+    /// channel one. The two channels of `history` must be equal before this
+    /// call.
+    ///
+    /// If aspiration is active, the function reads one random value for each
+    /// frame. It adds the saturated excitation change before the feedback sum.
+    /// The history cursor moves one time.
+    pub(crate) fn forward_mono(
+        &mut self,
+        sample: i32,
+        position: i32,
+        context: &mut NumericContext,
+    ) -> i32 {
+        self.dirty = true;
+        let noise = self.add_noise(sample, context).saturating_sub(sample);
+        let sample = sample.saturating_add(noise);
+        let mut blended;
+        let coefficients = if let Some(slice) = self.coefficients(position) {
+            slice
+        } else {
+            blended = [0; MAX_ORDER];
+            self.blend_coefficients(position, &mut blended)
+        };
+        let sum = tap_sum(&self.history[0][self.history_index..], coefficients);
+        let sample = sample.saturating_add(round_q14(sum));
+        if self.history_index == 0 {
+            self.history_index = MAX_ORDER;
+        }
+        self.history_index -= 1;
+        let index = self.history_index;
+        for channel in &mut self.history {
+            channel[index] = sample;
+            channel[index + MAX_ORDER] = sample;
+        }
         round_q14(i64::from(sample) * i64::from(self.width))
     }
     /// Synthesizes two Q14 channels with one stamped model for the two
@@ -1017,6 +1202,11 @@ impl Formant {
             self.history[channel][next] = *sample;
             self.history[channel][next + MAX_ORDER] = *sample;
             *sample = round_q14(i64::from(*sample) * i64::from(self.width));
+        }
+        if self.histories_match {
+            self.histories_match = self.history[0][next] == self.history[1][next];
+        } else if self.history[0][next] == self.history[1][next] {
+            self.histories_match = self.history[0][..MAX_ORDER] == self.history[1][..MAX_ORDER];
         }
         self.history_index = next;
         samples

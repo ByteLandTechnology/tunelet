@@ -256,12 +256,12 @@ pub(crate) struct Reverb {
     diffuse: Q14,
     /// The Q14 feedback coefficient, scaled by 100/105.
     decay: Q14,
+    /// The Q14 allpass coefficients of MediumHall and LargeHall, scaled by
+    /// `diffuse`.
+    hall_diffuse: [Q14; 6],
     /// The Binaural delay of approximately 0.8 ms between the tap that gets
     /// the early sum and the filtered tap. Both channels use it.
     binaural_offset: usize,
-    /// The reserved last ring offset. The output sums go to this slot, and
-    /// the next ring step clears it.
-    scratch: usize,
     /// The largest absolute Q14 wet contribution in the telemetry window. No
     /// audio calculation reads it.
     wet_peak: i32,
@@ -285,6 +285,13 @@ fn mul(left: Q14, right: Q14) -> Q14 {
     left.mul(right)
 }
 
+/// Averages a stereo frame into a mono Q14 sample with integer division
+/// toward zero.
+#[inline(always)]
+fn mono(left: Q14, right: Q14) -> Q14 {
+    Q14::from_bits(((i64::from(left.to_bits()) + i64::from(right.to_bits())) / 2) as i32)
+}
+
 impl Reverb {
     /// Allocates the shared delay layout and prepares the filters from
     /// validated controls.
@@ -293,15 +300,15 @@ impl Reverb {
         let mut result = Self {
             rate,
             config,
-            delay: DelayLine::new(layout.capacity),
+            delay: DelayLine::new(),
             lpf1: Biquad::new(),
             lpf2: Biquad::new(),
             taps: layout.taps,
             mix: Q14::default(),
             diffuse: Q14::default(),
             decay: Q14::default(),
+            hall_diffuse: [Q14::default(); 6],
             binaural_offset: layout.binaural_offset,
-            scratch: layout.capacity - 1,
             wet_peak: 0,
             dirty: false,
         };
@@ -317,6 +324,7 @@ impl Reverb {
         self.mix = Q14::from_f64((config.mix * 100.0) as f64 / 100.0);
         self.diffuse = Q14::from_f64((config.diffusion * 100.0) as f64 / 100.0);
         self.decay = Q14::from_f64((config.decay * 100.0) as f64 / 105.0);
+        self.hall_diffuse = [0.4, 0.5, 0.6, 0.8, 0.9, 0.95].map(|g| mul(self.diffuse, q14(g)));
         let brightness = config
             .brightness_hz
             .min((self.rate.hz() as f64 * 0.49) as f32);
@@ -352,24 +360,26 @@ impl Reverb {
         }
         self.dirty = true;
         let [left, right] = frame;
-        let mono =
-            Q14::from_bits(((i64::from(left.to_bits()) + i64::from(right.to_bits())) / 2) as i32);
-        let t = self.taps;
         let dry = Q14::ONE - self.mix;
+        let left_dry = mul(left, dry);
+        let right_dry = mul(right, dry);
         let d = &mut self.delay;
-        let mut result = match self.config.mode {
+        let result = match self.config.mode {
             ReverbMode::Echo => {
-                d.put(mono, t[0]);
+                let t = &self.taps;
+                d.put(mono(left, right), t[0]);
                 let echo: Fixed<0> = Fixed::<0>::from_bits(t[39] as i32).mul(self.diffuse);
                 d.comb(t[0], echo.to_bits() as usize, self.decay);
                 [
-                    mul(left, dry) + mul(self.mix, d.get(t[25]) - d.get(t[32])),
-                    mul(right, dry) + mul(self.mix, d.get(t[26]) - d.get(t[31])),
+                    left_dry + mul(self.mix, d.get(t[25]) - d.get(t[32])),
+                    right_dry + mul(self.mix, d.get(t[26]) - d.get(t[31])),
                 ]
             }
             ReverbMode::Schroeder => {
+                let t = &self.taps;
+                let input = mono(left, right).div::<0, 14>(TWO);
                 for i in [0, 13, 23, 29] {
-                    d.put(mono.div::<0, 14>(TWO), t[i]);
+                    d.put(input, t[i]);
                 }
                 for (a, b, g) in [(0, 12, 0.9), (13, 22, 0.89), (23, 28, 0.87), (29, 34, 0.86)] {
                     d.comb(t[a], t[b], q14(g));
@@ -386,9 +396,10 @@ impl Reverb {
                 d.allpass(t[40], t[43], self.decay);
                 d.allpass(t[44], t[45], self.decay);
                 let wet = mul(self.mix, d.get(t[45]));
-                [mul(left, dry) + wet, mul(right, dry) + wet]
+                [left_dry + wet, right_dry + wet]
             }
             ReverbMode::SmallRoom => {
+                let t = &self.taps;
                 d.put(left, t[0]);
                 d.put(right, t[40]);
                 for (a, b, g) in [(1, 15, 0.3), (2, 7, 0.7), (8, 14, 0.5), (18, 24, 0.5)] {
@@ -399,105 +410,96 @@ impl Reverb {
                     d.allpass(t[a], t[b], q14(g));
                 }
                 d.comb_lpf(t[0], t[66], self.decay, &mut self.lpf2);
+                let left_wet =
+                    d.fir_sum(&[(t[16], q14(0.2)), (t[32], q14(0.2)), (t[51], q14(0.2))]);
+                let right_wet =
+                    d.fir_sum(&[(t[49], q14(0.2)), (t[65], q14(0.2)), (t[17], q14(0.2))]);
                 [
-                    d.fir(
-                        self.scratch,
-                        &[(t[16], q14(0.2)), (t[32], q14(0.2)), (t[51], q14(0.2))],
-                    ),
-                    d.fir(
-                        self.scratch,
-                        &[(t[49], q14(0.2)), (t[65], q14(0.2)), (t[17], q14(0.2))],
-                    ),
+                    left_dry + mul(self.mix, left_wet),
+                    right_dry + mul(self.mix, right_wet),
                 ]
             }
             ReverbMode::Binaural => {
+                let t = &self.taps;
+                let early = self.diffuse >> 1;
                 let seed = t[10];
                 let tap = t[25];
                 let filter = tap + self.binaural_offset;
                 d.put(left, t[0]);
                 d.put(right, t[40]);
                 let a = mul(
-                    self.diffuse >> 1,
+                    early,
                     d.get(t[0] + seed) + d.get(t[11] + seed) + d.get(t[21] + seed),
                 );
                 d.put(a, tap);
                 d.lpf(filter, &mut self.lpf1);
-                let out = mul(left, dry) + mul(self.mix, d.get(t[40] + filter) + a);
+                let out = left_dry + mul(self.mix, d.get(t[40] + filter) + a);
                 let b = mul(
-                    self.diffuse >> 1,
+                    early,
                     d.get(t[47] + seed) + d.get(t[48] + seed) + d.get(t[54] + seed),
                 );
                 d.put(b, t[40] + tap);
                 d.lpf(t[40] + filter, &mut self.lpf2);
-                [out, mul(right, dry) + mul(self.mix, d.get(filter) + b)]
+                [out, right_dry + mul(self.mix, d.get(filter) + b)]
             }
             ReverbMode::MediumHall => {
-                d.put(mono.div::<0, 14>(TWO), t[0]);
+                let t = &self.taps;
+                let [g04, g05, g06, g08, g09, _] = self.hall_diffuse;
+                d.put(mono(left, right).div::<0, 14>(TWO), t[0]);
                 d.lpf(t[2], &mut self.lpf1);
-                for (a, b, g) in [(3, 15, 0.4), (4, 7, 0.9), (8, 14, 0.6), (18, 24, 0.6)] {
-                    d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
+                for (a, b, g) in [(3, 15, g04), (4, 7, g09), (8, 14, g06), (18, 24, g06)] {
+                    d.allpass(t[a], t[b], g);
                 }
                 d.put(d.get(t[35]), t[40]);
-                for (a, b, g) in [(41, 50, 0.5), (42, 46, 0.8)] {
-                    d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
+                for (a, b, g) in [(41, 50, g05), (42, 46, g08)] {
+                    d.allpass(t[a], t[b], g);
                 }
                 d.comb_lpf(t[0], t[66], self.decay, &mut self.lpf2);
+                let left_wet = d.fir_sum(&[
+                    (t[16], q14(0.25)),
+                    (t[33], q14(0.25)),
+                    (t[51], q14(0.25)),
+                    (t[55], q14(0.25)),
+                ]);
+                let right_wet = d.fir_sum(&[
+                    (t[17], q14(0.25)),
+                    (t[32], q14(0.25)),
+                    (t[52], q14(0.25)),
+                    (t[56], q14(0.2)),
+                ]);
                 [
-                    d.fir(
-                        self.scratch,
-                        &[
-                            (t[16], q14(0.25)),
-                            (t[33], q14(0.25)),
-                            (t[51], q14(0.25)),
-                            (t[55], q14(0.25)),
-                        ],
-                    ),
-                    d.fir(
-                        self.scratch,
-                        &[
-                            (t[17], q14(0.25)),
-                            (t[32], q14(0.25)),
-                            (t[52], q14(0.25)),
-                            (t[56], q14(0.2)),
-                        ],
-                    ),
+                    left_dry + mul(self.mix, left_wet),
+                    right_dry + mul(self.mix, right_wet),
                 ]
             }
             ReverbMode::LargeHall => {
-                d.put(mono, t[0]);
+                let t = &self.taps;
+                let [_, g05, g06, _, _, g095] = self.hall_diffuse;
+                d.put(mono(left, right), t[0]);
                 d.lpf(t[2], &mut self.lpf1);
-                for (a, b, g) in [(3, 5, 0.6), (6, 9, 0.6), (19, 30, 0.95), (20, 27, 0.5)] {
-                    d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
+                for (a, b, g) in [(3, 5, g06), (6, 9, g06), (19, 30, g095), (20, 27, g05)] {
+                    d.allpass(t[a], t[b], g);
                 }
                 d.put(d.get(t[38]), t[40]);
-                for (a, b, g) in [(41, 63, 0.95), (42, 58, 0.5), (59, 62, 0.5)] {
-                    d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
+                for (a, b, g) in [(41, 63, g095), (42, 58, g05), (59, 62, g05)] {
+                    d.allpass(t[a], t[b], g);
                 }
                 d.comb_lpf(t[1], t[64], self.decay, &mut self.lpf2);
+                let left_wet =
+                    d.fir_sum(&[(t[10], q14(0.6)), (t[36], q14(0.3)), (t[61], q14(0.3))]);
+                let right_wet =
+                    d.fir_sum(&[(t[10], q14(0.6)), (t[37], q14(0.3)), (t[60], q14(0.3))]);
                 [
-                    d.fir(
-                        self.scratch,
-                        &[(t[10], q14(0.6)), (t[36], q14(0.3)), (t[61], q14(0.3))],
-                    ),
-                    d.fir(
-                        self.scratch,
-                        &[(t[10], q14(0.6)), (t[37], q14(0.3)), (t[60], q14(0.3))],
-                    ),
+                    left_dry + mul(self.mix, left_wet),
+                    right_dry + mul(self.mix, right_wet),
                 ]
             }
         };
-        if matches!(
-            self.config.mode,
-            ReverbMode::SmallRoom | ReverbMode::MediumHall | ReverbMode::LargeHall
-        ) {
-            result[0] = mul(left, dry) + mul(self.mix, result[0]);
-            result[1] = mul(right, dry) + mul(self.mix, result[1]);
-        }
         d.step();
         // Telemetry only. The wet contribution is the output minus the dry
         // term. Mono calls measure the wet signal after the downmix.
-        let left_wet = result[0] - mul(left, dry);
-        let right_wet = result[1] - mul(right, dry);
+        let left_wet = result[0] - left_dry;
+        let right_wet = result[1] - right_dry;
         match layout {
             OutputLayout::Stereo => {
                 for wet in [left_wet, right_wet] {
@@ -546,24 +548,26 @@ pub(crate) fn tail_frames(rate: SampleRate, config: ReverbConfig) -> usize {
     (rate.hz() as f64 * (turns * 0.8 + 2.0)).ceil() as usize
 }
 
-/// Circular Q14 storage. Its prepared capacity limits the tap offsets.
+/// The length in frames of the shared delay ring at both sample rates.
+const CAPACITY: usize = 17_000;
+
+/// Circular Q14 storage. Its fixed capacity limits the tap offsets.
 #[derive(Debug)]
 struct DelayLine {
-    /// Fixed-length storage that the preparation allocates. The values use
-    /// the Q14 audio scale.
-    buffer: Vec<Q14>,
-    /// The current frame position, always less than the buffer length. A
-    /// reset does not change it.
+    /// Fixed-length storage on the heap. The values use the Q14 audio scale.
+    buffer: Box<[Q14; CAPACITY]>,
+    /// The current frame position, always less than `CAPACITY`. A reset does
+    /// not change it.
     write: usize,
 }
 impl DelayLine {
-    /// Allocates a silent ring that is not empty. The caller supplies the
-    /// prepared capacity.
-    fn new(length: usize) -> Self {
-        Self {
-            buffer: vec![Q14::default(); length],
-            write: 0,
-        }
+    /// Allocates a silent ring on the heap.
+    fn new() -> Self {
+        let buffer = vec![Q14::default(); CAPACITY]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("prepared reverb delay length"));
+        Self { buffer, write: 0 }
     }
     /// Clears the samples and does not move the current write position.
     fn reset(&mut self) {
@@ -571,32 +575,33 @@ impl DelayLine {
     }
     /// Maps a delay to a storage index with a maximum of one wrap.
     ///
-    /// Each offset from the caller must not be more than the buffer length.
-    /// The prepared network taps obey this limit.
-    #[inline]
+    /// Each offset from the caller must not be more than `CAPACITY`. The
+    /// prepared network taps obey this limit.
+    #[inline(always)]
     fn index(&self, delay: usize) -> usize {
         if self.write >= delay {
             self.write - delay
         } else {
-            self.buffer.len() - (delay - self.write)
+            CAPACITY - (delay - self.write)
         }
     }
     /// Reads a prepared delay offset and does not advance the ring.
-    #[inline]
+    #[inline(always)]
     fn get(&self, delay: usize) -> Q14 {
         self.buffer[self.index(delay)]
     }
     /// Writes a value at a prepared delay offset and returns the value.
-    #[inline]
+    #[inline(always)]
     fn put(&mut self, value: Q14, delay: usize) -> Q14 {
         let index = self.index(delay);
         self.buffer[index] = value;
         value
     }
     /// Advances by one frame and clears the slot at the new current position.
+    #[inline(always)]
     fn step(&mut self) {
         self.write += 1;
-        if self.write == self.buffer.len() {
+        if self.write == CAPACITY {
             self.write = 0;
         }
         self.buffer[self.write] = Q14::default();
@@ -604,23 +609,37 @@ impl DelayLine {
     /// Calculates one allpass section in place.
     ///
     /// The order of reads and writes is important when taps share storage.
+    #[inline(always)]
     fn allpass(&mut self, first: usize, second: usize, coefficient: Q14) -> Q14 {
-        let output = self.get(second) - mul(coefficient, self.get(first));
-        self.put(output, second);
-        self.put(mul(coefficient, output) + self.get(first), first);
+        let first = self.index(first);
+        let second = self.index(second);
+        let output = self.buffer[second] - mul(coefficient, self.buffer[first]);
+        self.buffer[second] = output;
+        let input = mul(coefficient, output) + self.buffer[first];
+        self.buffer[first] = input;
         output
     }
     /// Adds delayed feedback into the first tap and returns the updated
     /// value.
+    #[inline(always)]
     fn comb(&mut self, first: usize, second: usize, coefficient: Q14) -> Q14 {
-        self.put(mul(coefficient, self.get(second)) + self.get(first), first)
+        let first = self.index(first);
+        let second = self.index(second);
+        let value = mul(coefficient, self.buffer[second]) + self.buffer[first];
+        self.buffer[first] = value;
+        value
     }
     /// Filters a tap through the persistent damping filter, then replaces
     /// the tap.
+    #[inline(always)]
     fn lpf(&mut self, delay: usize, filter: &mut Biquad) -> Q14 {
-        self.put(filter.process_sample(self.get(delay)), delay)
+        let index = self.index(delay);
+        let value = filter.process_one_pole(self.buffer[index]);
+        self.buffer[index] = value;
+        value
     }
     /// Damps the feedback tap before it is added to the comb input.
+    #[inline(always)]
     fn comb_lpf(
         &mut self,
         first: usize,
@@ -629,27 +648,32 @@ impl DelayLine {
         filter: &mut Biquad,
     ) -> Q14 {
         let filtered = self.lpf(second, filter);
-        self.put(mul(coefficient, filtered) + self.get(first), first)
+        let first = self.index(first);
+        let value = mul(coefficient, filtered) + self.buffer[first];
+        self.buffer[first] = value;
+        value
     }
-    /// Adds the weighted taps in the listed order, then writes the sum to the
-    /// target.
-    fn fir(&mut self, target: usize, taps: &[(usize, Q14)]) -> Q14 {
+    /// Adds the weighted taps in the listed order.
+    #[inline(always)]
+    fn fir_sum(&self, taps: &[(usize, Q14)]) -> Q14 {
         let mut accumulator = Q14::default();
         for &(delay, coefficient) in taps {
             accumulator = accumulator + mul(coefficient, self.get(delay));
         }
-        self.put(accumulator, target)
+        accumulator
+    }
+    /// Adds the weighted taps in the listed order, then writes the sum to the
+    /// target.
+    #[inline(always)]
+    fn fir(&mut self, target: usize, taps: &[(usize, Q14)]) -> Q14 {
+        self.put(self.fir_sum(taps), target)
     }
 }
 
-/// The prepared delay offsets and storage limits for the selected sample
-/// rate.
+/// The prepared delay offsets for the selected sample rate.
 struct ReverbLayout {
     /// Indexed network positions as frame delays from the write cursor.
     taps: [usize; 67],
-    /// The ring length in frames, which includes the reserved scratch
-    /// position.
-    capacity: usize,
     /// The additional Binaural delay after the early-sum tap, truncated from
     /// 0.8 ms at the prepared rate. Both channels use it.
     binaural_offset: usize,
@@ -735,7 +759,6 @@ fn reverb_layout(rate: f32) -> ReverbLayout {
     taps[59] = taps[58] + 1;
     ReverbLayout {
         taps,
-        capacity: 17000,
         binaural_offset: (rate as f64 * 0.8 * 0.001) as usize,
     }
 }

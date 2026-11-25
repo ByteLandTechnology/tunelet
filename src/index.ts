@@ -5,7 +5,8 @@
  * configuration. Both environments use the same generated bindings and the
  * same Wasm binary. This module re-exports all named exports of the module
  * that wasm-bindgen generates, which include `Tunelet`, `defaultConfig`,
- * `initSync` and the configuration, event and feedback types.
+ * `initSync` and the configuration, control-activity, event and feedback
+ * types.
  */
 import init from "../pkg/tunelet.js";
 import type { InitInput, InitOutput } from "../pkg/tunelet.js";
@@ -37,15 +38,15 @@ let initialization: Promise<InitOutput> | undefined;
  *
  * For a custom deployment, you can give one of these sources:
  *
- * - A URL.
+ * - A URL or URL string.
  * - A fetch Response.
  * - A byte buffer (BufferSource).
  * - A compiled WebAssembly.Module.
  * - A promise for one of these.
  *
- * A string source obeys fetch rules. For a Node.js `file:` source, use a
- * URL object. A compiled module must use imports that agree with the packaged
- * bindings.
+ * In Node.js, the function reads `file:` URL objects and `"file:"` URL strings
+ * from disk. Other URLs and string sources obey fetch rules. A compiled module
+ * must use imports that agree with the packaged bindings.
  *
  * Concurrent calls share one promise, and the first call selects the source.
  * After a successful initialization, later calls use it again and do not load
@@ -69,6 +70,32 @@ export function loadTunelet(
   return initialization;
 }
 
+/** Converts a `file:` URL string or `URL` object into a local `URL` instance. */
+function resolveFileUrl(input: InitInput): URL | undefined {
+  if (typeof URL === "function" && input instanceof URL) {
+    return input.protocol === "file:" ? input : undefined;
+  }
+  if (typeof input === "string") {
+    if (!/^file:/i.test(input)) {
+      return undefined;
+    }
+    const url = new URL(input);
+    return url.protocol === "file:" ? url : undefined;
+  }
+  if (
+    typeof input === "object" &&
+    input !== null &&
+    "protocol" in input &&
+    input.protocol === "file:" &&
+    "href" in input &&
+    typeof input.href === "string"
+  ) {
+    const url = new URL(input.href);
+    return url.protocol === "file:" ? url : undefined;
+  }
+  return undefined;
+}
+
 /** Awaits the source one time, then initializes the Wasm module from it. */
 async function initialize(
   source: InitInput | Promise<InitInput> | undefined,
@@ -78,7 +105,8 @@ async function initialize(
       ? new URL("../pkg/tunelet_bg.wasm", import.meta.url)
       : await source;
 
-  if (input instanceof URL && input.protocol === "file:") {
+  const fileUrl = resolveFileUrl(input);
+  if (fileUrl !== undefined) {
     // Keep the Node.js built-in module out of browser bundles. TypeScript
     // removes the type-only import. The runtime import runs only for `file:`
     // URLs.
@@ -86,7 +114,7 @@ async function initialize(
     const fs: typeof import("node:fs/promises") = await import(
       /* webpackIgnore: true */ /* @vite-ignore */ moduleName
     );
-    return init({ module_or_path: await fs.readFile(input) });
+    return init({ module_or_path: await fs.readFile(fileUrl) });
   }
 
   return init({ module_or_path: input });

@@ -36,7 +36,8 @@ const GAIN_RELEASE: Q12 = Q12::from_bits(81);
 /// The default is [`Self::MidiChannels`]. The static interval and chord
 /// sources use the related [`HarmonyConfig`] fields. The MIDI sources use
 /// [`crate::ControlEvent::Midi`]. The configuration of the sources that are
-/// not selected is still validated and kept.
+/// not selected is still validated and kept. If the selected source changes,
+/// the active MIDI notes release.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -320,11 +321,11 @@ pub struct HarmonyConfig {
     /// [`HarmonySource::SmartInterval`] use the first `voices` voices. The
     /// other voices release with the usual gain envelope. The chord and MIDI
     /// sources ignore this field. In JavaScript, the field is optional and
-    /// a missing value gives the default.
+    /// an absent or `undefined` value gives the default.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(default = "default_voices"),
-        tsify(optional)
+        serde(default = "default_voices", deserialize_with = "deserialize_voices"),
+        tsify(optional, type = "number | undefined")
     )]
     pub voices: u8,
 }
@@ -333,6 +334,13 @@ pub struct HarmonyConfig {
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 fn default_voices() -> u8 {
     HARMONY_VOICES as u8
+}
+
+/// Decodes an optional interval voice count and maps an absent value to 4.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn deserialize_voices<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<u8>::deserialize(deserializer)?.unwrap_or_else(default_voices))
 }
 
 impl Default for HarmonyConfig {
@@ -719,21 +727,12 @@ impl HarmonyState {
 
     /// Applies a configuration that validation already accepted.
     ///
-    /// If the source changes to an interval source or to a named or degree
-    /// chord source, the function calls `reset`. It prepares the tables
-    /// again only for the fields that changed.
+    /// If the source changes, the function calls `reset`. It prepares the
+    /// tables again only for the fields that changed.
     pub(crate) fn apply_config(&mut self, config: HarmonyConfig) {
         let old = self.config;
         self.config = config;
-        if old.source != config.source
-            && matches!(
-                config.source,
-                HarmonySource::FixedInterval
-                    | HarmonySource::SmartInterval
-                    | HarmonySource::ChordByDegree
-                    | HarmonySource::ChordByName
-            )
-        {
+        if old.source != config.source {
             self.reset();
         }
         if old.key != config.key
@@ -904,12 +903,12 @@ impl HarmonyState {
     /// Applies a MIDI event with channel, note and velocity values that are
     /// already in range.
     /// Returns `true` if resynthesis must make its next control step due.
-    /// This occurs after a new note assignment and after each Note Off in
-    /// the omni sources. The omni sources steal the oldest voice and resume
-    /// the newest pending note. If two orders are equal, strict comparisons
-    /// keep the lowest voice index or pitch. Each Note Off clears the pending
-    /// entry of its pitch. All Notes Off calls `reset` and returns `false`.
-    /// The gain releases occur at the next control steps.
+    /// This occurs after a new note assignment and after each Note Off on a
+    /// channel that the MIDI source uses. The omni sources steal the oldest
+    /// voice and resume the newest pending note. If two orders are equal,
+    /// strict comparisons keep the lowest voice index or pitch. Each Note Off
+    /// clears the pending entry of its pitch. All Notes Off calls `reset` and
+    /// returns `false`. The gain releases occur at the next control steps.
     pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent) -> bool {
         let (channel, note, velocity) = match event {
             MidiEvent::AllNotesOff => {
@@ -988,14 +987,13 @@ impl HarmonyState {
                     if self.voice_has_note(voice, note) {
                         self.midi_period[voice] = Q6::ZERO;
                     }
-                    false
                 } else {
                     if self.midi_period[voice] == Q6::ZERO {
                         self.portamento_period[voice] = Q6::ZERO;
                     }
                     self.assign(voice, note, gain, self.event_counter);
-                    true
                 }
+                true
             }
             _ => false,
         };
