@@ -239,7 +239,7 @@ pub enum Inversion {
 /// - A tonic major chord in root position.
 /// - A register of 50%.
 /// - A closed voicing and zero portamento.
-/// - Four voices for the interval sources.
+/// - A limit of four harmony voices.
 ///
 /// These settings configure all sources. Only the fields for the selected
 /// source change the target notes. Validation always checks all fields.
@@ -315,13 +315,12 @@ pub struct HarmonyConfig {
     /// a glide. In the interval sources, if the input moves more than one
     /// semitone bin, each voice starts at its new target without a glide.
     pub portamento_ms: f32,
-    /// The number of voices that sound in the interval sources, 0..=4.
+    /// The maximum number of harmony voices that sound, 0..=4.
     ///
-    /// The default is 4. [`HarmonySource::FixedInterval`] and
-    /// [`HarmonySource::SmartInterval`] use the first `voices` voices. The
-    /// other voices release with the usual gain envelope. The chord and MIDI
-    /// sources ignore this field. In JavaScript, the field is optional and
-    /// a missing value gives the default.
+    /// The default is 4. All [`HarmonySource`] variants use a maximum of
+    /// `voices` active voices. Extra voices release with the usual gain
+    /// envelope. In JavaScript, the field is optional and a missing value
+    /// gives the default.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(default = "default_voices"),
@@ -330,7 +329,7 @@ pub struct HarmonyConfig {
     pub voices: u8,
 }
 
-/// The default count of interval voices: all of them.
+/// The default count of harmony voices: all of them.
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 fn default_voices() -> u8 {
     HARMONY_VOICES as u8
@@ -857,15 +856,13 @@ impl HarmonyState {
     /// this index changes by more than one bin, the voice restarts its
     /// portamento.
     fn select_target(&mut self, period: Q6, voice: usize) -> Q12 {
+        if voice >= usize::from(self.config.voices) {
+            // A voice after the configured count releases. A zero target
+            // keeps its last period until the gain gets to zero.
+            self.target_period[voice] = Q6::ZERO;
+            return Q12::ZERO;
+        }
         match self.config.source {
-            HarmonySource::FixedInterval | HarmonySource::SmartInterval
-                if voice >= self.config.voices as usize =>
-            {
-                // A voice after the configured count releases. A zero target
-                // keeps its last period until the gain gets to zero.
-                self.target_period[voice] = Q6::ZERO;
-                Q12::ZERO
-            }
             HarmonySource::FixedInterval | HarmonySource::SmartInterval => {
                 let previous = self.scale_note[voice];
                 let (target, note) = self.find_scale_period(period, voice);
@@ -907,9 +904,9 @@ impl HarmonyState {
         }
     }
     /// Prepares the chord periods and their gains from the selected source.
-    /// The lowest tones go into the voice slots with the highest numbers.
-    /// Inactive slots get zero periods, so the output does not use their
-    /// sentinel gains.
+    /// The lowest tones go into the active voice slots with the highest
+    /// numbers. Inactive slots get zero periods, so the output does not use
+    /// their sentinel gains.
     fn setup_chord(&mut self) {
         let (tones, gains, count) = chords::voice_chord(
             &self.config,
@@ -917,17 +914,22 @@ impl HarmonyState {
             self.midi_period,
             self.midi_gain,
         );
+        let voices = usize::from(self.config.voices);
+        let count = count.min(voices);
         if count == 0 {
             self.chord_period.fill(Q6::ZERO);
             return;
         }
+        let top = voices - 1;
         for i in 0..count {
-            self.chord_gain[3 - i] = gains[i];
-            self.chord_period[3 - i] = self.cents_period(f64::from(tones[i]) * 100.0);
+            self.chord_gain[top - i] = gains[i];
+            self.chord_period[top - i] = self.cents_period(f64::from(tones[i]) * 100.0);
         }
-        for i in count..4 {
-            self.chord_period[3 - i] = Q6::ZERO;
-            self.chord_gain[3 - i] = -Q12::ONE;
+        for slot in 0..HARMONY_VOICES {
+            if slot + count < voices || slot >= voices {
+                self.chord_period[slot] = Q6::ZERO;
+                self.chord_gain[slot] = -Q12::ONE;
+            }
         }
     }
 }

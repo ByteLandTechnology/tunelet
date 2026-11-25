@@ -834,11 +834,11 @@ impl Resynthesis {
     pub(crate) fn is_tracking(&self) -> bool {
         !self.pitch.is_detecting()
     }
-    /// Writes the effective ratio and the linear gain of each voice from the
-    /// last frame, and returns the number of voices.
+    /// Writes the effective ratio and the linear gain of each active voice
+    /// from the last frame, and returns `1` plus the active secondary voices.
     ///
-    /// Slot zero is the lead. In Harmony mode, slots 1 to 4 are the harmony
-    /// voices, and the gain is the envelope of the harmony controller. In
+    /// Slot zero is the lead. In Harmony mode, the entries after the lead are
+    /// the active harmony voices, with each gain scaled by `harmony_gain`. In
     /// Choir mode, the slots after the lead are the secondary voices with a
     /// gain of 1. Each ratio includes the correction, the global shift and
     /// the ratio of the voice. The entries after the count do not change.
@@ -855,12 +855,18 @@ impl Resynthesis {
             }
             count as u8
         } else {
+            let mut count = 1;
+            let level = self.config.harmony_gain as f64;
             for voice in 0..HARMONY_VOICES {
-                ratios[voice + 1] =
-                    (self.voice_ratios[voice + 1].to_bits() as f64 / 16384.0) as f32;
-                gains[voice + 1] = (self.harmony_gains[voice].to_bits() as f64 / 4096.0) as f32;
+                let gain = self.harmony_gains[voice];
+                if gain > Q12::ZERO {
+                    ratios[count] =
+                        (self.voice_ratios[voice + 1].to_bits() as f64 / 16384.0) as f32;
+                    gains[count] = (gain.to_bits() as f64 / 4096.0 * level) as f32;
+                    count += 1;
+                }
             }
-            (HARMONY_VOICES + 1) as u8
+            count as u8
         }
     }
     /// Returns the wrapping count of formant model designs.
