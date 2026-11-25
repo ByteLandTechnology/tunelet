@@ -15,10 +15,12 @@
 # @bytelandtechnology/tunelet to this repository through the repository field.
 #
 # The release-please job uses a GitHub App token from vars.APP_CLIENT_ID and
-# secrets.APP_PRIVATE_KEY. Register the GitHub App on this repository with
-# write access only to contents, issues and pull requests. When release-please
-# updates the release pull request, ci.yml runs verify on head_sha
-# automatically. A branch ruleset on main must require verify before merge.
+# secrets.APP_PRIVATE_KEY. If vars.APP_CLIENT_ID or secrets.APP_PRIVATE_KEY is
+# empty, the workflow skips release-please. Register the GitHub App on this
+# repository with write access only to contents, issues and pull requests. When
+# release-please updates the release pull request, ci.yml runs verify on
+# head_sha automatically. A branch ruleset on main must require verify before
+# merge.
 name: Release
 
 on:
@@ -34,16 +36,20 @@ permissions: {}
 
 jobs:
   release-please:
+    if: ${{ vars.APP_CLIENT_ID != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: {}
+    env:
+      HAS_APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY != '' && 'true' || 'false' }}
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      # The action gets a one-hour GitHub App token for this repository. It
-      # revokes the token when the job ends.
+      # If secrets.APP_PRIVATE_KEY is set, the action gets a one-hour GitHub
+      # App token for this repository and revokes it when the job ends.
       - id: app-token
+        if: ${{ env.HAS_APP_PRIVATE_KEY == 'true' }}
         uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ vars.APP_CLIENT_ID }}
@@ -52,6 +58,7 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
       - id: release
+        if: ${{ steps.app-token.outputs.token != '' }}
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ steps.app-token.outputs.token }}
