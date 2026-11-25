@@ -1,19 +1,30 @@
 /**
- * This script packs the npm archive, checks its twelve files, runs runtime
- * Node.js checks and checks four strict TypeScript profiles.
+ * This script builds the package one time and packs `tunelet` and
+ * `@bytelandtechnology/tunelet`. For each archive, it checks the fourteen
+ * files, runtime Node.js behavior and strict TypeScript profiles.
+ *
+ * If you give `--out-dir <dir>`, the script writes both `.tgz` archives and
+ * `SHA256SUMS.txt` to `<dir>` after all checks succeed.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+
+const UNSCOPED_PACKAGE_NAME = "tunelet";
+const SCOPED_PACKAGE_NAME = "@bytelandtechnology/tunelet";
 
 const EXPECTED_ARCHIVE_PATHS = [
   "package/LICENSE",
   "package/README.md",
   "package/dist/browser.d.ts",
   "package/dist/browser.js",
+  "package/dist/index.d.ts",
+  "package/dist/index.js",
   "package/dist/node.d.ts",
   "package/dist/node.js",
   "package/dist/shared.d.ts",
@@ -29,33 +40,119 @@ const PACKAGE_NAME_PATTERN =
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
-/** Read and check the current package name so scoped names also work. */
-function readPackageName() {
-  const packageJsonPath = path.join(repoRoot, "package.json");
-  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-  const packageName = packageJson.name;
+/** Read the optional `--out-dir` flag from `process.argv`. */
+function parseCliOptions(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      "out-dir": { type: "string" },
+    },
+    strict: true,
+  });
   assert.equal(
-    typeof packageName,
+    positionals.length,
+    0,
+    `Unexpected positional arguments: ${positionals.join(" ")}`,
+  );
+  const rawOutDir = values["out-dir"];
+  if (rawOutDir === undefined) {
+    return { outDir: undefined };
+  }
+  assert.ok(
+    rawOutDir.trim().length > 0 && !rawOutDir.startsWith("-"),
+    "--out-dir requires a directory path",
+  );
+  return { outDir: path.resolve(process.cwd(), rawOutDir) };
+}
+
+/** Read and check the manifest in `package.json`. */
+function readPackageManifest() {
+  const packageJsonPath = path.join(repoRoot, "package.json");
+  const manifest = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  assert.equal(
+    typeof manifest.name,
     "string",
     "package.json name must be a string",
   );
+  assert.match(
+    manifest.name,
+    PACKAGE_NAME_PATTERN,
+    `Invalid package name: ${manifest.name}`,
+  );
+  assert.equal(
+    manifest.name,
+    UNSCOPED_PACKAGE_NAME,
+    `Expected package.json name to be ${UNSCOPED_PACKAGE_NAME}, found ${manifest.name}`,
+  );
+  assert.equal(
+    typeof manifest.version,
+    "string",
+    "package.json version must be a string",
+  );
+  assert.ok(
+    manifest.version.trim().length > 0,
+    "package.json version must not be empty",
+  );
+  return manifest;
+}
+
+/** Return the `.tgz` file name that `npm pack` writes for `packageName`. */
+function expectedArchiveFileName(packageName, version) {
+  return `${packageName.replace(/^@/, "").replace(/\//g, "-")}-${version}.tgz`;
+}
+
+/** Copy the built package files into `stageDir` with `packageName`. */
+function stageScopedPackage(stageDir, manifest, packageName) {
   assert.match(
     packageName,
     PACKAGE_NAME_PATTERN,
     `Invalid package name: ${packageName}`,
   );
-  return packageName;
+  fs.mkdirSync(stageDir, { recursive: true });
+
+  const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
+  const topLevelEntries = new Set(["LICENSE", "README.md"]);
+  for (const entry of manifestFiles) {
+    if (typeof entry === "string") {
+      const firstSegment = entry.replace(/^\.\//, "").split("/")[0];
+      if (firstSegment.length > 0) {
+        topLevelEntries.add(firstSegment);
+      }
+    }
+  }
+
+  for (const entry of topLevelEntries) {
+    const sourcePath = path.join(repoRoot, entry);
+    if (fs.existsSync(sourcePath)) {
+      fs.cpSync(sourcePath, path.join(stageDir, entry), { recursive: true });
+    }
+  }
+
+  const stagedManifest = { ...manifest, name: packageName };
+  fs.writeFileSync(
+    path.join(stageDir, "package.json"),
+    `${JSON.stringify(stagedManifest, null, 2)}\n`,
+  );
 }
 
 /** Run `npm pack` without a shell and return the relative archive path. */
-function packArchive(packDir) {
+function packArchive(
+  sourceDir,
+  packDir,
+  expectedFileName,
+  { ignoreScripts = false } = {},
+) {
+  const packArgs = ["pack", "--pack-destination", packDir];
+  if (ignoreScripts) {
+    packArgs.push("--ignore-scripts");
+  }
+
   const npmExecPath = process.env.npm_execpath;
   if (npmExecPath) {
-    execFileSync(
-      process.execPath,
-      [npmExecPath, "pack", "--pack-destination", packDir],
-      { cwd: repoRoot, stdio: "inherit" },
-    );
+    execFileSync(process.execPath, [npmExecPath, ...packArgs], {
+      cwd: sourceDir,
+      stdio: "inherit",
+    });
   } else if (process.platform === "win32") {
     const npmCliPath = path.join(
       path.dirname(process.execPath),
@@ -67,14 +164,13 @@ function packArchive(packDir) {
     if (!fs.existsSync(npmCliPath)) {
       throw new Error(`npm-cli.js was not found at ${npmCliPath}`);
     }
-    execFileSync(
-      process.execPath,
-      [npmCliPath, "pack", "--pack-destination", packDir],
-      { cwd: repoRoot, stdio: "inherit" },
-    );
+    execFileSync(process.execPath, [npmCliPath, ...packArgs], {
+      cwd: sourceDir,
+      stdio: "inherit",
+    });
   } else {
-    execFileSync("npm", ["pack", "--pack-destination", packDir], {
-      cwd: repoRoot,
+    execFileSync("npm", packArgs, {
+      cwd: sourceDir,
       stdio: "inherit",
     });
   }
@@ -87,10 +183,15 @@ function packArchive(packDir) {
     1,
     `Expected one archive, found ${archives.length}`,
   );
+  assert.equal(
+    archives[0],
+    expectedFileName,
+    `Expected archive ${expectedFileName}, found ${archives[0]}`,
+  );
   return path.posix.join("pack", archives[0]);
 }
 
-/** Check that the archive contains only the twelve expected files. */
+/** Check that the archive contains only the fourteen expected files. */
 function verifyArchiveEntries(tempDir, relativeArchivePath) {
   const rawList = execFileSync("tar", ["-tzf", relativeArchivePath], {
     cwd: tempDir,
@@ -138,6 +239,8 @@ function installArchive(
     fs.readFileSync(path.join(installedDir, "package.json"), "utf8"),
   );
   assert.equal(packedMetadata.name, packageName);
+  assert.equal(packedMetadata.main, "./dist/index.js");
+  assert.equal(packedMetadata.types, "./dist/index.d.ts");
 
   fs.writeFileSync(
     path.join(consumerDir, "package.json"),
@@ -153,13 +256,19 @@ function installArchive(
 
 /** Remove comments from JavaScript or TypeScript source text. */
 function stripComments(source) {
-  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^(?!\s*\/\/\/\s*<reference).*\/\/.*$/gm, "");
 }
 
 /** Check browser bundle isolation and declaration parity on packed files. */
 function verifyInstalledFiles(installedDir) {
   const browserJs = fs.readFileSync(
     path.join(installedDir, "dist", "browser.js"),
+    "utf8",
+  );
+  const indexJs = fs.readFileSync(
+    path.join(installedDir, "dist", "index.js"),
     "utf8",
   );
   const sharedJs = fs.readFileSync(
@@ -170,7 +279,12 @@ function verifyInstalledFiles(installedDir) {
   assert.doesNotMatch(browserJs, /\bnode:/);
   assert.doesNotMatch(sharedJs, /node:fs\/promises/);
   assert.doesNotMatch(sharedJs, /\bnode:/);
+  assert.doesNotMatch(indexJs, /^\s*import\b[^;]*["']node:/m);
 
+  const indexDts = fs.readFileSync(
+    path.join(installedDir, "dist", "index.d.ts"),
+    "utf8",
+  );
   const nodeDts = fs.readFileSync(
     path.join(installedDir, "dist", "node.d.ts"),
     "utf8",
@@ -188,14 +302,23 @@ function verifyInstalledFiles(installedDir) {
     "utf8",
   );
 
+  const strippedIndexDts = stripComments(indexDts).trim();
   assert.equal(
     stripComments(nodeDts).trim(),
+    strippedIndexDts,
+    "dist/node.d.ts and dist/index.d.ts must expose identical signatures",
+  );
+  assert.equal(
     stripComments(browserDts).trim(),
-    "dist/node.d.ts and dist/browser.d.ts must expose identical signatures",
+    strippedIndexDts,
+    "dist/browser.d.ts and dist/index.d.ts must expose identical signatures",
   );
   assert.match(wasmDts, /voices\?: number \| undefined;/);
+  assert.match(wasmDts, /toFixedLengthBuffer\(\): ArrayBuffer;/);
+  assert.match(wasmDts, /toResizableBuffer\(\): ArrayBuffer;/);
 
   for (const [label, content] of [
+    ["dist/index.d.ts", indexDts],
     ["dist/node.d.ts", nodeDts],
     ["dist/browser.d.ts", browserDts],
     ["dist/shared.d.ts", sharedDts],
@@ -206,6 +329,8 @@ function verifyInstalledFiles(installedDir) {
       /Symbol\.dispose/,
       /\bWebAssembly\b/,
       /\bRequestInfo\b/,
+      /\bResponse\b/,
+      /\bURL\b/,
       /\bBufferSource\b/,
       /\bdeclare\s+global\b/,
       /\/\/\/\s*<reference\b/,
@@ -230,15 +355,16 @@ function runNodeCheck(consumerDir, filename, lines, args = []) {
   });
 }
 
-/** Check Node.js exports, `voices: undefined`, `file:` strings and bundles. */
+/** Check Node.js exports, `dist/index.js`, `voices: undefined` and bundles. */
 function verifyRuntimeImport(consumerDir, installedDir, packageName) {
   runNodeCheck(
     consumerDir,
     "check-default.mjs",
     [
       'import assert from "node:assert/strict";',
+      'import fs from "node:fs";',
       'import { createRequire } from "node:module";',
-      'import { pathToFileURL } from "node:url";',
+      'import { fileURLToPath, pathToFileURL } from "node:url";',
       "",
       "const packageName = process.argv[2];",
       "const installedDir = process.argv[3];",
@@ -250,20 +376,25 @@ function verifyRuntimeImport(consumerDir, installedDir, packageName) {
       "const shortWasmResolved = import.meta.resolve(`${packageName}/tunelet_bg.wasm`);",
       'assert.match(rootResolved, /\\/dist\\/node\\.js$/);',
       'assert.match(wasmJsResolved, /\\/pkg\\/tunelet\\.js$/);',
-      'assert.match(pkgWasmResolved, /\\/pkg\\/tunelet_bg\\.wasm$/);',
+      'assert.match(pkgWasmResolved, /^file:.*\\/pkg\\/tunelet_bg\\.wasm$/);',
       "assert.equal(shortWasmResolved, pkgWasmResolved);",
-      "assert.equal(",
-      "  require.resolve(`${packageName}/pkg/tunelet_bg.wasm`),",
-      "  require.resolve(`${packageName}/tunelet_bg.wasm`),",
-      ");",
+      "const wasmFilePath = fileURLToPath(pkgWasmResolved);",
+      "assert.ok(fs.statSync(wasmFilePath).isFile());",
+      "assert.equal(require.resolve(`${packageName}/pkg/tunelet_bg.wasm`), wasmFilePath);",
+      "assert.equal(require.resolve(`${packageName}/tunelet_bg.wasm`), wasmFilePath);",
+      "assert.match(require.resolve(packageName), /dist[\\\\/]node\\.js$/);",
       "",
       "const rootModule = await import(packageName);",
+      "const indexModule = await import(pathToFileURL(`${installedDir}/dist/index.js`).href);",
       "const browserModule = await import(pathToFileURL(`${installedDir}/dist/browser.js`).href);",
       "const wasmModule = await import(`${packageName}/wasm`);",
       "",
+      "assert.deepEqual(Object.keys(rootModule).sort(), Object.keys(indexModule).sort());",
       "assert.deepEqual(Object.keys(rootModule).sort(), Object.keys(browserModule).sort());",
       'assert.equal(typeof rootModule.loadTunelet, "function");',
       "assert.equal(rootModule.default, rootModule.loadTunelet);",
+      "assert.equal(indexModule.default, indexModule.loadTunelet);",
+      "assert.equal(browserModule.default, browserModule.loadTunelet);",
       'assert.equal(typeof rootModule.initSync, "function");',
       'assert.equal(typeof rootModule.Tunelet, "function");',
       'assert.equal(typeof rootModule.defaultConfig, "function");',
@@ -340,6 +471,46 @@ function verifyRuntimeImport(consumerDir, installedDir, packageName) {
       "} finally {",
       "  processor.free();",
       "}",
+    ],
+    [packageName, installedDir],
+  );
+
+  runNodeCheck(
+    consumerDir,
+    "check-index-entry.mjs",
+    [
+      'import assert from "node:assert/strict";',
+      'import { pathToFileURL } from "node:url";',
+      "",
+      "const installedDir = process.argv[2];",
+      "const indexModule = await import(pathToFileURL(`${installedDir}/dist/index.js`).href);",
+      "const wasmExports = await indexModule.loadTunelet();",
+      "assert.ok(wasmExports);",
+      "const processor = new indexModule.Tunelet(48000, 64);",
+      "try {",
+      "  assert.equal(processor.sampleRate, 48000);",
+      "} finally {",
+      "  processor.free();",
+      "}",
+    ],
+    [installedDir],
+  );
+
+  runNodeCheck(
+    consumerDir,
+    "check-index-file-string.mjs",
+    [
+      'import assert from "node:assert/strict";',
+      'import { pathToFileURL } from "node:url";',
+      "",
+      "const packageName = process.argv[2];",
+      "const installedDir = process.argv[3];",
+      "const indexModule = await import(pathToFileURL(`${installedDir}/dist/index.js`).href);",
+      'const absentUrl = new URL("./absent-tunelet.wasm", import.meta.url).href;',
+      "await assert.rejects(() => indexModule.loadTunelet(absentUrl));",
+      "const fileString = import.meta.resolve(`${packageName}/pkg/tunelet_bg.wasm`);",
+      "await indexModule.loadTunelet(fileString);",
+      "assert.equal(indexModule.defaultConfig().resynthesis.harmony.voices, 4);",
     ],
     [packageName, installedDir],
   );
@@ -481,6 +652,7 @@ function runTscProfile(consumerDir, tscBin, profileName, compilerOptions, code) 
         compilerOptions: {
           strict: true,
           exactOptionalPropertyTypes: true,
+          skipLibCheck: false,
           noEmit: true,
           ...compilerOptions,
         },
@@ -498,9 +670,14 @@ function runTscProfile(consumerDir, tscBin, profileName, compilerOptions, code) 
 }
 
 /** Check strict TypeScript resolution across Node, ES2023, DOM and WebWorker. */
-function verifyTypeDeclarations(consumerDir, packageName) {
+function verifyTypeDeclarations(consumerDir, installedDir, packageName) {
   const pkgLiteral = JSON.stringify(packageName);
   const wasmLiteral = JSON.stringify(`${packageName}/wasm`);
+  const pkgWasmLiteral = JSON.stringify(`${packageName}/pkg/tunelet_bg.wasm`);
+  const rootWasmLiteral = JSON.stringify(`${packageName}/tunelet_bg.wasm`);
+  const directIndexLiteral = JSON.stringify(
+    `./${path.posix.join(...path.relative(consumerDir, path.join(installedDir, "dist", "index.js")).split(path.sep))}`,
+  );
   const tscBin = path.join(
     repoRoot,
     "node_modules",
@@ -518,20 +695,29 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "  Tunelet,",
     "  type HarmonyConfig,",
     "  type ProcessorConfig,",
+    "  type SyncInitInput as RootSyncInitInput,",
     `} from ${pkgLiteral};`,
+    `import indexDefaultLoad, { loadTunelet as indexLoadTunelet } from ${directIndexLiteral};`,
     "import init, {",
     "  initSync as wasmInitSync,",
     "  type InitInput,",
     "  type InitOutput,",
+    "  type SyncInitInput,",
     `} from ${wasmLiteral};`,
     "",
     "export async function verifyShared(",
     "  source?: InitInput,",
+    "  syncSource?: SyncInitInput & RootSyncInitInput,",
     "  optionalVoices?: number,",
-    "): Promise<void> {",
+    "): Promise<InitOutput> {",
     "  const exportsFromRoot: InitOutput = await loadTunelet(source);",
     "  const exportsFromNamed: InitOutput = await namedLoadTunelet(source);",
-    "  const exportsFromWasm: InitOutput = await init(source);",
+    "  const exportsFromIndex: InitOutput = await indexLoadTunelet(source);",
+    "  const exportsFromIndexDefault: InitOutput = await indexDefaultLoad(source);",
+    "  const exportsFromWasm: InitOutput =",
+    "    source === undefined",
+    "      ? await init()",
+    "      : await init({ module_or_path: source });",
     "  const config: ProcessorConfig = defaultConfig();",
     "  const harmony: HarmonyConfig = {",
     "    ...config.resynthesis.harmony,",
@@ -561,11 +747,25 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "    },",
     "  ]);",
     "  processor.free();",
-    "  void rootInitSync(new Uint8Array(8));",
-    "  void wasmInitSync({ module: new ArrayBuffer(8) });",
-    "  void exportsFromRoot.memory.buffer;",
+    "  if (syncSource !== undefined) {",
+    "    const syncExportsFromRoot: InitOutput = rootInitSync({",
+    "      module: syncSource,",
+    "    });",
+    "    const syncExportsFromWasm: InitOutput = wasmInitSync({",
+    "      module: syncSource,",
+    "    });",
+    "    void syncExportsFromRoot;",
+    "    void syncExportsFromWasm;",
+    "  }",
+    "  const fixedBuffer: ArrayBuffer = exportsFromRoot.memory.toFixedLengthBuffer();",
+    "  const resizableBuffer: ArrayBuffer = exportsFromRoot.memory.toResizableBuffer();",
+    "  void fixedBuffer;",
+    "  void resizableBuffer;",
     "  void exportsFromNamed;",
+    "  void exportsFromIndex;",
+    "  void exportsFromIndexDefault;",
     "  void exportsFromWasm;",
+    "  return exportsFromRoot;",
     "}",
   ];
 
@@ -583,10 +783,22 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     [
       ...sharedAssertions,
       "",
-      "export async function verifyNodeInputs(): Promise<void> {",
+      "export async function verifyNodeInputs(",
+      "  req: Request,",
+      "  res: Response,",
+      "  url: URL,",
+      "): Promise<void> {",
+      `  const pkgWasmHref: string = import.meta.resolve(${pkgWasmLiteral});`,
+      `  const rootWasmHref: string = import.meta.resolve(${rootWasmLiteral});`,
+      "  await loadTunelet(pkgWasmHref);",
+      "  await loadTunelet(rootWasmHref);",
       '  await loadTunelet("file:///tmp/tunelet_bg.wasm");',
-      '  await loadTunelet(new URL("file:///tmp/tunelet_bg.wasm"));',
+      "  await loadTunelet(url);",
+      "  await loadTunelet(req);",
+      "  await loadTunelet(res);",
       "  await loadTunelet(Buffer.alloc(8));",
+      "  // @ts-expect-error window must not leak into Node.js scope",
+      "  void window;",
       "}",
     ],
   );
@@ -607,8 +819,11 @@ function verifyTypeDeclarations(consumerDir, packageName) {
       "",
       "export async function verifyEs2023Inputs(): Promise<void> {",
       '  await loadTunelet("https://example.com/tunelet_bg.wasm");',
+      '  await loadTunelet({ href: "file:///tunelet_bg.wasm", protocol: "file:" });',
       "  await loadTunelet(new Uint8Array(8));",
       "  await loadTunelet(new ArrayBuffer(8));",
+      "  // @ts-expect-error window must not leak into pure ES2023 scope",
+      "  void window;",
       "}",
     ],
   );
@@ -624,7 +839,14 @@ function verifyTypeDeclarations(consumerDir, packageName) {
       lib: ["ES2023"],
       types: [],
     },
-    sharedAssertions,
+    [
+      ...sharedAssertions,
+      "",
+      "export function verifyNoWindowInNodeNext(): void {",
+      "  // @ts-expect-error window must not leak into pure ES2023 scope",
+      "  void window;",
+      "}",
+    ],
   );
 
   runTscProfile(
@@ -642,13 +864,22 @@ function verifyTypeDeclarations(consumerDir, packageName) {
       ...sharedAssertions,
       "",
       "export async function verifyDomInputs(",
+      "  reqInfo: RequestInfo,",
+      "  req: Request,",
+      "  res: Response,",
+      "  bufferSource: BufferSource,",
       "  compiled: WebAssembly.Module,",
-      "): Promise<void> {",
+      "): Promise<WebAssembly.Memory> {",
+      "  await loadTunelet(reqInfo);",
+      "  await loadTunelet(req);",
+      "  await loadTunelet(res);",
+      "  await loadTunelet(bufferSource);",
       '  await loadTunelet(new URL("./tunelet_bg.wasm", import.meta.url));',
-      '  await loadTunelet(new Request("https://example.com/tunelet_bg.wasm"));',
       '  await loadTunelet(fetch("https://example.com/tunelet_bg.wasm"));',
-      "  await loadTunelet(compiled);",
-      "  void rootInitSync({ module: compiled });",
+      "  const out = await verifyShared(compiled, compiled);",
+      "  const table: WebAssembly.Table = out.__wbindgen_externrefs;",
+      "  void table;",
+      "  return out.memory;",
       "}",
     ],
   );
@@ -668,38 +899,119 @@ function verifyTypeDeclarations(consumerDir, packageName) {
       ...sharedAssertions,
       "",
       "export async function verifyWorkerInputs(",
+      "  reqInfo: RequestInfo,",
+      "  req: Request,",
+      "  res: Response,",
+      "  bufferSource: BufferSource,",
       "  compiled: WebAssembly.Module,",
-      "): Promise<void> {",
+      "): Promise<WebAssembly.Memory> {",
+      "  await loadTunelet(reqInfo);",
+      "  await loadTunelet(req);",
+      "  await loadTunelet(res);",
+      "  await loadTunelet(bufferSource);",
       '  await loadTunelet(new URL("./tunelet_bg.wasm", self.location.href));',
-      '  await loadTunelet(new Request("https://example.com/tunelet_bg.wasm"));',
       '  await loadTunelet(fetch("https://example.com/tunelet_bg.wasm"));',
-      "  await loadTunelet(compiled);",
-      "  void rootInitSync({ module: compiled });",
+      "  const out = await verifyShared(compiled, compiled);",
+      "  const table: WebAssembly.Table = out.__wbindgen_externrefs;",
+      "  void table;",
+      "  // @ts-expect-error window must not leak into WebWorker scope",
+      "  void window;",
+      "  return out.memory;",
       "}",
     ],
   );
 }
 
-const packageName = readPackageName();
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tunelet-verify-pack-"));
-
-try {
-  const packDir = path.join(tempDir, "pack");
-  const consumerDir = path.join(tempDir, "consumer");
-  fs.mkdirSync(packDir);
+/** Check the archive list, runtime imports and TypeScript declarations. */
+function verifyPackedArchive(workDir, relativeArchivePath, packageName) {
+  const consumerDir = path.join(workDir, "consumer");
   fs.mkdirSync(consumerDir);
-
-  const relativeArchivePath = packArchive(packDir);
-  verifyArchiveEntries(tempDir, relativeArchivePath);
+  verifyArchiveEntries(workDir, relativeArchivePath);
   const installedDir = installArchive(
-    tempDir,
+    workDir,
     relativeArchivePath,
     consumerDir,
     packageName,
   );
   verifyInstalledFiles(installedDir);
   verifyRuntimeImport(consumerDir, installedDir, packageName);
-  verifyTypeDeclarations(consumerDir, packageName);
+  verifyTypeDeclarations(consumerDir, installedDir, packageName);
+}
+
+/** Copy both verified archives and write `SHA256SUMS.txt` in `outDir`. */
+function writeVerifiedOutputs(outDir, archives) {
+  fs.mkdirSync(outDir, { recursive: true });
+  const checksumLines = [];
+  for (const { fileName, sourcePath } of archives) {
+    const destinationPath = path.join(outDir, fileName);
+    fs.copyFileSync(sourcePath, destinationPath);
+    const digest = createHash("sha256")
+      .update(fs.readFileSync(destinationPath))
+      .digest("hex");
+    checksumLines.push(`${digest}  ${fileName}`);
+  }
+  fs.writeFileSync(
+    path.join(outDir, "SHA256SUMS.txt"),
+    `${checksumLines.join("\n")}\n`,
+  );
+}
+
+const { outDir } = parseCliOptions(process.argv.slice(2));
+const manifest = readPackageManifest();
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tunelet-verify-pack-"));
+
+try {
+  const unscopedWorkDir = path.join(tempDir, "unscoped");
+  const unscopedPackDir = path.join(unscopedWorkDir, "pack");
+  fs.mkdirSync(unscopedPackDir, { recursive: true });
+  const unscopedFileName = expectedArchiveFileName(
+    UNSCOPED_PACKAGE_NAME,
+    manifest.version,
+  );
+  const unscopedRelativeArchivePath = packArchive(
+    repoRoot,
+    unscopedPackDir,
+    unscopedFileName,
+  );
+  verifyPackedArchive(
+    unscopedWorkDir,
+    unscopedRelativeArchivePath,
+    UNSCOPED_PACKAGE_NAME,
+  );
+
+  const scopedWorkDir = path.join(tempDir, "scoped");
+  const scopedStageDir = path.join(scopedWorkDir, "stage");
+  const scopedPackDir = path.join(scopedWorkDir, "pack");
+  fs.mkdirSync(scopedPackDir, { recursive: true });
+  stageScopedPackage(scopedStageDir, manifest, SCOPED_PACKAGE_NAME);
+  const scopedFileName = expectedArchiveFileName(
+    SCOPED_PACKAGE_NAME,
+    manifest.version,
+  );
+  const scopedRelativeArchivePath = packArchive(
+    scopedStageDir,
+    scopedPackDir,
+    scopedFileName,
+    { ignoreScripts: true },
+  );
+  verifyPackedArchive(
+    scopedWorkDir,
+    scopedRelativeArchivePath,
+    SCOPED_PACKAGE_NAME,
+  );
+
+  if (outDir !== undefined) {
+    writeVerifiedOutputs(outDir, [
+      {
+        fileName: unscopedFileName,
+        sourcePath: path.join(unscopedWorkDir, unscopedRelativeArchivePath),
+      },
+      {
+        fileName: scopedFileName,
+        sourcePath: path.join(scopedWorkDir, scopedRelativeArchivePath),
+      },
+    ]);
+  }
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

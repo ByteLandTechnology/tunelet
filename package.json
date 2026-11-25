@@ -1,6 +1,6 @@
 {
   "name": "tunelet",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Vocal pitch correction, choir, harmony, formant control and effects for WebAssembly",
   "license": "MIT",
   "repository": {
@@ -8,18 +8,23 @@
     "url": "git+https://github.com/ByteLandTechnology/tunelet.git"
   },
   "type": "module",
-  "main": "./dist/browser.js",
-  "types": "./dist/browser.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "browser": {
+        "types": "./dist/browser.d.ts",
+        "import": "./dist/browser.js",
+        "default": "./dist/browser.js"
+      },
       "node": {
         "types": "./dist/node.d.ts",
+        "import": "./dist/node.js",
         "default": "./dist/node.js"
       },
-      "default": {
-        "types": "./dist/browser.d.ts",
-        "default": "./dist/browser.js"
-      }
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js",
+      "default": "./dist/browser.js"
     },
     "./wasm": {
       "types": "./pkg/tunelet.d.ts",
