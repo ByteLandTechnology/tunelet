@@ -440,7 +440,7 @@ page that opens the JavaScript.
 | Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
 | Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`         |
 | Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)` |
-| Configured tail budget            | `tailFrames()`                                           |
+| Tail budget                       | `tailFrames()`                                           |
 | Reset or release memory           | `reset()`, `free()`                                      |
 
 ### Audio buffers

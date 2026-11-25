@@ -68,8 +68,9 @@
 //!
 //! After the last input block, call [`Processor::begin_drain`] one time. Then
 //! render drain blocks until a call returns zero. Each call fills the unused
-//! output with zeros. The drain uses a finite configured budget and mutes
-//! aspiration. It is not a silence detector.
+//! output with zeros. The drain uses the finite budget from
+//! [`Processor::tail_frames`] and mutes aspiration. It is not a silence
+//! detector.
 //!
 //! The call that uses all of the budget does the same reset as
 //! [`Processor::reset`]. This occurs also if that call returns audio. A

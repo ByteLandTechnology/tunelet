@@ -311,12 +311,13 @@ impl Processor {
         Ok(count)
     }
 
-    /// Returns the finite tail budget for the current configuration.
+    /// Returns the finite tail budget for the current configuration and active
+    /// stage transitions.
     ///
-    /// This value is a configured limit. It is not the number of drain frames
-    /// that are left, and it is not a measured decay time. It can include
-    /// silence. It can also stop filter output that continues for a long
-    /// time.
+    /// The budget includes active Alien ramps, reverb mode fades and reverb
+    /// bypass tails. It is not the number of drain frames that are left. It is
+    /// not a measured decay time. It can include silence. It can also stop
+    /// filter output that continues for a long time.
     pub fn tail_frames(&self) -> usize {
         self.resynthesis
             .tail_frames()
