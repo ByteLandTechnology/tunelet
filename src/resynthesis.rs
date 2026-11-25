@@ -36,7 +36,7 @@ use crate::formant::{Formant, FormantConfig, ANALYSIS_FRAMES};
 use crate::harmony::{HarmonyConfig, HarmonyState, HARMONY_VOICES};
 use crate::midi::MidiEvent;
 use crate::numeric::fixed::{Q12, Q14, Q6, Q8};
-use crate::numeric::{clamp_i32, ring, NumericContext, HISTORY};
+use crate::numeric::{clamp_i32, quadratic, ring, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
@@ -75,12 +75,9 @@ pub enum MultiVoiceMode {
 /// mask again. Reset releases the correction keys 0..=126. It keeps key 127
 /// and the active note table. Key 127 has no effect on the note table.
 ///
-/// At construction, the chromatic table uses 44.1 kHz periods, also for a
-/// 48 kHz processor. Each of these events loads the periods for the prepared
-/// rate:
-/// - An initial mask that is not chromatic.
-/// - A later change to the mask or to `enabled`.
-/// - A correction MIDI event.
+/// Construction loads the configured `notes` mask with the periods for the
+/// prepared sample rate. Later changes to `notes`, to `enabled` or from
+/// correction MIDI also use the periods for the prepared sample rate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -175,10 +172,11 @@ impl CorrectionConfig {
 /// Validation applies to all controls, also when their stage or voice mode
 /// is not active.
 ///
-/// The dry path takes the audio after Punch and Warm and delays it by 1,543
-/// frames. The wet voice readers have more delay, which changes with the
-/// pitch. After this stage, the two paths go through Alien, reverb and the
-/// final output gain.
+/// The dry path takes the audio after Punch and Warm and delays it by 1,593
+/// frames. At unity pitch and zero choir delay, the wet voices have the same
+/// nominal delay. Resampled voices and choir delays use different delays.
+/// After this stage, the two paths go through Alien, reverb and the final
+/// output gain.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -261,7 +259,7 @@ pub struct ResynthesisConfig {
     ///
     /// The code truncates this value to Q8. The wet weight is 1.0 minus the
     /// Q8 dry weight. The dry path starts after Punch and Warm and has a
-    /// delay of 1,543 frames. Alien, reverb and the output gain still occur
+    /// delay of 1,593 frames. Alien, reverb and the output gain still occur
     /// after this stage.
     pub dry_mix: f32,
     /// The seed for choir drift and aspiration, which use the same stream.
@@ -343,8 +341,7 @@ const SEEDS: [i32; 16] = [
     0x0dda, 0x01da, 0x167f, 0x0896,
 ];
 
-/// The length of the analysis overlap buffer. The dry path has the same
-/// delay.
+/// The length of the analysis overlap buffer.
 const OVERLAP_FRAMES: usize = 1543;
 /// The offset from the history position of a reader to its position for
 /// formant synthesis.
@@ -354,7 +351,7 @@ const READER_LAG_FRAMES: i32 = 50;
 /// The nominal latency of resynthesis. Each reader moves with the pitch and
 /// the delay.
 ///
-/// The dry path uses only `OVERLAP_FRAMES`.
+/// The dry path also uses `LATENCY_FRAMES`.
 pub(crate) const LATENCY_FRAMES: usize = OVERLAP_FRAMES + READER_LAG_FRAMES as usize;
 /// The counter value at which a control step runs. Usually, a step runs
 /// every 101 eligible frames.
@@ -540,17 +537,7 @@ impl Resynthesis {
             },
             formant: Formant::new(rate, config.formant),
             harmony: HarmonyState::new(rate, config.harmony),
-            scale: {
-                // The initial chromatic table uses 44.1 kHz periods at the two
-                // rates. If the notes load again, the periods for the
-                // configured rate become active.
-                let mut scale = CorrectionTable::new(SampleRate::Hz44100, NoteMask::default());
-                scale.set_sample_rate(rate);
-                if config.correction.notes != NoteMask::default() {
-                    scale.set_notes(config.correction.notes);
-                }
-                scale
-            },
+            scale: CorrectionTable::new(rate, config.correction.notes),
             filtered: prepare_history(Q14::ZERO),
             lead: prepare_history(Q14::ZERO),
             periods: prepare_history(Q6::ZERO),
@@ -716,6 +703,7 @@ impl Resynthesis {
         }
         if old.pitch_ratio != config.pitch_ratio {
             self.configure_shift_filters();
+            self.scale_initialized = false;
         }
         if old.mode != config.mode || old.choir_delay != config.choir_delay {
             self.create_delays();
@@ -951,9 +939,9 @@ impl Resynthesis {
     /// search moves through the midpoints, also across octave limits. The
     /// global shift is part of the normalization.
     ///
-    /// If target selection starts again and the shifted period is not
-    /// positive, returns `None`. If correction is disabled or the active table
-    /// is empty, returns `Some(Q14::ONE)`.
+    /// If the shifted period is not positive, the function clears
+    /// `scale_initialized` and returns `None`. If correction is disabled or
+    /// the active table is empty, the function returns `Some(Q14::ONE)`.
     fn select_target_ratio(&mut self, period: Q6) -> Option<Q14> {
         let mut target_ratio = Q14::ONE;
         if self.config.correction.enabled && self.scale.count != 0 {
@@ -963,7 +951,6 @@ impl Resynthesis {
             let table_period = |index: usize| Q6::from_bits(self.scale.midpoints[index]);
             let mut target: Q6;
             if !self.scale_initialized {
-                self.scale_initialized = true;
                 self.scale_index = 0;
                 self.octave = 0;
                 target = self.shift.mul(period);
@@ -977,12 +964,20 @@ impl Resynthesis {
                         break;
                     }
                 }
+                if target <= Q6::ZERO {
+                    return None;
+                }
+                self.scale_initialized = true;
             }
             target = self.shift.mul(if self.octave >= 0 {
                 period << self.octave as u32
             } else {
                 period >> (-self.octave) as u32
             });
+            if target <= Q6::ZERO {
+                self.scale_initialized = false;
+                return None;
+            }
             while table_period(self.scale_index + 1) < target {
                 self.scale_index += 1;
                 if self.scale_index == count {
@@ -1287,12 +1282,18 @@ impl Resynthesis {
         // of the source is OVERLAP_FRAMES in the two formant modes.
         let overlap_read = (self.overlap_index + ANALYSIS_FRAMES) % OVERLAP_FRAMES;
         let mut filtered = self.overlap[overlap_read];
-        for filter in &mut self.post {
-            filtered = filter.process_sample(filtered);
+        if self.config.pitch_ratio > 1.0 {
+            for filter in &mut self.post {
+                filtered = filter.process_sample(filtered);
+            }
+        } else {
+            for filter in &mut self.post {
+                filtered = filter.bypass_sample(filtered);
+            }
         }
         self.filtered[write] = filtered;
         let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
-        let dry = self.raw[delayed];
+        let dry = self.raw[ring(write as i32 - LATENCY_FRAMES as i32)];
         let mut mix = [Q14::ZERO; 2];
         let mut final_ratio = Q14::ONE;
         if self.config.mode == MultiVoiceMode::Choir {
@@ -1467,9 +1468,7 @@ impl Resynthesis {
             let left = self.cosine[(index + 127) % 128];
             let middle = self.cosine[index];
             let right = self.cosine[(index + 1) % 128];
-            let cosine = middle
-                + ((((left + right) >> 1) - middle).mul::<14, 14>(frac) + ((right - left) >> 1))
-                    .mul(frac);
+            let cosine = quadratic(left, middle, right, frac);
             for sum in &mut mix {
                 *sum = sum.mul(cosine);
             }
