@@ -163,9 +163,7 @@ pub(crate) struct CorrectionTable {
     /// If the sample rate changes, `set_sample_rate` builds the active targets
     /// again from these periods.
     base_periods: [i32; 12],
-    /// The held MIDI keys.
-    ///
-    /// A reset keeps key 127, and mask creation excludes it.
+    /// The held MIDI keys 0..=127.
     pub keyboard: [bool; 128],
     /// The keys that Note Off released while sustain was active.
     sustained: [bool; 128],
@@ -250,21 +248,22 @@ impl CorrectionTable {
         self.pitch_bend_semitones = semitones;
         self.bend_ratio = bend_ratio(self.pitch_bend, semitones);
     }
-    /// Releases keys 0..=126, clears sustain and pitch bend, and keeps key 127
-    /// and the active target table.
-    ///
-    /// A later note or All Notes Off event builds the table again from the new
-    /// keyboard state.
-    pub(crate) fn reset(&mut self) {
-        self.keyboard[..127].fill(false);
+    /// Releases keys 0..=127, clears sustain and pitch bend, and loads `notes`
+    /// again.
+    pub(crate) fn reset(&mut self, notes: NoteMask) {
+        self.keyboard.fill(false);
         self.sustained.fill(false);
         self.sustain_held.fill(false);
         self.pitch_bend = 0;
         self.bend_ratio = Q14::ONE;
+        self.set_notes(notes);
     }
     /// Applies an event whose MIDI ranges were already checked, and returns
     /// `true` if the active note table reloaded.
-    pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent) -> bool {
+    ///
+    /// If no key in 0..=127 is held or sustained, this method loads `notes`
+    /// again.
+    pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent, notes: NoteMask) -> bool {
         match event {
             MidiEvent::NoteOn { note, velocity, .. } if velocity != 0 => {
                 let idx = usize::from(note);
@@ -290,20 +289,26 @@ impl CorrectionTable {
                 if held || self.sustain_held.contains(&true) {
                     return false;
                 }
-                let had_sustained = self.sustained[..127].contains(&true);
+                let had_sustained = self.sustained.contains(&true);
                 self.sustained.fill(false);
                 if !had_sustained {
                     return false;
                 }
             }
-            MidiEvent::AllNotesOff => self.reset(),
+            MidiEvent::AllNotesOff => {
+                self.reset(notes);
+                return true;
+            }
         }
         let mut mask = [false; 12];
-        // Correction excludes key 127, and a reset keeps that key.
-        for i in 0..127 {
+        for i in 0..128 {
             mask[i % 12] |= self.keyboard[i] || self.sustained[i];
         }
-        self.set_notes(NoteMask(mask));
+        if mask == [false; 12] {
+            self.set_notes(notes);
+        } else {
+            self.set_notes(NoteMask(mask));
+        }
         true
     }
 }

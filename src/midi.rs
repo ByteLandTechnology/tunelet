@@ -70,8 +70,9 @@ pub enum MidiEvent {
     /// channels. In MIDI-chord mode, it also releases the chord voices. The
     /// gain envelopes do not change, so the released voices decay. The
     /// prepared targets of the named and degree chord sources do not change.
-    /// For the correction keyboard, it clears keys 0..=126, sustained notes,
-    /// sustain pedals and pitch bend, and keeps key 127.
+    /// For the correction keyboard, it clears keys 0..=127, sustained notes,
+    /// sustain pedals and pitch bend, and loads the configured correction
+    /// notes again.
     AllNotesOff,
 }
 

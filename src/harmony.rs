@@ -36,7 +36,8 @@ const GAIN_RELEASE: Q12 = Q12::from_bits(81);
 /// The default is [`Self::MidiChannels`]. The static interval and chord
 /// sources use the related [`HarmonyConfig`] fields. The MIDI sources use
 /// [`crate::ControlEvent::Midi`]. The configuration of the sources that are
-/// not selected is still validated and kept.
+/// not selected is still validated and kept. If the selected source changes,
+/// the active MIDI notes release.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -321,11 +322,11 @@ pub struct HarmonyConfig {
     /// [`HarmonySource::SmartInterval`] use the first `voices` voices. The
     /// other voices release with the usual gain envelope. The chord and MIDI
     /// sources ignore this field. In JavaScript, the field is optional and
-    /// a missing value gives the default.
+    /// an absent or `undefined` value gives the default.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(default = "default_voices"),
-        tsify(optional)
+        serde(default = "default_voices", deserialize_with = "deserialize_voices"),
+        tsify(optional, type = "number | undefined")
     )]
     pub voices: u8,
     /// The maximum pitch bend in semitones, 0..=24.
@@ -333,11 +334,14 @@ pub struct HarmonyConfig {
     /// The default is 2. A [`MidiEvent::PitchBend`] value of -8192 lowers the
     /// pitch by this range, and 8191 raises the pitch by this range. Zero
     /// disables pitch bend. In JavaScript, the field is optional and an absent
-    /// value gives the default.
+    /// or `undefined` value gives the default.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(default = "default_pitch_bend_semitones"),
-        tsify(optional)
+        serde(
+            default = "default_pitch_bend_semitones",
+            deserialize_with = "deserialize_pitch_bend_semitones"
+        ),
+        tsify(optional, type = "number | undefined")
     )]
     pub pitch_bend_semitones: f32,
 }
@@ -348,10 +352,26 @@ fn default_voices() -> u8 {
     HARMONY_VOICES as u8
 }
 
+/// Decodes an optional interval voice count and maps an absent value to 4.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn deserialize_voices<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<u8>::deserialize(deserializer)?.unwrap_or_else(default_voices))
+}
+
 /// The default pitch-bend range in semitones.
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 fn default_pitch_bend_semitones() -> f32 {
     2.0
+}
+
+/// Decodes an optional pitch-bend range and maps an absent value to 2.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn deserialize_pitch_bend_semitones<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<f32, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<f32>::deserialize(deserializer)?.unwrap_or_else(default_pitch_bend_semitones))
 }
 
 impl Default for HarmonyConfig {
@@ -555,21 +575,12 @@ impl HarmonyState {
 
     /// Applies a configuration that validation already accepted.
     ///
-    /// If the source changes to an interval source or to a named or degree
-    /// chord source, the function calls `reset`. It prepares the tables
-    /// again only for the fields that changed.
+    /// If the source changes, the function calls `reset`. It prepares the
+    /// tables again only for the fields that changed.
     pub(crate) fn apply_config(&mut self, config: HarmonyConfig) {
         let old = self.config;
         self.config = config;
-        if old.source != config.source
-            && matches!(
-                config.source,
-                HarmonySource::FixedInterval
-                    | HarmonySource::SmartInterval
-                    | HarmonySource::ChordByDegree
-                    | HarmonySource::ChordByName
-            )
-        {
+        if old.source != config.source {
             self.reset();
         }
         if old.key != config.key
@@ -764,11 +775,13 @@ impl HarmonyState {
     /// are already in range.
     /// Returns `true` if resynthesis must make its next control step due.
     /// This occurs after a new note assignment, after an unheld Note Off or
-    /// pedal release in the omni sources, and after an active Pitch Bend. The
-    /// omni sources steal the oldest voice and resume the newest pending note.
-    /// While sustain is active, Note Off latches active notes until the pedal
-    /// releases. All Notes Off calls `reset` and returns `false`. The gain
-    /// releases occur at the next control steps.
+    /// pedal release on a channel that the MIDI source uses, and after an
+    /// active Pitch Bend. The omni sources steal the oldest voice and resume
+    /// the newest pending note. If two orders are equal, strict comparisons
+    /// keep the lowest voice index or pitch. While sustain is active, Note Off
+    /// latches active notes until the pedal releases. All Notes Off calls
+    /// `reset` and returns `false`. The gain releases occur at the next
+    /// control steps.
     pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent) -> bool {
         let (channel, note, velocity) = match event {
             MidiEvent::AllNotesOff => {
@@ -866,15 +879,19 @@ impl HarmonyState {
                         if self.sustain_held[voice] {
                             self.voice_sustained[voice] = true;
                             self.sustained[note] = true;
+                            false
                         } else {
                             self.midi_period[voice] = Q6::ZERO;
                             self.voice_sustained[voice] = false;
                             self.clear_pending(note);
+                            true
                         }
-                    } else if !self.sustain_held[voice] {
-                        self.clear_pending(note);
+                    } else {
+                        if !self.sustain_held[voice] {
+                            self.clear_pending(note);
+                        }
+                        true
                     }
-                    false
                 } else {
                     if self.voice_sustained[voice] && self.midi_period[voice] != Q6::ZERO {
                         let old_note = self.midi_note[voice] as usize;
@@ -944,17 +961,20 @@ impl HarmonyState {
             return false;
         }
         if self.config.source == HarmonySource::MidiChannels && channel < HARMONY_VOICES {
+            let mut released = false;
             if self.voice_sustained[channel] {
                 self.voice_sustained[channel] = false;
                 if self.midi_period[channel] != Q6::ZERO {
                     let note = self.midi_note[channel] as usize;
                     self.midi_period[channel] = Q6::ZERO;
                     self.clear_sustained_if_unused(note);
+                    released = true;
                 }
             }
             if !self.sustain_held.contains(&true) {
                 self.sustained.fill(false);
             }
+            return released;
         } else if !self.sustain_held.contains(&true) {
             self.sustained.fill(false);
             self.voice_sustained.fill(false);
