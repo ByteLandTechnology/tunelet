@@ -520,12 +520,12 @@ impl Processor {
     /// This method cancels an active drain. It also clears the correction
     /// ratio, the Punch envelopes, the Warm filters, the Alien recording and
     /// the reverb delays. It releases the harmony MIDI notes and, in
-    /// MIDI-chord mode, the chord voices. It keeps these items:
+    /// MIDI-chord mode, the chord voices. It releases correction keys 0..=127
+    /// and loads the configured correction notes again. It keeps these items:
     ///
     /// - the configuration
     /// - the random stream and the arctangent lookup position of Punch
     /// - the reverb low-pass memories and the reverb write position
-    /// - correction key 127 and the active correction note table
     /// - the last usable period of the pitch tracker, which fills unvoiced
     ///   gaps
     /// - the harmony gain envelopes and the last voice ratios of the harmony
@@ -535,8 +535,7 @@ impl Processor {
     /// - the control-step counter of Choir and Harmony
     /// - the phase of the harmonic modulation.
     ///
-    /// When the method clears the held keys, it does not load the configured
-    /// scale again. For a fully new state, make a new processor.
+    /// For a fully new state, make a new processor.
     pub fn reset(&mut self) {
         self.punch.reset();
         self.warm.reset();

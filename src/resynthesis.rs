@@ -68,10 +68,11 @@ pub enum MultiVoiceMode {
 /// empty or correction is disabled, the ratio moves toward 1.0 at the same
 /// rate.
 ///
-/// Correction MIDI replaces the active note table. It does not change this
-/// configuration. A change to `notes` or to `enabled` loads the configured
-/// mask again. Reset releases the correction keys 0..=126. It keeps key 127
-/// and the active note table. Key 127 has no effect on the note table.
+/// While at least one key in 0..=127 is held, correction MIDI replaces the
+/// active note table. It does not change this configuration. When all keys
+/// release, on All Notes Off or on reset, the configured `notes` load again.
+/// A change to `notes` or to `enabled` also loads the configured mask again.
+/// Reset releases the correction keys 0..=127.
 ///
 /// Construction loads the configured `notes` mask with the periods for the
 /// prepared sample rate. Later changes to `notes`, to `enabled` or from
@@ -93,8 +94,9 @@ pub struct CorrectionConfig {
     /// The configured target pitch classes. The default is
     /// [`NoteMask::CHROMATIC`].
     ///
-    /// All boolean masks are valid. MIDI can replace the active table. This
-    /// replacement stays until this mask or `enabled` changes.
+    /// All boolean masks are valid. Held keys from correction MIDI replace the
+    /// active table. When all keys release, or if this mask or `enabled`
+    /// changes, this mask loads again.
     pub notes: NoteMask,
     /// The half-life of the smoothing in milliseconds, 0..=400. The default
     /// is 0.
@@ -665,12 +667,13 @@ impl Resynthesis {
         }
     }
 
-    /// Releases the correction keys 0..=126 and resets the audio state.
+    /// Releases the correction keys 0..=127, loads the configured correction
+    /// notes again and resets the audio state.
     ///
-    /// The active correction table, key 127 and the items that
-    /// `reset_audio` keeps do not change.
+    /// The items that `reset_audio` keeps do not change, except the correction
+    /// keyboard and the active note table.
     pub(crate) fn reset(&mut self) {
-        self.scale.reset();
+        self.scale.reset(self.config.correction.notes);
         self.reset_audio();
     }
 
@@ -750,7 +753,8 @@ impl Resynthesis {
     /// Applies a correction MIDI event that the API or the block code checked
     /// before.
     pub(crate) fn apply_correction_midi(&mut self, event: MidiEvent) {
-        self.scale.apply_validated_midi(event);
+        self.scale
+            .apply_validated_midi(event, self.config.correction.notes);
         self.scale_initialized = false;
     }
 
