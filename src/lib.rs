@@ -50,19 +50,20 @@
 //! # Feedback, latency and lifecycle
 //!
 //! [`Processor::feedback`] gives the pitch, the correction ratio, the
-//! accumulated stereo peak and the frame count.
+//! accumulated output peak and the frame count.
 //! [`Processor::take_feedback`] also clears the peak window. The pitch
 //! reporting bounds change only the reports. They do not change the detection
 //! or the audio signal. [`Processor::latency_frames`] gives a nominal
-//! resynthesis delay. Voice delays, pitch changes and effects have their own
-//! timing.
+//! resynthesis delay, which the dry path also uses. Voice delays, pitch
+//! changes and effects have their own timing.
 //!
 //! [`Processor::telemetry`] gives data for meters and displays: the ratio and
 //! the gain of each voice, the input and output peaks, the pitch clarity and
-//! the state of the effects. [`Processor::take_telemetry`] also clears the
-//! peak windows of the telemetry. [`Processor::formant_envelope`] writes the
-//! LPC envelopes before and after the formant controls. These calls do not
-//! change the audio.
+//! the state of the effects. In mono calls, the feedback and telemetry peaks
+//! measure the audio after the downmix. [`Processor::take_telemetry`] also
+//! clears the peak windows of the telemetry. [`Processor::formant_envelope`]
+//! writes the LPC envelopes before and after the formant controls. These calls
+//! do not change the audio.
 //!
 //! After the last input block, call [`Processor::begin_drain`] one time. Then
 //! render drain blocks until a call returns zero. Each call fills the unused
@@ -83,9 +84,9 @@
 //! Construction allocates the audio storage. After construction, the calls for
 //! audio, controls, feedback, reset and drain do not allocate memory. They do
 //! not acquire locks and do no I/O. Each processor owns its histories and its
-//! random stream. Fixed-point arithmetic uses explicit wrapping and
-//! quantization. If you change the order of the arithmetic, the samples can
-//! change.
+//! random stream. Fixed-point arithmetic uses `i64` products, saturated
+//! `i32` bounds and explicit quantization. If you change the order of the
+//! arithmetic, the samples can change.
 //!
 //! The default build uses only safe Rust and has no dependencies.
 //!
