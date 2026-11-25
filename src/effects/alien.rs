@@ -53,8 +53,13 @@ impl AlienConfig {
     /// Returns the first [`Error::InvalidConfig`] with its dotted field path
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_count("alien.loop_frames", i64::from(self.loop_frames), 1, 96_000)
+        validate_loop_frames(self.loop_frames)
     }
+}
+
+/// Checks the range of the loop length of Alien.
+pub(crate) fn validate_loop_frames(loop_frames: u32) -> Result<(), Error> {
+    check_count("alien.loop_frames", i64::from(loop_frames), 1, 96_000)
 }
 
 /// Optional changes to [`AlienConfig`].
@@ -88,7 +93,7 @@ impl AlienConfigPatch {
     /// Checks all supplied fields and does not change the processor state.
     pub(crate) fn validate(self) -> Result<(), Error> {
         if let Some(loop_frames) = self.loop_frames {
-            check_count("alien.loop_frames", i64::from(loop_frames), 1, 96_000)?;
+            validate_loop_frames(loop_frames)?;
         }
         Ok(())
     }

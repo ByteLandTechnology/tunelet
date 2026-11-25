@@ -90,11 +90,31 @@ impl PunchConfig {
     /// Returns the first [`Error::InvalidConfig`] with its dotted field path
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("punch.gain_db", self.gain_db, -96.0, 12.0)?;
-        check_range("punch.impact", self.impact, 0.0, 1.0)?;
-        check_range("punch.ceiling_db", self.ceiling_db, -96.0, 0.0)?;
-        check_range("punch.attack_ms", self.attack_ms, 0.01, 5000.0)
+        validate_gain_db(self.gain_db)?;
+        validate_impact(self.impact)?;
+        validate_ceiling_db(self.ceiling_db)?;
+        validate_attack_ms(self.attack_ms)
     }
+}
+
+/// Checks the range of the input gain of Punch.
+pub(crate) fn validate_gain_db(gain_db: f32) -> Result<(), Error> {
+    check_range("punch.gain_db", gain_db, -96.0, 12.0)
+}
+
+/// Checks the range of the transient emphasis of Punch.
+pub(crate) fn validate_impact(impact: f32) -> Result<(), Error> {
+    check_range("punch.impact", impact, 0.0, 1.0)
+}
+
+/// Checks the range of the output ceiling of Punch.
+pub(crate) fn validate_ceiling_db(ceiling_db: f32) -> Result<(), Error> {
+    check_range("punch.ceiling_db", ceiling_db, -96.0, 0.0)
+}
+
+/// Checks the range of the attack half-life of Punch.
+pub(crate) fn validate_attack_ms(attack_ms: f32) -> Result<(), Error> {
+    check_range("punch.attack_ms", attack_ms, 0.01, 5000.0)
 }
 
 /// Optional changes to [`PunchConfig`].
@@ -128,14 +148,14 @@ pub struct PunchConfigPatch {
         tsify(optional)
     )]
     pub impact: Option<f32>,
-    /// The output limit of the saturation in dBFS, -96..=0.
+    /// The output ceiling of the saturation in dBFS, -96..=0.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
         tsify(optional)
     )]
     pub ceiling_db: Option<f32>,
-    /// The attack half-life of the peak follower in milliseconds, 0.01..=5000.
+    /// The attack half-life of the peak followers in milliseconds, 0.01..=5000.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
@@ -148,16 +168,16 @@ impl PunchConfigPatch {
     /// Checks all supplied fields and does not change the processor state.
     pub(crate) fn validate(self) -> Result<(), Error> {
         if let Some(gain_db) = self.gain_db {
-            check_range("punch.gain_db", gain_db, -96.0, 12.0)?;
+            validate_gain_db(gain_db)?;
         }
         if let Some(impact) = self.impact {
-            check_range("punch.impact", impact, 0.0, 1.0)?;
+            validate_impact(impact)?;
         }
         if let Some(ceiling_db) = self.ceiling_db {
-            check_range("punch.ceiling_db", ceiling_db, -96.0, 0.0)?;
+            validate_ceiling_db(ceiling_db)?;
         }
         if let Some(attack_ms) = self.attack_ms {
-            check_range("punch.attack_ms", attack_ms, 0.01, 5000.0)?;
+            validate_attack_ms(attack_ms)?;
         }
         Ok(())
     }

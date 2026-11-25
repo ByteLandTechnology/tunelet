@@ -95,13 +95,41 @@ impl FormantConfig {
     /// Returns the first [`Error::InvalidConfig`], with the dotted path of the
     /// field and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("resynthesis.formant.width", self.width, 0.5, 2.0)?;
-        check_range("resynthesis.formant.stretch", self.stretch, 0.5, 2.0)?;
-        let field = "resynthesis.formant.aspiration_mix";
-        check_range(field, self.aspiration_mix, 0.0, 1.0)?;
-        let field = "resynthesis.formant.aspiration_cutoff_hz";
-        check_range(field, self.aspiration_cutoff_hz, 500.0, 10000.0)
+        validate_width(self.width)?;
+        validate_stretch(self.stretch)?;
+        validate_aspiration_mix(self.aspiration_mix)?;
+        validate_aspiration_cutoff_hz(self.aspiration_cutoff_hz)
     }
+}
+
+/// Checks the range of the vocal-tract width.
+pub(crate) fn validate_width(width: f32) -> Result<(), Error> {
+    check_range("resynthesis.formant.width", width, 0.5, 2.0)
+}
+
+/// Checks the range of the vocal-tract length.
+pub(crate) fn validate_stretch(stretch: f32) -> Result<(), Error> {
+    check_range("resynthesis.formant.stretch", stretch, 0.5, 2.0)
+}
+
+/// Checks the range of the aspiration mix.
+pub(crate) fn validate_aspiration_mix(aspiration_mix: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.formant.aspiration_mix",
+        aspiration_mix,
+        0.0,
+        1.0,
+    )
+}
+
+/// Checks the range of the aspiration high-pass cutoff.
+pub(crate) fn validate_aspiration_cutoff_hz(aspiration_cutoff_hz: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.formant.aspiration_cutoff_hz",
+        aspiration_cutoff_hz,
+        500.0,
+        10000.0,
+    )
 }
 
 /// Optional changes to [`FormantConfig`].
@@ -155,18 +183,16 @@ impl FormantConfigPatch {
     /// Checks all supplied fields and does not change the processor state.
     pub(crate) fn validate(self) -> Result<(), Error> {
         if let Some(width) = self.width {
-            check_range("resynthesis.formant.width", width, 0.5, 2.0)?;
+            validate_width(width)?;
         }
         if let Some(stretch) = self.stretch {
-            check_range("resynthesis.formant.stretch", stretch, 0.5, 2.0)?;
+            validate_stretch(stretch)?;
         }
         if let Some(aspiration_mix) = self.aspiration_mix {
-            let field = "resynthesis.formant.aspiration_mix";
-            check_range(field, aspiration_mix, 0.0, 1.0)?;
+            validate_aspiration_mix(aspiration_mix)?;
         }
         if let Some(aspiration_cutoff_hz) = self.aspiration_cutoff_hz {
-            let field = "resynthesis.formant.aspiration_cutoff_hz";
-            check_range(field, aspiration_cutoff_hz, 500.0, 10000.0)?;
+            validate_aspiration_cutoff_hz(aspiration_cutoff_hz)?;
         }
         Ok(())
     }

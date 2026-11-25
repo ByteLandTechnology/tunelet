@@ -369,27 +369,75 @@ impl HarmonyConfig {
     /// and the problem. For an array control, the error identifies the array
     /// field, not the index of an element.
     pub fn validate(self) -> Result<(), Error> {
-        for interval in self.chromatic_intervals {
-            let field = "resynthesis.harmony.chromatic_intervals";
-            check_count(field, i64::from(interval), -24, 24)?;
-        }
-        for interval in self.diatonic_intervals {
-            let field = "resynthesis.harmony.diatonic_intervals";
-            check_count(field, i64::from(interval), -14, 14)?;
-        }
-        let field = "resynthesis.harmony.voices";
-        check_count(field, i64::from(self.voices), 0, HARMONY_VOICES as i64)?;
-        let field = "resynthesis.harmony.register_percent";
-        check_range(field, self.register_percent, 0.0, 100.0)?;
-        let field = "resynthesis.harmony.voicing_spread_percent";
-        check_range(field, self.voicing_spread_percent, 0.0, 100.0)?;
-        check_range(
-            "resynthesis.harmony.portamento_ms",
-            self.portamento_ms,
-            0.0,
-            10_000.0,
-        )
+        validate_chromatic_intervals(self.chromatic_intervals)?;
+        validate_diatonic_intervals(self.diatonic_intervals)?;
+        validate_voices(self.voices)?;
+        validate_register_percent(self.register_percent)?;
+        validate_voicing_spread_percent(self.voicing_spread_percent)?;
+        validate_portamento_ms(self.portamento_ms)
     }
+}
+
+/// Checks the four fixed semitone offsets of harmony.
+pub(crate) fn validate_chromatic_intervals(
+    chromatic_intervals: [i8; HARMONY_VOICES],
+) -> Result<(), Error> {
+    for interval in chromatic_intervals {
+        let field = "resynthesis.harmony.chromatic_intervals";
+        check_count(field, i64::from(interval), -24, 24)?;
+    }
+    Ok(())
+}
+
+/// Checks the four offsets in scale steps of harmony.
+pub(crate) fn validate_diatonic_intervals(
+    diatonic_intervals: [i8; HARMONY_VOICES],
+) -> Result<(), Error> {
+    for interval in diatonic_intervals {
+        let field = "resynthesis.harmony.diatonic_intervals";
+        check_count(field, i64::from(interval), -14, 14)?;
+    }
+    Ok(())
+}
+
+/// Checks the count of interval harmony voices.
+pub(crate) fn validate_voices(voices: u8) -> Result<(), Error> {
+    check_count(
+        "resynthesis.harmony.voices",
+        i64::from(voices),
+        0,
+        HARMONY_VOICES as i64,
+    )
+}
+
+/// Checks the range of the chord register.
+pub(crate) fn validate_register_percent(register_percent: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.harmony.register_percent",
+        register_percent,
+        0.0,
+        100.0,
+    )
+}
+
+/// Checks the range of the chord spread.
+pub(crate) fn validate_voicing_spread_percent(voicing_spread_percent: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.harmony.voicing_spread_percent",
+        voicing_spread_percent,
+        0.0,
+        100.0,
+    )
+}
+
+/// Checks the range of the portamento half-life.
+pub(crate) fn validate_portamento_ms(portamento_ms: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.harmony.portamento_ms",
+        portamento_ms,
+        0.0,
+        10_000.0,
+    )
 }
 
 /// Optional changes to [`HarmonyConfig`].
@@ -493,36 +541,22 @@ impl HarmonyConfigPatch {
     /// Checks all supplied fields and does not change the processor state.
     pub(crate) fn validate(self) -> Result<(), Error> {
         if let Some(chromatic_intervals) = self.chromatic_intervals {
-            for interval in chromatic_intervals {
-                let field = "resynthesis.harmony.chromatic_intervals";
-                check_count(field, i64::from(interval), -24, 24)?;
-            }
+            validate_chromatic_intervals(chromatic_intervals)?;
         }
         if let Some(diatonic_intervals) = self.diatonic_intervals {
-            for interval in diatonic_intervals {
-                let field = "resynthesis.harmony.diatonic_intervals";
-                check_count(field, i64::from(interval), -14, 14)?;
-            }
+            validate_diatonic_intervals(diatonic_intervals)?;
         }
         if let Some(voices) = self.voices {
-            let field = "resynthesis.harmony.voices";
-            check_count(field, i64::from(voices), 0, HARMONY_VOICES as i64)?;
+            validate_voices(voices)?;
         }
         if let Some(register_percent) = self.register_percent {
-            let field = "resynthesis.harmony.register_percent";
-            check_range(field, register_percent, 0.0, 100.0)?;
+            validate_register_percent(register_percent)?;
         }
         if let Some(voicing_spread_percent) = self.voicing_spread_percent {
-            let field = "resynthesis.harmony.voicing_spread_percent";
-            check_range(field, voicing_spread_percent, 0.0, 100.0)?;
+            validate_voicing_spread_percent(voicing_spread_percent)?;
         }
         if let Some(portamento_ms) = self.portamento_ms {
-            check_range(
-                "resynthesis.harmony.portamento_ms",
-                portamento_ms,
-                0.0,
-                10_000.0,
-            )?;
+            validate_portamento_ms(portamento_ms)?;
         }
         Ok(())
     }

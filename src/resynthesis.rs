@@ -127,13 +127,13 @@ impl CorrectionConfig {
     /// Returns [`Error::InvalidConfig`], with the dotted path of the field and
     /// the problem, if `retune_ms` is not valid.
     pub fn validate(self) -> Result<(), Error> {
-        check_range(
-            "resynthesis.correction.retune_ms",
-            self.retune_ms,
-            0.0,
-            400.0,
-        )
+        validate_retune_ms(self.retune_ms)
     }
+}
+
+/// Checks the range of the retune half-life.
+pub(crate) fn validate_retune_ms(retune_ms: f32) -> Result<(), Error> {
+    check_range("resynthesis.correction.retune_ms", retune_ms, 0.0, 400.0)
 }
 
 /// Optional changes to [`CorrectionConfig`].
@@ -173,7 +173,7 @@ impl CorrectionConfigPatch {
     /// Checks all supplied fields and does not change the processor state.
     pub(crate) fn validate(self) -> Result<(), Error> {
         if let Some(retune_ms) = self.retune_ms {
-            check_range("resynthesis.correction.retune_ms", retune_ms, 0.0, 400.0)?;
+            validate_retune_ms(retune_ms)?;
         }
         Ok(())
     }
@@ -349,22 +349,65 @@ impl ResynthesisConfig {
         self.correction.validate()?;
         self.formant.validate()?;
         self.harmony.validate()?;
-        check_range("resynthesis.pitch_ratio", self.pitch_ratio, 0.25, 4.0)?;
-        check_range("resynthesis.choir_detune", self.choir_detune, 10.0, 100.0)?;
-        check_range("resynthesis.choir_delay", self.choir_delay, 20.0, 200.0)?;
-        let field = "resynthesis.choir_spread_percent";
-        check_range(field, self.choir_spread_percent, 0.0, 100.0)?;
-        check_range("resynthesis.harmony_gain", self.harmony_gain, 0.0, 1.0)?;
-        let field = "resynthesis.harmonic_modulation";
-        check_range(field, self.harmonic_modulation, 0.0, 24.0)?;
-        check_range("resynthesis.dry_mix", self.dry_mix, 0.0, 1.0)?;
-        check_count(
-            "resynthesis.choir_voices",
-            i64::from(self.choir_voices),
-            1,
-            16,
-        )
+        validate_pitch_ratio(self.pitch_ratio)?;
+        validate_choir_detune(self.choir_detune)?;
+        validate_choir_delay(self.choir_delay)?;
+        validate_choir_spread_percent(self.choir_spread_percent)?;
+        validate_harmony_gain(self.harmony_gain)?;
+        validate_harmonic_modulation(self.harmonic_modulation)?;
+        validate_dry_mix(self.dry_mix)?;
+        validate_choir_voices(self.choir_voices)
     }
+}
+
+/// Checks the range of the global pitch multiplier.
+pub(crate) fn validate_pitch_ratio(pitch_ratio: f32) -> Result<(), Error> {
+    check_range("resynthesis.pitch_ratio", pitch_ratio, 0.25, 4.0)
+}
+
+/// Checks the range of the choir voice count.
+pub(crate) fn validate_choir_voices(choir_voices: u8) -> Result<(), Error> {
+    check_count("resynthesis.choir_voices", i64::from(choir_voices), 1, 16)
+}
+
+/// Checks the range of the choir detune.
+pub(crate) fn validate_choir_detune(choir_detune: f32) -> Result<(), Error> {
+    check_range("resynthesis.choir_detune", choir_detune, 10.0, 100.0)
+}
+
+/// Checks the range of the choir delay scale.
+pub(crate) fn validate_choir_delay(choir_delay: f32) -> Result<(), Error> {
+    check_range("resynthesis.choir_delay", choir_delay, 20.0, 200.0)
+}
+
+/// Checks the range of the choir stereo width.
+pub(crate) fn validate_choir_spread_percent(choir_spread_percent: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.choir_spread_percent",
+        choir_spread_percent,
+        0.0,
+        100.0,
+    )
+}
+
+/// Checks the range of the linear gain of the harmony voices.
+pub(crate) fn validate_harmony_gain(harmony_gain: f32) -> Result<(), Error> {
+    check_range("resynthesis.harmony_gain", harmony_gain, 0.0, 1.0)
+}
+
+/// Checks the range of the harmonic modulation depth.
+pub(crate) fn validate_harmonic_modulation(harmonic_modulation: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.harmonic_modulation",
+        harmonic_modulation,
+        0.0,
+        24.0,
+    )
+}
+
+/// Checks the range of the resynthesis dry mix.
+pub(crate) fn validate_dry_mix(dry_mix: f32) -> Result<(), Error> {
+    check_range("resynthesis.dry_mix", dry_mix, 0.0, 1.0)
 }
 
 /// Optional changes to [`ResynthesisConfig`].
@@ -489,30 +532,28 @@ impl ResynthesisConfigPatch {
     /// Checks the supplied scalar fields of resynthesis.
     fn validate_scalars(self) -> Result<(), Error> {
         if let Some(pitch_ratio) = self.pitch_ratio {
-            check_range("resynthesis.pitch_ratio", pitch_ratio, 0.25, 4.0)?;
+            validate_pitch_ratio(pitch_ratio)?;
         }
         if let Some(choir_detune) = self.choir_detune {
-            check_range("resynthesis.choir_detune", choir_detune, 10.0, 100.0)?;
+            validate_choir_detune(choir_detune)?;
         }
         if let Some(choir_delay) = self.choir_delay {
-            check_range("resynthesis.choir_delay", choir_delay, 20.0, 200.0)?;
+            validate_choir_delay(choir_delay)?;
         }
         if let Some(choir_spread_percent) = self.choir_spread_percent {
-            let field = "resynthesis.choir_spread_percent";
-            check_range(field, choir_spread_percent, 0.0, 100.0)?;
+            validate_choir_spread_percent(choir_spread_percent)?;
         }
         if let Some(harmony_gain) = self.harmony_gain {
-            check_range("resynthesis.harmony_gain", harmony_gain, 0.0, 1.0)?;
+            validate_harmony_gain(harmony_gain)?;
         }
         if let Some(harmonic_modulation) = self.harmonic_modulation {
-            let field = "resynthesis.harmonic_modulation";
-            check_range(field, harmonic_modulation, 0.0, 24.0)?;
+            validate_harmonic_modulation(harmonic_modulation)?;
         }
         if let Some(dry_mix) = self.dry_mix {
-            check_range("resynthesis.dry_mix", dry_mix, 0.0, 1.0)?;
+            validate_dry_mix(dry_mix)?;
         }
         if let Some(choir_voices) = self.choir_voices {
-            check_count("resynthesis.choir_voices", i64::from(choir_voices), 1, 16)?;
+            validate_choir_voices(choir_voices)?;
         }
         Ok(())
     }

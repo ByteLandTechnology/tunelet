@@ -48,8 +48,13 @@ impl WarmConfig {
     /// Returns the first [`Error::InvalidConfig`] with its dotted field path
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("warm.drive_db", self.drive_db, 0.0, 6.0)
+        validate_drive_db(self.drive_db)
     }
+}
+
+/// Checks the range of the drive of Warm.
+pub(crate) fn validate_drive_db(drive_db: f32) -> Result<(), Error> {
+    check_range("warm.drive_db", drive_db, 0.0, 6.0)
 }
 
 /// Optional changes to [`WarmConfig`].
@@ -82,7 +87,7 @@ impl WarmConfigPatch {
     /// Checks all supplied fields and does not change the processor state.
     pub(crate) fn validate(self) -> Result<(), Error> {
         if let Some(drive_db) = self.drive_db {
-            check_range("warm.drive_db", drive_db, 0.0, 6.0)?;
+            validate_drive_db(drive_db)?;
         }
         Ok(())
     }

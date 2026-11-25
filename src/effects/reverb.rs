@@ -108,11 +108,31 @@ impl ReverbConfig {
     /// Returns the first [`Error::InvalidConfig`] with its dotted field path
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("reverb.mix", self.mix, 0.0, 1.0)?;
-        check_range("reverb.diffusion", self.diffusion, 0.0, 1.0)?;
-        check_range("reverb.decay", self.decay, 0.0, 1.0)?;
-        check_range("reverb.brightness_hz", self.brightness_hz, 80.0, 20000.0)
+        validate_mix(self.mix)?;
+        validate_diffusion(self.diffusion)?;
+        validate_decay(self.decay)?;
+        validate_brightness_hz(self.brightness_hz)
     }
+}
+
+/// Checks the range of the wet mix of the reverb.
+pub(crate) fn validate_mix(mix: f32) -> Result<(), Error> {
+    check_range("reverb.mix", mix, 0.0, 1.0)
+}
+
+/// Checks the range of the diffusion control of the reverb.
+pub(crate) fn validate_diffusion(diffusion: f32) -> Result<(), Error> {
+    check_range("reverb.diffusion", diffusion, 0.0, 1.0)
+}
+
+/// Checks the range of the decay control of the reverb.
+pub(crate) fn validate_decay(decay: f32) -> Result<(), Error> {
+    check_range("reverb.decay", decay, 0.0, 1.0)
+}
+
+/// Checks the range of the low-pass cutoff of the reverb.
+pub(crate) fn validate_brightness_hz(brightness_hz: f32) -> Result<(), Error> {
+    check_range("reverb.brightness_hz", brightness_hz, 80.0, 20000.0)
 }
 
 /// Optional changes to [`ReverbConfig`].
@@ -173,16 +193,16 @@ impl ReverbConfigPatch {
     /// Checks all supplied fields and does not change the processor state.
     pub(crate) fn validate(self) -> Result<(), Error> {
         if let Some(mix) = self.mix {
-            check_range("reverb.mix", mix, 0.0, 1.0)?;
+            validate_mix(mix)?;
         }
         if let Some(diffusion) = self.diffusion {
-            check_range("reverb.diffusion", diffusion, 0.0, 1.0)?;
+            validate_diffusion(diffusion)?;
         }
         if let Some(decay) = self.decay {
-            check_range("reverb.decay", decay, 0.0, 1.0)?;
+            validate_decay(decay)?;
         }
         if let Some(brightness_hz) = self.brightness_hz {
-            check_range("reverb.brightness_hz", brightness_hz, 80.0, 20000.0)?;
+            validate_brightness_hz(brightness_hz)?;
         }
         Ok(())
     }
