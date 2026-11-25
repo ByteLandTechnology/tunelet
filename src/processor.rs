@@ -8,7 +8,7 @@ use crate::events::{ValidatedEvent, ValidatedEvents};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
 use crate::resynthesis::{self, Resynthesis};
-use crate::{ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
+use crate::{ControlActivity, ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
 
 /// Selects the output channel layout for the downmix and the peak meters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -341,6 +341,16 @@ impl Processor {
     /// that this method returns.
     pub fn config(&self) -> ProcessorConfig {
         self.config
+    }
+
+    /// Returns which choir, harmony and reverb controls change the audio in
+    /// the current configuration.
+    ///
+    /// A `false` flag means that the related control makes no sample change in
+    /// the active voice mode, harmony source or reverb network. This method
+    /// does not allocate memory and does not change state.
+    pub fn control_activity(&self) -> ControlActivity {
+        self.config.control_activity()
     }
 
     /// Returns the nominal resynthesis latency: 1,593 frames at both rates.

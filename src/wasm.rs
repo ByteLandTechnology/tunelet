@@ -34,7 +34,7 @@
 //! - Event decode when a call gives more events than before, or when an event
 //!   converts a stage configuration.
 //! - The conversion of configurations.
-//! - Feedback and telemetry objects.
+//! - Feedback, control-activity and telemetry objects.
 //! - The buffers of the formant envelopes.
 //! - Errors.
 //!
@@ -46,8 +46,8 @@
 use crate::events::ValidatedEvents;
 use crate::processor::EnvelopeKey;
 use crate::{
-    ControlEvent, Error, Feedback, MidiEvent, PrepareConfig, Processor, ProcessorConfig,
-    SampleRate, Telemetry, TimedEvent,
+    ControlActivity, ControlEvent, Error, Feedback, MidiEvent, PrepareConfig, Processor,
+    ProcessorConfig, SampleRate, Telemetry, TimedEvent,
 };
 use js_sys::{Array, Float32Array, Int16Array, Reflect};
 use serde::{Deserialize, Serialize};
@@ -409,6 +409,21 @@ impl WasmProcessor {
         let feedback = self.processor.feedback().into_ts()?;
         self.processor.take_feedback();
         Ok(feedback)
+    }
+
+    /// Returns which choir, harmony and reverb controls change the audio in
+    /// the active configuration.
+    ///
+    /// A `false` flag means that the related control makes no sample change in
+    /// the active voice mode, harmony source or reverb network. The audio
+    /// state does not change.
+    ///
+    /// # Errors
+    ///
+    /// If the conversion to a JavaScript object fails, this method throws.
+    #[wasm_bindgen(js_name = controlActivity)]
+    pub fn control_activity(&self) -> Result<Ts<ControlActivity>, JsError> {
+        Ok(self.processor.control_activity().into_ts()?)
     }
 
     /// Returns a new telemetry object and does not clear its peak windows.

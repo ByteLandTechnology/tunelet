@@ -296,12 +296,18 @@ These calls read the state of the processor. They do not change the audio.
 
 | Call                 | Data                                                              |
 | -------------------- | ----------------------------------------------------------------- |
+| `control_activity()` | Which choir, harmony and reverb controls are active               |
 | `feedback()`         | The pitch, the output peak, the correction ratio, the frame count |
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
 | `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
+
+`Processor::control_activity()` and `ProcessorConfig::control_activity()`
+return a `ControlActivity` struct. A `false` flag means that the related
+control makes no sample change in the active voice mode, harmony source or
+reverb network.
 
 The telemetry includes these items:
 
@@ -338,6 +344,7 @@ allocate memory, acquire locks or do I/O:
 
 - Processing
 - Configuration
+- Control activity
 - MIDI
 - Feedback
 - Telemetry
@@ -425,6 +432,7 @@ page that opens the JavaScript.
 | Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
 | In-place mono downmix             | `processMono(audio, events?)`                            |
 | Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
+| Control activity                  | `controlActivity()`                                      |
 | Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
 | Feedback                          | `feedback()`, `takeFeedback()`                           |
 | Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
@@ -488,7 +496,9 @@ bindings.
 
 ### Feedback, telemetry and formant envelopes
 
-`telemetry()` and `takeTelemetry()` return a `Telemetry` object.
+`controlActivity()` returns a `ControlActivity` object with camelCase boolean
+flags for the choir, harmony and reverb controls. `telemetry()` and
+`takeTelemetry()` return a `Telemetry` object.
 
 In feedback, `targetMidiNote` is `undefined` in these cases, which are also
 the cases where `voiced` is `false`:
@@ -518,7 +528,7 @@ Wasm. These items can allocate:
 - Supplied events when a call gives more events than before, or when an event
   converts a stage configuration.
 - Errors.
-- Feedback and telemetry.
+- Control activity, feedback and telemetry.
 - The formant envelopes.
 
 The generated glue can also make temporary views. This binding is for general
