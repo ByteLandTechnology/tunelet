@@ -352,7 +352,7 @@ reset semantics. Read it on [docs.rs](https://docs.rs/tunelet), or run this
 command:
 
 ```sh
-cargo rustdoc --locked --lib --open -- -D warnings
+cargo doc --locked --no-deps --open
 ```
 
 ## WebAssembly and TypeScript

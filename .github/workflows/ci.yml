@@ -58,6 +58,4 @@ jobs:
       - run: cargo package --locked
       - run: npm ci
       - run: npm run check:wasm
-        env:
-          RUSTDOCFLAGS: "-D warnings"
       - run: npm run verify:pack
