@@ -864,11 +864,14 @@ pub struct Telemetry {
     /// [`voice_ratios`](Self::voice_ratios).
     ///
     /// The lead and the choir voices have a gain of 1. The gain of a harmony
-    /// voice includes the MIDI velocity gain, in 0..=3.98095703125. MIDI
-    /// velocity 127 gives the maximum, approximately +12 dB. The gain is zero
-    /// for a voice that does not sound. It does not include the configured
-    /// harmony level or the pan. The harmony controller updates it every 101
-    /// frames.
+    /// voice is its controller envelope, in 0..=3.98095703125. This envelope
+    /// includes the MIDI velocity gain, where velocity 127 gives the maximum,
+    /// approximately +12 dB. The envelope is zero for an inactive harmony
+    /// voice. These values are before [`crate::ResynthesisConfig::lead_gain`],
+    /// [`crate::ResynthesisConfig::harmony_gain`],
+    /// [`crate::HarmonyConfig::voice_gains`],
+    /// [`crate::HarmonyConfig::voice_mutes`] and the stereo pan. The harmony
+    /// controller updates its envelopes every 101 frames.
     pub voice_gains: [f32; 16],
     /// The effective linear gain of Punch at the current envelope level.
     ///
