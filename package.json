@@ -1,6 +1,6 @@
 {
   "name": "tunelet",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Vocal pitch correction, choir, harmony, formant control and effects for WebAssembly",
   "license": "MIT",
   "repository": {
@@ -44,7 +44,7 @@
     "build": "npm run build:wasm && npm run build:ts",
     "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node scripts/postbuild-wasm.mjs",
     "build:ts": "node --input-type=module -e \"import fs from 'node:fs'; fs.rmSync('dist', { recursive: true, force: true })\" && tsc",
-    "check:wasm": "cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings && cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm",
+    "check:wasm": "cargo clippy --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings && cargo doc --locked --release --no-deps --target wasm32-unknown-unknown --features wasm",
     "prepack": "npm run build",
     "verify:pack": "node scripts/verify-pack.mjs"
   },

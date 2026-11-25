@@ -5,9 +5,10 @@
  * configuration. Both environments use the same generated bindings and the
  * same Wasm binary. This module re-exports all named exports of the module
  * that wasm-bindgen generates, which include `Tunelet`, `defaultConfig`,
- * `initSync` and the configuration, event and feedback types.
+ * `initSync` and the configuration, control-activity, event and feedback
+ * types.
  */
-import { init, loadOnce } from "./shared.js";
+import { init, isUrlLike, loadOnce } from "./shared.js";
 import type { InitInput, InitOutput } from "./shared.js";
 
 export * from "../pkg/tunelet.js";
@@ -85,7 +86,7 @@ async function initializeIndex(
 
 /** Reads a `file:` URL in Node.js without static Node.js imports. */
 async function readFileUrl(fileUrl: URL): Promise<InitOutput> {
-  // Keep the Node.js built-in module out of browser imports. TypeScript
+  // Keep the Node.js built-in module out of browser bundles. TypeScript
   // removes the type-only import. The runtime import runs only for `file:`
   // URLs.
   const moduleName = "node:fs/promises";
@@ -93,30 +94,6 @@ async function readFileUrl(fileUrl: URL): Promise<InitOutput> {
     /* webpackIgnore: true */ /* @vite-ignore */ moduleName
   );
   return init({ module_or_path: await fs.readFile(fileUrl) });
-}
-
-/** Checks if an object is a native `URL` or a cross-realm `URL` instance. */
-function isUrlLike(
-  value: unknown,
-): value is { readonly href: string; readonly protocol: string } {
-  if (typeof URL === "function" && value instanceof URL) {
-    return true;
-  }
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    ArrayBuffer.isView(value) ||
-    value instanceof ArrayBuffer
-  ) {
-    return false;
-  }
-  const candidate = value as {
-    readonly href?: unknown;
-    readonly protocol?: unknown;
-  };
-  return (
-    typeof candidate.href === "string" && typeof candidate.protocol === "string"
-  );
 }
 
 /** The default export is the same function as `loadTunelet`. */

@@ -39,3 +39,27 @@ async function resolveAndLoad(
   }
   return load(resolved);
 }
+
+/** Checks if a value is a native `URL` or a cross-realm `URL` instance. */
+export function isUrlLike(
+  value: unknown,
+): value is { readonly href: string; readonly protocol: string } {
+  if (typeof URL === "function" && value instanceof URL) {
+    return true;
+  }
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    ArrayBuffer.isView(value) ||
+    value instanceof ArrayBuffer
+  ) {
+    return false;
+  }
+  const candidate = value as {
+    readonly href?: unknown;
+    readonly protocol?: unknown;
+  };
+  return (
+    typeof candidate.href === "string" && typeof candidate.protocol === "string"
+  );
+}

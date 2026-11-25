@@ -4,9 +4,9 @@
  * Call `loadTunelet()` before you construct processors or read the default
  * configuration. This module re-exports all named exports of the module that
  * wasm-bindgen generates, which include `Tunelet`, `defaultConfig`, `initSync`
- * and the configuration, event and feedback types.
+ * and the configuration, control-activity, event and feedback types.
  */
-import { init, loadOnce } from "./shared.js";
+import { init, isUrlLike, loadOnce } from "./shared.js";
 import type { InitInput, InitOutput } from "./shared.js";
 
 export * from "../pkg/tunelet.js";
@@ -44,11 +44,19 @@ export function loadTunelet(
   source?: InitInput | Promise<InitInput>,
 ): Promise<InitOutput> {
   return loadOnce(source, (resolved) => {
-    const input =
-      resolved === undefined
-        ? new URL("../pkg/tunelet_bg.wasm", import.meta.url)
-        : resolved;
-    return init({ module_or_path: input });
+    if (resolved === undefined) {
+      return init({
+        module_or_path: new URL("../pkg/tunelet_bg.wasm", import.meta.url),
+      });
+    }
+    if (isUrlLike(resolved)) {
+      const url =
+        typeof URL === "function" && resolved instanceof URL
+          ? resolved
+          : new URL(resolved.href);
+      return init({ module_or_path: url });
+    }
+    return init({ module_or_path: resolved });
   });
 }
 

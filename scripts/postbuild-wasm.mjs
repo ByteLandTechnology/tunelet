@@ -1,7 +1,7 @@
 /**
- * This script deletes `pkg/.gitignore` and replaces ambient `DOM`,
- * `WebAssembly` and `Symbol.dispose` declarations in `pkg/tunelet.d.ts` with
- * local structural interfaces.
+ * This script deletes `pkg/.gitignore`, adds a reference to
+ * `esnext.disposable`, and replaces ambient DOM and `WebAssembly` types in
+ * `pkg/tunelet.d.ts` with portable structural interfaces.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -9,17 +9,24 @@ import { fileURLToPath } from "node:url";
 
 const pkgDir = fileURLToPath(new URL("../pkg", import.meta.url));
 const gitignorePath = path.join(pkgDir, ".gitignore");
-const declarationsPath = path.join(pkgDir, "tunelet.d.ts");
+const dtsPath = path.join(pkgDir, "tunelet.d.ts");
+
+const DISPOSABLE_LIB_REFERENCE = '/// <reference lib="esnext.disposable" />';
+
+const HEADER_ANCHOR = ["/* tslint:disable */", "/* eslint-disable */"].join(
+  "\n",
+);
+
+const HEADER_REPLACEMENT = [
+  DISPOSABLE_LIB_REFERENCE,
+  "/* tslint:disable */",
+  "/* eslint-disable */",
+].join("\n");
 
 const TUNELET_DISPOSE_ANCHOR = [
   "export class Tunelet {",
   "    free(): void;",
   "    [Symbol.dispose](): void;",
-].join("\n");
-
-const TUNELET_DISPOSE_REPLACEMENT = [
-  "export class Tunelet {",
-  "    free(): void;",
 ].join("\n");
 
 const INIT_INPUT_ANCHOR =
@@ -89,9 +96,9 @@ const SYNC_INIT_REPLACEMENT =
 
 const REPLACEMENTS = [
   {
-    name: "Tunelet[Symbol.dispose]",
-    anchor: TUNELET_DISPOSE_ANCHOR,
-    replacement: TUNELET_DISPOSE_REPLACEMENT,
+    name: "header",
+    anchor: HEADER_ANCHOR,
+    replacement: HEADER_REPLACEMENT,
   },
   {
     name: "InitInput",
@@ -116,7 +123,6 @@ const REPLACEMENTS = [
 ];
 
 const FORBIDDEN_DECLARATION_PATTERNS = [
-  { name: "Symbol.dispose", pattern: /\bSymbol\.dispose\b/ },
   { name: "RequestInfo", pattern: /\bRequestInfo\b/ },
   { name: "Response", pattern: /\bResponse\b/ },
   { name: "URL", pattern: /\bURL\b/ },
@@ -125,8 +131,8 @@ const FORBIDDEN_DECLARATION_PATTERNS = [
   { name: "declare global", pattern: /\bdeclare\s+global\b/ },
 ];
 
-/** Replaces one exact anchor and throws an error if the count is not one. */
-function replaceExactAnchor(source, name, anchor, replacement) {
+/** Checks that one exact anchor appears one time and returns its index. */
+function findExactAnchor(source, name, anchor) {
   const firstIndex = source.indexOf(anchor);
   if (firstIndex === -1) {
     throw new Error(
@@ -139,6 +145,12 @@ function replaceExactAnchor(source, name, anchor, replacement) {
       `Expected wasm-bindgen anchor "${name}" appeared more than one time in pkg/tunelet.d.ts`,
     );
   }
+  return firstIndex;
+}
+
+/** Replaces one exact anchor and throws if the anchor count is not one. */
+function replaceExactAnchor(source, name, anchor, replacement) {
+  const firstIndex = findExactAnchor(source, name, anchor);
   return (
     source.slice(0, firstIndex) +
     replacement +
@@ -146,17 +158,19 @@ function replaceExactAnchor(source, name, anchor, replacement) {
   );
 }
 
-/** Removes comments before the check for ambient identifiers. */
+/** Removes comments before a check for ambient identifiers. */
 function stripComments(source) {
   return source
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/^(?!\s*\/\/\/\s*<reference).*\/\/.*$/gm, "");
 }
 
-/** Sanitizes the declaration text and returns the updated content. */
+/** Sanitizes a declaration text and returns the updated content. */
 export function sanitizeDeclarations(rawSource) {
   const newline = rawSource.includes("\r\n") ? "\r\n" : "\n";
   let content = rawSource.replace(/\r\n/g, "\n");
+
+  findExactAnchor(content, "Tunelet[Symbol.dispose]", TUNELET_DISPOSE_ANCHOR);
 
   for (const item of REPLACEMENTS) {
     content = replaceExactAnchor(
@@ -167,9 +181,15 @@ export function sanitizeDeclarations(rawSource) {
     );
   }
 
-  if (/\/\/\/\s*<reference\b/.test(content)) {
+  const referenceDirectives =
+    content.match(/\/\/\/\s*<reference\b[^\n]*/g) ?? [];
+  if (
+    referenceDirectives.length !== 1 ||
+    referenceDirectives[0] !== DISPOSABLE_LIB_REFERENCE ||
+    !content.startsWith(`${DISPOSABLE_LIB_REFERENCE}\n`)
+  ) {
     throw new Error(
-      "Triple-slash reference directives are not permitted in pkg/tunelet.d.ts",
+      'Only a top-level /// <reference lib="esnext.disposable" /> directive is permitted in pkg/tunelet.d.ts',
     );
   }
 
@@ -177,7 +197,7 @@ export function sanitizeDeclarations(rawSource) {
   for (const check of FORBIDDEN_DECLARATION_PATTERNS) {
     if (check.pattern.test(codeOnly)) {
       throw new Error(
-        `Unexpected ambient type "${check.name}" stayed in pkg/tunelet.d.ts`,
+        `Unsanitized ambient type "${check.name}" stayed in pkg/tunelet.d.ts`,
       );
     }
   }
@@ -185,15 +205,12 @@ export function sanitizeDeclarations(rawSource) {
   return newline === "\r\n" ? content.replace(/\n/g, "\r\n") : content;
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   fs.rmSync(gitignorePath, { force: true });
-  if (!fs.existsSync(declarationsPath)) {
-    throw new Error(`Declaration file was not found at ${declarationsPath}`);
+  if (!fs.existsSync(dtsPath)) {
+    throw new Error(`Declaration file was not found at ${dtsPath}`);
   }
-  const original = fs.readFileSync(declarationsPath, "utf8");
+  const original = fs.readFileSync(dtsPath, "utf8");
   const sanitized = sanitizeDeclarations(original);
-  fs.writeFileSync(declarationsPath, sanitized, "utf8");
+  fs.writeFileSync(dtsPath, sanitized, "utf8");
 }

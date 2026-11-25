@@ -4,12 +4,12 @@
  * Call `loadTunelet()` before you construct processors or read the default
  * configuration. This module re-exports all named exports of the module that
  * wasm-bindgen generates, which include `Tunelet`, `defaultConfig`, `initSync`
- * and the configuration, event and feedback types.
+ * and the configuration, control-activity, event and feedback types.
  */
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
-import { init, loadOnce } from "./shared.js";
+import { init, isUrlLike, loadOnce } from "./shared.js";
 import type { InitInput, InitOutput } from "./shared.js";
 
 export * from "../pkg/tunelet.js";
@@ -67,7 +67,10 @@ async function initializeNode(
 
   if (typeof source === "string") {
     if (/^file:/i.test(source)) {
-      return init({ module_or_path: await readFile(new URL(source)) });
+      const url = new URL(source);
+      if (url.protocol === "file:") {
+        return init({ module_or_path: await readFile(url) });
+      }
     }
     return init({ module_or_path: source });
   }
@@ -126,30 +129,6 @@ async function readDefaultWasm(): Promise<Uint8Array> {
     throw absentError;
   }
   throw new Error("Cannot find the packaged tunelet_bg.wasm binary.");
-}
-
-/** Checks if an object is a native `URL` or a cross-realm `URL` instance. */
-function isUrlLike(
-  value: unknown,
-): value is { readonly href: string; readonly protocol: string } {
-  if (value instanceof URL) {
-    return true;
-  }
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    ArrayBuffer.isView(value) ||
-    value instanceof ArrayBuffer
-  ) {
-    return false;
-  }
-  const candidate = value as {
-    readonly href?: unknown;
-    readonly protocol?: unknown;
-  };
-  return (
-    typeof candidate.href === "string" && typeof candidate.protocol === "string"
-  );
 }
 
 /** Checks if an error object has a specific Node.js `code` string. */
