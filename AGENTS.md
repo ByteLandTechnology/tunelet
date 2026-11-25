@@ -87,6 +87,8 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 - `src/wasm.rs`: the wasm-bindgen and tsify bindings (`wasm` feature).
 - `src/index.ts`: the `loadTunelet` entry point. See also `package.json`
   and `tsconfig.json`.
+- `.cargo/config.toml`: the Cargo flags (`-D warnings`) for `rustc` and
+  `rustdoc`.
 
 ## Build and verify
 
@@ -114,7 +116,10 @@ npm run verify:pack
 - `.github/workflows/ci.yml` runs these checks on each pull request and each
   push to `main`.
 - Make sure that there are no new warnings. This includes broken
-  rustdoc links.
+  rustdoc links. `.cargo/config.toml` sets `-D warnings` for `rustc`
+  and `rustdoc`. A shell `RUSTFLAGS` or `RUSTDOCFLAGS` variable
+  replaces the flags in `.cargo/config.toml` for that tool. If you set
+  `RUSTFLAGS` or `RUSTDOCFLAGS` in the shell, include `-D warnings`.
 - The crate has no tests (`test = false`). Do not add tests or test
   support if the task does not tell you to.
 - To verify a DSP change, render PCM from a fixed input and seed before
