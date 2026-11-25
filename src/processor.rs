@@ -1,7 +1,7 @@
 //! The processor: audio blocks, timed controls, host feedback and the tail.
 
 use crate::effects::alien::{self, Alien};
-use crate::effects::punch::{Punch, PunchConfig};
+use crate::effects::punch::Punch;
 use crate::effects::reverb::{self, Reverb};
 use crate::effects::warm::Warm;
 use crate::events::{ValidatedEvent, ValidatedEvents};
@@ -20,6 +20,15 @@ fn prepare_dry() -> Box<[i16; resynthesis::LATENCY_FRAMES]> {
         .into_boxed_slice()
         .try_into()
         .unwrap_or_else(|_| unreachable!("prepared dry buffer length"))
+}
+
+/// Selects the output channel layout for the downmix and the peak meters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutputLayout {
+    /// Keeps the left and right channels and measures stereo peaks.
+    Stereo,
+    /// Downmixes the two channels and measures mono peaks.
+    Mono,
 }
 
 /// A prepared vocal processor with state, mono input and stereo synthesis.
@@ -69,7 +78,7 @@ pub struct Processor {
     reverb: Reverb,
     /// The random sequence of this instance and the cached arctangent position.
     numeric: NumericContext,
-    /// The largest absolute clipped stereo PCM sample in the feedback window.
+    /// The largest absolute clipped output PCM sample in the feedback window.
     peak: i32,
     /// The largest absolute PCM input sample in the telemetry window, before
     /// Punch.
@@ -112,22 +121,20 @@ impl Processor {
     /// I/O. Audio histories, pitch reports and meters start clear. The random
     /// stream starts from the low 32 bits of `random_seed`.
     ///
-    /// Punch uses its default cached drive until the first window of 100
-    /// frames with Punch enabled. The initial note table of correction has the
-    /// rate behavior that [`crate::CorrectionConfig`] describes.
+    /// Punch sets its initial drive from `config.punch.gain_db`. The initial
+    /// note table of correction has the rate behavior that
+    /// [`crate::CorrectionConfig`] describes.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidConfig`] if a stage field or the output gain is
-    /// not valid. This check occurs before the allocation of the histories.
+    /// Returns [`Error::InvalidConfig`] if a stage field, the output gain or the
+    /// global mix is not valid. This check occurs before the allocation of the
+    /// histories.
     /// The types of `preparation` already make sure that the block limit is
     /// not zero and that the sample rate is supported.
     pub fn new(preparation: PrepareConfig, config: ProcessorConfig) -> Result<Self, Error> {
         config.validate()?;
         let rate = preparation.sample_rate;
-        // Drive uses the default gain until the first 100-frame peak window.
-        let mut punch = Punch::new(rate, PunchConfig::default());
-        punch.set_config(config.punch);
         Ok(Self {
             preparation,
             config,
@@ -135,7 +142,7 @@ impl Processor {
             dry_index: 0,
             mix: Q14::from_f64((config.mix * 100.0) as f64 / 100.0),
             bypass_fade: if config.bypass { BYPASS_FADE_FRAMES } else { 0 },
-            punch,
+            punch: Punch::new(rate, config.punch),
             warm: Warm::new(rate, config.warm),
             resynthesis: Box::new(Resynthesis::new(rate, config.resynthesis)),
             alien: Alien::new(config.alien),
@@ -177,7 +184,7 @@ impl Processor {
     ) -> Result<(), Error> {
         Error::check_length(input.len(), output.len())?;
         self.process_into(input.len(), events, |processor, index| {
-            output[index] = processor.next(input[index]);
+            output[index] = processor.next(input[index], OutputLayout::Stereo);
         })
     }
 
@@ -204,7 +211,7 @@ impl Processor {
         Error::check_length(input.len(), left.len())?;
         Error::check_length(input.len(), right.len())?;
         self.process_into(input.len(), events, |processor, index| {
-            let frame = processor.next(input[index]);
+            let frame = processor.next(input[index], OutputLayout::Stereo);
             left[index] = frame[0];
             right[index] = frame[1];
         })
@@ -215,8 +222,9 @@ impl Processor {
     /// The method reads each input sample before it writes over that location.
     /// The downmix uses `(i32::from(left) + i32::from(right)) >> 1`, which
     /// rounds toward negative infinity. Panning and stereo effects run before
-    /// this downmix. Peak feedback measures the stereo samples. Events and
-    /// drain cancellation are the same as for [`process`](Self::process).
+    /// this downmix. Peak feedback and output telemetry measure the mono
+    /// samples after this downmix. Events and drain cancellation are the same
+    /// as for [`process`](Self::process).
     ///
     /// # Errors
     ///
@@ -229,8 +237,8 @@ impl Processor {
         events: &[TimedEvent],
     ) -> Result<(), Error> {
         self.process_into(audio.len(), events, |processor, index| {
-            let output = processor.next(audio[index]);
-            audio[index] = downmix(output);
+            let output = processor.next(audio[index], OutputLayout::Mono);
+            audio[index] = output[0];
         })
     }
 
@@ -266,7 +274,9 @@ impl Processor {
     /// If the output is larger than the prepared block limit, the method
     /// returns [`Error::BlockTooLarge`] and does not change state or output.
     pub fn drain(&mut self, output: &mut [[i16; 2]]) -> Result<usize, Error> {
-        let count = self.drain_into(output.len(), |index, frame| output[index] = frame)?;
+        let count = self.drain_into(output.len(), OutputLayout::Stereo, |index, frame| {
+            output[index] = frame
+        })?;
         output[count..].fill([0; 2]);
         Ok(count)
     }
@@ -284,7 +294,7 @@ impl Processor {
     /// the drain state do not change.
     pub fn drain_planar(&mut self, left: &mut [i16], right: &mut [i16]) -> Result<usize, Error> {
         Error::check_length(left.len(), right.len())?;
-        let count = self.drain_into(left.len(), |index, frame| {
+        let count = self.drain_into(left.len(), OutputLayout::Stereo, |index, frame| {
             left[index] = frame[0];
             right[index] = frame[1];
         })?;
@@ -295,7 +305,7 @@ impl Processor {
 
     /// Renders the tail as mono PCM and returns the number of rendered frames.
     ///
-    /// The downmix is the same as in
+    /// The downmix and the peak measurements are the same as in
     /// [`process_mono_in_place`](Self::process_mono_in_place). The method
     /// fills unused samples with zeros. If the drain is not active or is
     /// complete, the method returns zero. An empty output uses no budget. At
@@ -307,8 +317,8 @@ impl Processor {
     /// If the output is larger than the prepared block limit, the method
     /// returns [`Error::BlockTooLarge`] before it changes output or state.
     pub fn drain_mono(&mut self, output: &mut [i16]) -> Result<usize, Error> {
-        let count = self.drain_into(output.len(), |index, frame| {
-            output[index] = downmix(frame);
+        let count = self.drain_into(output.len(), OutputLayout::Mono, |index, frame| {
+            output[index] = frame[0];
         })?;
         output[count..].fill(0);
         Ok(count)
@@ -347,14 +357,14 @@ impl Processor {
 
     /// Returns the nominal resynthesis latency: 1,593 frames at both rates.
     ///
-    /// The resynthesis dry path and the global `mix` and `bypass` dry path use
-    /// this 1,593-frame delay. Resampled voices, choir delays and effects have
-    /// their own timing. Thus, this value does not align all paths.
+    /// The resynthesis dry path and the global `mix` and `bypass` dry path also
+    /// have a delay of 1,593 frames. Resampled voices, choir delays and effects
+    /// have their own timing. Thus, this value does not align all paths.
     pub fn latency_frames(&self) -> usize {
         resynthesis::LATENCY_FRAMES
     }
 
-    /// Returns the pitch, stereo peak and frame count, and does not clear them.
+    /// Returns the pitch, output peak and frame count, and does not clear them.
     ///
     /// To start a new peak window, use [`take_feedback`](Self::take_feedback).
     pub fn feedback(&self) -> Feedback {
@@ -401,7 +411,7 @@ impl Processor {
             voice_ratios,
             voice_gains,
             punch_gain: if self.config.punch.enabled {
-                self.punch.drive_ratio()
+                self.punch.effective_gain()
             } else {
                 1.0
             },
@@ -642,13 +652,12 @@ impl Processor {
         self.apply_config(config);
     }
 
-    /// Renders one frame through the full chain and updates stereo feedback.
+    /// Renders one frame through the full chain and updates the peak meters.
     ///
     /// Resynthesis produces Q14 audio. Output gain is Q8. The gain product
     /// uses `i64` arithmetic before the symmetric `-32767..=32767` PCM clamp.
-    /// This order and the peak measurement before the downmix are part of the
-    /// output.
-    fn next(&mut self, mut input: i16) -> [i16; 2] {
+    /// In the mono layout, the downmix occurs before the peak measurement.
+    fn next(&mut self, mut input: i16, layout: OutputLayout) -> [i16; 2] {
         self.input_peak = self.input_peak.max((input as i32).abs());
         let dry_sample = self.dry[self.dry_index];
         self.dry[self.dry_index] = input;
@@ -665,7 +674,7 @@ impl Processor {
         let voice = self.resynthesis.process_sample(input, &mut self.numeric);
         self.last_resample_ratio = self.resynthesis.resample_ratio();
         let alien = self.alien.process_sample(voice);
-        let reverb = self.reverb.process_sample(alien);
+        let reverb = self.reverb.process_sample(alien, layout);
         let gain = (self.config.output_gain as f64 * 256.0) as i64;
         let wet = reverb
             .map(|sample| (((i64::from(sample.to_bits()) * gain) >> 8) << 1).clamp(-32767, 32767));
@@ -680,7 +689,7 @@ impl Processor {
         } else if self.bypass_fade > 0 {
             self.bypass_fade -= 1;
         }
-        let result = if self.bypass_fade == 0 {
+        let mut result = if self.bypass_fade == 0 {
             mixed.map(|channel| channel.clamp(-32767, 32767) as i16)
         } else {
             let bypass_wet: Q14 = Fixed::<0>::from_bits(i32::from(self.bypass_fade))
@@ -691,6 +700,10 @@ impl Processor {
                 (((channel * active_w + dry * dry_w) >> 14).clamp(-32767, 32767)) as i16
             })
         };
+        if matches!(layout, OutputLayout::Mono) {
+            let mono = downmix(result);
+            result = [mono, mono];
+        }
         self.peak = self
             .peak
             .max((result[0] as i32).abs())
@@ -734,6 +747,7 @@ impl Processor {
     fn drain_into(
         &mut self,
         frames: usize,
+        layout: OutputLayout,
         mut write: impl FnMut(usize, [i16; 2]),
     ) -> Result<usize, Error> {
         self.check_block(frames)?;
@@ -746,7 +760,7 @@ impl Processor {
             self.resynthesis.apply_config(silent);
         }
         for index in 0..count {
-            write(index, self.next(0));
+            write(index, self.next(0, layout));
         }
         if configured.formant.aspiration_mix != 0.0 {
             self.resynthesis.apply_config(configured);
@@ -771,9 +785,9 @@ fn downmix(frame: [i16; 2]) -> i16 {
 ///
 /// Get it with [`Processor::feedback`] or [`Processor::take_feedback`]. The
 /// pitch fields describe the tracked input and the correction target. The
-/// peak measures the final clipped stereo output. `Default` gives a snapshot
-/// with all zeros and no target. It does not read the nominal latency of a
-/// prepared processor.
+/// peak measures the final clipped output of each call. `Default` gives a
+/// snapshot with all zeros and no target. It does not read the nominal
+/// latency of a prepared processor.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -824,11 +838,11 @@ pub struct Feedback {
     /// This is not an amplitude gate or a confidence score. A tracking result
     /// can stay between detector updates.
     pub voiced: bool,
-    /// The largest absolute clipped stereo sample, divided by 32768.
+    /// The largest absolute clipped output sample, divided by 32768.
     ///
     /// The peak window starts at construction, at a reset, at a change of
     /// stereo output or at a call to [`Processor::take_feedback`]. The value
-    /// is in 0..=32767/32768. The mono downmix occurs after this measurement.
+    /// is in 0..=32767/32768. Mono calls measure the sample after the downmix.
     /// [`Processor::feedback`] does not clear the value.
     pub peak_level: f32,
     /// The number of frames processed since construction or the last reset,
@@ -875,15 +889,17 @@ pub struct Telemetry {
     /// The largest absolute clipped sample of the left and the right output
     /// in the window, divided by 32768.
     ///
-    /// The measurement is after the output gain. Each value is in
-    /// 0..=32767/32768.
+    /// The measurement is after the output gain, the global mix and the bypass.
+    /// In mono calls, both entries measure the mono sample after the downmix.
+    /// Each value is in 0..=32767/32768.
     pub output_peak: [f32; 2],
     /// The largest absolute wet contribution of the reverb in the window,
     /// where 1 is full scale.
     ///
     /// The contribution is the wet signal times the mix, before the output
-    /// gain. It is the larger of the two channels. While the reverb is
-    /// disabled, the window gets no new values.
+    /// gain. Stereo calls measure the larger of the two channels. Mono calls
+    /// measure the wet signal after the downmix. While the reverb is disabled,
+    /// the window gets no new values.
     pub reverb_wet_peak: f32,
     /// How periodic the tracked input is, in 0..=1.
     ///
@@ -921,18 +937,20 @@ pub struct Telemetry {
     /// harmony level or the pan. The harmony controller updates it every 101
     /// frames.
     pub voice_gains: [f32; 16],
-    /// The current drive of Punch, divided by its base drive.
+    /// The effective linear gain of Punch at the current envelope level.
     ///
-    /// The value is the ratio of the two input envelopes times the
-    /// configured input gain. It is more than 1 at an attack. Punch updates
-    /// it every 100 frames. The value is 1 while Punch is disabled.
+    /// The value reflects the smoothed drive boost from the two input
+    /// envelopes, the configured input gain and any attenuation from the
+    /// output ceiling. Punch updates it on each enabled frame. The value is 1
+    /// while Punch is disabled.
     pub punch_gain: f32,
     /// The linear gain that Warm applies before its saturation curve and
     /// removes after it.
     ///
-    /// The value is the inverse of the input peak envelope. For input below
-    /// -30 dB, it is the gain of +30 dB. Warm updates it every 100 frames.
-    /// The value is 1 while Warm is disabled.
+    /// The value tracks the inverse of the input peak envelope, with +30 dB
+    /// for input below -30 dB. Warm reduces it immediately on attacks, smooths
+    /// it during release and updates it on each enabled frame. The value is 1
+    /// while Warm is disabled.
     pub warm_gain: f32,
     /// The length of the Alien loop in frames, as
     /// [`crate::AlienConfig::loop_frames`] gives.

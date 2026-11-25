@@ -179,10 +179,10 @@ multi-voice mixes.
 
 `punch.mix`, `warm.mix`, `alien.mix` and `reverb.mix` set the Q14 wet
 fraction of each effect stage, in `0..=1`. In Warm, the 50 Hz high-pass
-filter operates only on the wet path. `resynthesis.dry_mix` sets the dry
-fraction at the resynthesis stage. That dry path starts after Warm and has a
-delay of 1,593 frames. `mix` and `bypass` align to the raw input before
-Punch with the same 1,593-frame delay.
+filter operates only on the wet path. All six reverb modes keep the stereo
+dry signal. `resynthesis.dry_mix` sets the dry fraction after Warm, with a
+delay of 1,593 frames. `mix` and `bypass` use the raw input before Punch,
+with the same 1,593-frame delay.
 
 ### Harmony sources
 
@@ -301,7 +301,7 @@ These calls read the state of the processor. They do not change the audio.
 
 | Call                 | Data                                                              |
 | -------------------- | ----------------------------------------------------------------- |
-| `feedback()`         | The pitch, the stereo peak, the correction ratio, the frame count |
+| `feedback()`         | The pitch, the output peak, the correction ratio, the frame count |
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
@@ -317,8 +317,9 @@ The telemetry includes these items:
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
 The peak windows of the telemetry are independent of the peak window of the
-feedback. The latency is nominal. Dry mixes, resampled voices and effects
-have different timing.
+feedback. In mono calls, the output and reverb wet peaks measure the audio
+after the downmix. The dry path has the 1,593-frame delay. Resampled voices,
+choir delays and effects use different delays.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
@@ -512,13 +513,15 @@ call with more points than before reserve memory.
 
 ### Memory allocation
 
-The constructor allocates reusable PCM buffers. A successful call that
+The constructor allocates reusable PCM buffers. The processor also keeps an
+event buffer and uses its capacity again across calls. A successful call that
 processes audio without events does not allocate new Rust PCM storage.
 However, the call copies the audio across the boundary between JavaScript and
 Wasm. These items can allocate:
 
 - Object conversion.
-- Supplied events.
+- Supplied events when a call gives more events than before, or when an event
+  converts a stage configuration.
 - Errors.
 - Feedback and telemetry.
 - The formant envelopes.
@@ -532,14 +535,15 @@ Rust functions.
 
 ### Rust crate
 
-To build the crate and check the format, the lints and the documentation,
-run these commands:
+To build the crate and check the format, the lints, the documentation and
+the archive, run these commands:
 
 ```sh
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 cargo doc --locked --no-deps
+cargo package --locked
 ```
 
 To check the `wasm` feature for `wasm32-unknown-unknown` with Cargo, run
