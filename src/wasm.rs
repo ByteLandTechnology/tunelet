@@ -34,7 +34,7 @@
 //! - Event decode when a call gives more events than before, or when an event
 //!   converts a stage configuration.
 //! - The conversion of configurations.
-//! - Feedback and telemetry objects.
+//! - Feedback, control-activity and telemetry objects.
 //! - The buffers of the formant envelopes.
 //! - Errors.
 //!
@@ -44,9 +44,10 @@
 //! `free()` method.
 
 use crate::events::ValidatedEvents;
+use crate::processor::EnvelopeKey;
 use crate::{
-    ControlEvent, Error, Feedback, MidiEvent, PrepareConfig, Processor, ProcessorConfig,
-    SampleRate, Telemetry, TimedEvent,
+    ControlActivity, ControlEvent, Error, Feedback, MidiEvent, PrepareConfig, Processor,
+    ProcessorConfig, SampleRate, Telemetry, TimedEvent,
 };
 use js_sys::{Array, Float32Array, Int16Array, Object, Reflect};
 use serde::{Deserialize, Serialize};
@@ -118,6 +119,9 @@ pub struct WasmProcessor {
     /// when a call needs more points, and they do not become shorter.
     envelope_input: Vec<f32>,
     envelope_output: Vec<f32>,
+    /// The key and the result of the last formant envelope that the buffers
+    /// hold.
+    envelope_cache: Option<(EnvelopeKey, bool)>,
     /// The reusable buffer for block events. It becomes longer when a call
     /// gives more events, and it does not become shorter.
     events: Vec<TimedEvent>,
@@ -180,6 +184,7 @@ impl WasmProcessor {
             right: pcm_buffer(max_block_frames)?,
             envelope_input: Vec::new(),
             envelope_output: Vec::new(),
+            envelope_cache: None,
             events: Vec::new(),
         })
     }
@@ -407,6 +412,21 @@ impl WasmProcessor {
         Ok(feedback)
     }
 
+    /// Returns which choir, harmony and reverb controls change the audio in
+    /// the active configuration.
+    ///
+    /// A `false` flag means that the related control makes no sample change in
+    /// the active voice mode, harmony source or reverb network. The audio
+    /// state does not change.
+    ///
+    /// # Errors
+    ///
+    /// If the conversion to a JavaScript object fails, this method throws.
+    #[wasm_bindgen(js_name = controlActivity)]
+    pub fn control_activity(&self) -> Result<Ts<ControlActivity>, JsError> {
+        Ok(self.processor.control_activity().into_ts()?)
+    }
+
     /// Returns a new telemetry object and does not clear its peak windows.
     ///
     /// The telemetry is for meters and displays. It gives the pitch, the
@@ -473,14 +493,25 @@ impl WasmProcessor {
     ) -> Result<bool, JsError> {
         let points = input.length() as usize;
         // Check before the buffers become longer for a call that cannot succeed.
-        Error::check_length(points, output.length() as usize)?;
+        let key =
+            self.processor
+                .envelope_key(max_frequency_hz, points, output.length() as usize)?;
+        if let Some((cached, valid)) = self.envelope_cache {
+            if cached == key {
+                input.copy_from(&self.envelope_input[..points]);
+                output.copy_from(&self.envelope_output[..points]);
+                return Ok(valid);
+            }
+        }
         let analysis = envelope_buffer(&mut self.envelope_input, points)?;
         let synthesis = envelope_buffer(&mut self.envelope_output, points)?;
+        self.envelope_cache = None;
         let valid = self
             .processor
             .formant_envelope(max_frequency_hz, analysis, synthesis)?;
-        input.copy_from(analysis);
-        output.copy_from(synthesis);
+        self.envelope_cache = Some((key, valid));
+        input.copy_from(&self.envelope_input[..points]);
+        output.copy_from(&self.envelope_output[..points]);
         Ok(valid)
     }
 
