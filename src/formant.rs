@@ -742,7 +742,7 @@ impl Formant {
     /// random stream and the noise filter then do not advance. If not, the
     /// function reads one random value.
     fn add_noise(&mut self, sample: i32, context: &mut NumericContext) -> i32 {
-        if !self.config.enabled || self.config.aspiration_mix <= 0.01 {
+        if self.config.aspiration_mix <= 0.01 {
             return sample;
         }
         let random = context.random.next_u31() >> 17;

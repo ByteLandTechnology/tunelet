@@ -346,6 +346,12 @@ const DRIFT_LIMIT: Q14 = Q14::from_bits(3276);
 const FADE_STEP: Q14 = Q14::from_bits(0x333);
 /// The step for each frame of a 256-frame stage ramp (`16384 / 256`).
 const STAGE_RAMP_STEP: Q14 = Q14::from_bits(64);
+/// The number of input frames that warm the anti-alias filters during a
+/// formant transition.
+const POST_WARMUP_FRAMES: i32 = 128;
+/// The `filtered_valid` count when all ring entries and anti-alias filter
+/// states are settled.
+const FILTERED_SETTLED: u16 = HISTORY as u16 + POST_WARMUP_FRAMES as u16;
 
 /// Returns the stereo pair for one voice sample and its Q14 pan weights.
 #[inline]
@@ -595,7 +601,7 @@ impl Resynthesis {
             overlap_pending: 0,
             overlap_mixed: false,
             filtered_lpc: config.formant.enabled,
-            filtered_valid: HISTORY as u16,
+            filtered_valid: FILTERED_SETTLED,
             formant_fade: if config.formant.enabled {
                 Q14::ONE
             } else {
@@ -833,7 +839,7 @@ impl Resynthesis {
         self.overlap_pending = 0;
         self.overlap_mixed = false;
         self.filtered_lpc = self.config.formant.enabled;
-        self.filtered_valid = HISTORY as u16;
+        self.filtered_valid = FILTERED_SETTLED;
         self.formant_fade = if self.config.formant.enabled {
             Q14::ONE
         } else {
@@ -1146,18 +1152,66 @@ impl Resynthesis {
         }
     }
 
-    /// Returns `true` if all taps at and after `min_center` in `filtered` match
-    /// `want_lpc`.
+    /// Returns `true` if the three interpolation taps around `center` in
+    /// `filtered` match `want_lpc` with settled anti-alias filter state.
     #[inline]
-    fn filtered_ready_for(&self, min_center: i32, want_lpc: bool) -> bool {
+    fn filtered_tap_ready(&self, center: i32, want_lpc: bool) -> bool {
         if self.filtered_lpc != want_lpc {
             return false;
         }
-        if self.filtered_valid as usize >= HISTORY {
+        let warmup = if self.config.pitch_ratio > 1.0 {
+            POST_WARMUP_FRAMES as usize
+        } else {
+            0
+        };
+        let valid = usize::from(self.filtered_valid).saturating_sub(warmup);
+        if valid >= HISTORY {
             return true;
         }
-        let needed = self.write as i32 - min_center + 2;
-        needed <= i32::from(self.filtered_valid)
+        let age_minus = (self.write + HISTORY - ring(center.wrapping_sub(1))) % HISTORY;
+        let age_plus = (self.write + HISTORY - ring(center.wrapping_add(1))) % HISTORY;
+        age_minus < valid && age_plus < valid
+    }
+
+    /// Interpolates the delayed raw history at `position` with the anti-alias
+    /// filter rules of `filtered`.
+    fn interpolate_raw_filtered(&self, position: Q14) -> Q14 {
+        let bits = position.to_bits();
+        let center = history::center(position);
+        let fraction = Q14::from_bits(bits.wrapping_sub(center.wrapping_shl(14)));
+        let raw_center = center.wrapping_sub(OVERLAP_FRAMES as i32);
+        if self.config.pitch_ratio > 1.0 {
+            let mut filters = self.post.clone();
+            for filter in &mut filters {
+                filter.reset();
+            }
+            let mut left = Q14::ZERO;
+            let mut middle = Q14::ZERO;
+            let mut right = Q14::ZERO;
+            for offset in -POST_WARMUP_FRAMES..=1 {
+                let mut sample = self.raw[ring(raw_center.wrapping_add(offset))];
+                for filter in &mut filters {
+                    sample = filter.process_sample(sample);
+                }
+                match offset {
+                    -1 => left = sample,
+                    0 => middle = sample,
+                    1 => right = sample,
+                    _ => {}
+                }
+            }
+            quadratic(left, middle, right, fraction)
+        } else {
+            let bypass = |sample: Q14| {
+                let mut filters = [Biquad::new(), Biquad::new()];
+                let first = filters[0].bypass_sample(sample);
+                filters[1].bypass_sample(first)
+            };
+            let left = bypass(self.raw[ring(raw_center.wrapping_sub(1))]);
+            let middle = bypass(self.raw[ring(raw_center)]);
+            let right = bypass(self.raw[ring(raw_center.wrapping_add(1))]);
+            quadratic(left, middle, right, fraction)
+        }
     }
 
     /// Reads a sample from `lead` and outputs zero until fresh frames from
@@ -1211,18 +1265,16 @@ impl Resynthesis {
             self.fades[0] = (reader_fade + FADE_STEP).min(Q14::ONE);
         }
         let (mut value, center) = history::interpolation(&self.filtered, position);
-        let mut min_center = center;
+        let mut raw_ready = self.filtered_tap_ready(center, false);
+        let mut lpc_ready = self.filtered_tap_ready(center, true);
         if reader_fade < Q14::ONE {
             let (old, old_center) = history::interpolation(&self.filtered, self.old_positions[0]);
             value = value.mul(reader_fade) + old.mul(Q14::ONE - reader_fade);
-            min_center = min_center.min(old_center);
+            raw_ready &= self.filtered_tap_ready(old_center, false);
+            lpc_ready &= self.filtered_tap_ready(old_center, true);
         }
-        let steady_off = !self.config.formant.enabled
-            && self.formant_fade == Q14::ZERO
-            && self.filtered_ready_for(min_center, false);
-        let steady_on = self.config.formant.enabled
-            && self.formant_fade == Q14::ONE
-            && self.filtered_ready_for(min_center, true);
+        let steady_off = self.formant_fade == Q14::ZERO && raw_ready;
+        let steady_on = self.config.formant.enabled && self.formant_fade == Q14::ONE && lpc_ready;
         if steady_on {
             self.formant_position = center - FORMANT_OFFSET_FRAMES;
             value = Q14::from_bits(self.formant.forward(
@@ -1236,14 +1288,11 @@ impl Resynthesis {
             );
             self.previous_output[0] = value;
         } else if !steady_off {
-            let raw_shift = position_of(OVERLAP_FRAMES as i32);
-            let (mut raw_value, _) = history::interpolation(&self.raw, position - raw_shift);
+            let mut raw_value = self.interpolate_raw_filtered(position);
             if reader_fade < Q14::ONE {
-                let (old_raw, _) =
-                    history::interpolation(&self.raw, self.old_positions[0] - raw_shift);
+                let old_raw = self.interpolate_raw_filtered(self.old_positions[0]);
                 raw_value = raw_value.mul(reader_fade) + old_raw.mul(Q14::ONE - reader_fade);
             }
-            let lpc_ready = self.filtered_ready_for(min_center, true);
             if self.config.formant.enabled {
                 if lpc_ready {
                     self.formant_fade = (self.formant_fade + STAGE_RAMP_STEP).min(Q14::ONE);
@@ -1412,10 +1461,10 @@ impl Resynthesis {
                 self.filtered_lpc = self.config.formant.enabled;
                 self.filtered_valid = 1;
             } else {
-                self.filtered_valid = self.filtered_valid.saturating_add(1).min(HISTORY as u16);
+                self.filtered_valid = self.filtered_valid.saturating_add(1).min(FILTERED_SETTLED);
             }
         } else if !self.overlap_mixed {
-            self.filtered_valid = self.filtered_valid.saturating_add(1).min(HISTORY as u16);
+            self.filtered_valid = self.filtered_valid.saturating_add(1).min(FILTERED_SETTLED);
         }
         if self.config.stereo_output && self.stereo_fade < Q14::ONE {
             self.stereo_fade = (self.stereo_fade + STAGE_RAMP_STEP).min(Q14::ONE);
@@ -1528,7 +1577,8 @@ impl Resynthesis {
             let bounds = self.reader_bounds(period, 0);
             let mut slot_positions = [Q14::ZERO; 5];
             let mut slot_fades = [Q14::ONE; 5];
-            let mut min_center = i32::MAX;
+            let mut raw_ready = true;
+            let mut lpc_ready = true;
             for slot in 0..5 {
                 let mut current: Q14 = if slot == 0 {
                     ratio
@@ -1552,21 +1602,27 @@ impl Resynthesis {
                 // If the voice adds zero to the two channels, do not read the
                 // audio history.
                 if slot > 0 && self.is_harmony_voice_silent(slot - 1, stereo_fade) {
-                    if (self.filtered_valid as usize) < HISTORY {
-                        min_center = min_center.min(history::center(position));
+                    if self.filtered_valid < FILTERED_SETTLED {
+                        let center = history::center(position);
+                        raw_ready &= self.filtered_tap_ready(center, false);
+                        lpc_ready &= self.filtered_tap_ready(center, true);
                         if fade < Q14::ONE {
-                            min_center = min_center.min(history::center(self.old_positions[slot]));
+                            let old_center = history::center(self.old_positions[slot]);
+                            raw_ready &= self.filtered_tap_ready(old_center, false);
+                            lpc_ready &= self.filtered_tap_ready(old_center, true);
                         }
                     }
                     continue;
                 }
                 let (mut value, center) = history::interpolation(&self.filtered, position);
-                min_center = min_center.min(center);
+                raw_ready &= self.filtered_tap_ready(center, false);
+                lpc_ready &= self.filtered_tap_ready(center, true);
                 if fade < Q14::ONE {
                     let (old, old_center) =
                         history::interpolation(&self.filtered, self.old_positions[slot]);
                     value = value.mul(fade) + old.mul(Q14::ONE - fade);
-                    min_center = min_center.min(old_center);
+                    raw_ready &= self.filtered_tap_ready(old_center, false);
+                    lpc_ready &= self.filtered_tap_ready(old_center, true);
                 }
                 let panned = if slot > 0 {
                     value = value.mul(self.harmony_gains[slot - 1]);
@@ -1583,12 +1639,9 @@ impl Resynthesis {
                     *sum = *sum + panned[channel];
                 }
             }
-            let steady_off = !self.config.formant.enabled
-                && self.formant_fade == Q14::ZERO
-                && self.filtered_ready_for(min_center, false);
-            let steady_on = self.config.formant.enabled
-                && self.formant_fade == Q14::ONE
-                && self.filtered_ready_for(min_center, true);
+            let steady_off = self.formant_fade == Q14::ZERO && raw_ready;
+            let steady_on =
+                self.config.formant.enabled && self.formant_fade == Q14::ONE && lpc_ready;
             if steady_on {
                 self.formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
                 mix = self
@@ -1604,18 +1657,15 @@ impl Resynthesis {
                     self.previous_output[channel] = *value;
                 }
             } else if !steady_off {
-                let raw_shift = position_of(OVERLAP_FRAMES as i32);
                 let mut raw_mix = [Q14::ZERO; 2];
                 for slot in 0..5 {
                     if slot > 0 && self.is_harmony_voice_silent(slot - 1, stereo_fade) {
                         continue;
                     }
-                    let (mut value, _) =
-                        history::interpolation(&self.raw, slot_positions[slot] - raw_shift);
+                    let mut value = self.interpolate_raw_filtered(slot_positions[slot]);
                     let fade = slot_fades[slot];
                     if fade < Q14::ONE {
-                        let (old, _) =
-                            history::interpolation(&self.raw, self.old_positions[slot] - raw_shift);
+                        let old = self.interpolate_raw_filtered(self.old_positions[slot]);
                         value = value.mul(fade) + old.mul(Q14::ONE - fade);
                     }
                     let panned = if slot > 0 {
@@ -1633,7 +1683,6 @@ impl Resynthesis {
                         *sum = *sum + panned[channel];
                     }
                 }
-                let lpc_ready = self.filtered_ready_for(min_center, true);
                 if self.config.formant.enabled {
                     if lpc_ready {
                         self.formant_fade = (self.formant_fade + STAGE_RAMP_STEP).min(Q14::ONE);
