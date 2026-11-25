@@ -1,7 +1,7 @@
 //! Audio histories on the heap and three-point parabolic interpolation.
 
 use crate::numeric::fixed::Q14;
-use crate::numeric::{clamp_i32, ring, HISTORY};
+use crate::numeric::{quadratic, ring, HISTORY};
 
 /// Allocates exactly HISTORY copies of `value` on the heap and keeps that
 /// length in the boxed-array type.
@@ -72,12 +72,5 @@ pub(super) fn interpolation(buffer: &[Q14; HISTORY], position: Q14) -> (Q14, i32
     let center = center_of(position);
     let fraction = Q14::from_bits(bits.wrapping_sub(center.wrapping_shl(14)));
     let [left, middle, right] = interpolation_taps(buffer, center);
-    let left_i64 = i64::from(left.to_bits());
-    let right_i64 = i64::from(right.to_bits());
-    let curvature = Q14::from_bits(clamp_i32((left_i64 + right_i64) >> 1)) - middle;
-    let slope = Q14::from_bits(clamp_i32((right_i64 - left_i64) >> 1));
-    (
-        middle + (curvature.mul::<14, 14>(fraction) + slope).mul(fraction),
-        center,
-    )
+    (quadratic(left, middle, right, fraction), center)
 }
