@@ -57,13 +57,15 @@
 //! frames in [`LatencyMode::LowLatency`]. Voice delays, pitch changes and
 //! effects have their own timing.
 //!
-//! [`Processor::telemetry`] gives data for meters and displays: the ratio and
-//! the gain of each voice, the input and output peaks, the pitch clarity and
-//! the state of the effects. In mono calls, the feedback and telemetry peaks
-//! measure the audio after the downmix. [`Processor::take_telemetry`] also
-//! clears the peak windows of the telemetry. [`Processor::formant_envelope`]
-//! writes the LPC envelopes before and after the formant controls. These calls
-//! do not change the audio.
+//! [`Processor::control_activity`] and [`ProcessorConfig::control_activity`]
+//! give [`ControlActivity`], which shows the active choir, harmony and reverb
+//! controls. [`Processor::telemetry`] gives data for meters and displays: the
+//! ratio and the gain of each voice, the input and output peaks, the pitch
+//! clarity and the state of the effects. In mono calls, the feedback and
+//! telemetry peaks measure the audio after the downmix.
+//! [`Processor::take_telemetry`] also clears the peak windows of the
+//! telemetry. [`Processor::formant_envelope`] writes the LPC envelopes before
+//! and after the formant controls. These calls do not change the audio.
 //!
 //! After the last input block, call [`Processor::begin_drain`] one time. Then
 //! render drain blocks until a call returns zero. Each call fills the unused
@@ -123,7 +125,7 @@ mod scale;
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub mod wasm;
 
-pub use config::{PrepareConfig, ProcessorConfig, SampleRate};
+pub use config::{ControlActivity, PrepareConfig, ProcessorConfig, SampleRate};
 pub use effects::alien::AlienConfig;
 pub use effects::punch::PunchConfig;
 pub use effects::reverb::{ReverbConfig, ReverbMode};
