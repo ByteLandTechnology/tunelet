@@ -159,7 +159,8 @@ pub(crate) struct CorrectionTable {
     pub notes: [i32; 12],
     /// The prepared periods for all classes.
     ///
-    /// If these periods change, the active targets do not reload.
+    /// If the sample rate changes, `set_sample_rate` builds the active targets
+    /// again from these periods.
     base_periods: [i32; 12],
     /// The held MIDI keys.
     ///
@@ -183,11 +184,12 @@ impl CorrectionTable {
         result
     }
 
-    /// Calculates the period table again for `rate`, but does not reload the
-    /// active scale.
+    /// Calculates the period table again for `rate` and builds the active
+    /// targets again.
     ///
-    /// The new periods apply from the next `set_notes` call.
-    fn set_sample_rate(&mut self, rate: SampleRate) {
+    /// If `count` is zero, the active targets and their midpoint boundaries do
+    /// not change.
+    pub(crate) fn set_sample_rate(&mut self, rate: SampleRate) {
         let frequency = ((-9.0 * std::f64::consts::LN_2 / 12.0).exp() * 440.0) as f32;
         let mut base = rate.hz() / frequency;
         while base < 10820.625 {
@@ -196,6 +198,13 @@ impl CorrectionTable {
         self.base_periods = std::array::from_fn(|n| {
             (f64::from(base) * 2.0_f64.powf((100.0 + n as f64 * 100.0) / 1200.0) + 0.5) as i32
         });
+        if self.count > 0 {
+            let mut mask = [false; 12];
+            for &note in &self.notes[..self.count] {
+                mask[note as usize] = true;
+            }
+            self.set_notes(NoteMask(mask));
+        }
     }
     /// Builds the active targets and their midpoint boundaries again.
     ///
