@@ -1,0 +1,110 @@
+# Install the Rust toolchain, cache the Wasm tools and install Node.js.
+name: Install Wasm tools
+description: Install the stable Rust toolchain, cache and install the Wasm tools and install Node.js.
+
+inputs:
+  components:
+    description: Optional Rust components, for example rustfmt and clippy.
+    required: false
+    default: ""
+  node-cache:
+    description: Optional cache mode for actions/setup-node, for example npm.
+    required: false
+    default: "npm"
+  wasm-pack-version:
+    description: The wasm-pack version.
+    required: false
+    default: "0.15.1"
+  binaryen-version:
+    description: The Binaryen version.
+    required: false
+    default: "133"
+  binaryen-sha256:
+    description: The SHA-256 digest of the Linux x86_64 archive for Binaryen.
+    required: false
+    default: "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489"
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+      with:
+        toolchain: stable
+        components: ${{ inputs.components }}
+        targets: wasm32-unknown-unknown
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        cache-bin: "false"
+        shared-key: "rust-wasm"
+
+    # Cache the wasm-pack and wasm-opt binaries in Tier 1.
+    - id: wasm-tools-cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/wasm-tools/bin
+        key: wasm-tools-${{ runner.os }}-${{ runner.arch }}-wasm-pack-${{ inputs.wasm-pack-version }}-binaryen-${{ inputs.binaryen-version }}
+
+    - if: steps.wasm-tools-cache.outputs.cache-hit != 'true'
+      uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+      with:
+        tool: wasm-pack@${{ inputs.wasm-pack-version }}
+        checksum: true
+
+    # Copy wasm-pack, check the Binaryen SHA-256 digest and extract wasm-opt.
+    - if: steps.wasm-tools-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        BINARYEN_VERSION: ${{ inputs.binaryen-version }}
+        BINARYEN_SHA256: ${{ inputs.binaryen-sha256 }}
+      run: |
+        wasm_pack_bin="$(command -v wasm-pack || true)"
+        if [ -z "$wasm_pack_bin" ] && [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/wasm-pack" ]; then
+          wasm_pack_bin="${CARGO_HOME:-$HOME/.cargo}/bin/wasm-pack"
+        elif [ -z "$wasm_pack_bin" ] && [ -x "$HOME/.install-action/bin/wasm-pack" ]; then
+          wasm_pack_bin="$HOME/.install-action/bin/wasm-pack"
+        fi
+        if [ -z "$wasm_pack_bin" ]; then
+          echo "::error::wasm-pack was not found after installation" >&2
+          exit 1
+        fi
+        mkdir -p "$HOME/.cache/wasm-tools/bin"
+        cp -f "$wasm_pack_bin" "$HOME/.cache/wasm-tools/bin/wasm-pack"
+        curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz"
+        echo "${BINARYEN_SHA256}  $RUNNER_TEMP/binaryen.tar.gz" | sha256sum --check
+        tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$HOME/.cache/wasm-tools/bin" --strip-components=2 "binaryen-version_${BINARYEN_VERSION}/bin/wasm-opt"
+        rm -f "$RUNNER_TEMP/binaryen.tar.gz"
+
+    # Add the tool cache folder to GITHUB_PATH on hits and misses.
+    - shell: bash
+      run: |
+        echo "$HOME/.cache/wasm-tools/bin" >> "$GITHUB_PATH"
+
+    # Read the wasm-bindgen version from Cargo.lock for Tier 2.
+    - id: wasm-bindgen
+      shell: bash
+      run: |
+        version="$(awk '
+          $0 == "[[package]]" { in_pkg = 0 }
+          $0 == "name = \"wasm-bindgen\"" { in_pkg = 1; next }
+          in_pkg && /^version = "/ {
+            sub(/^version = "/, "")
+            sub(/"$/, "")
+            print
+          }
+        ' Cargo.lock | paste -sd- -)"
+        if [ -z "$version" ]; then
+          echo "::error::wasm-bindgen was not found in Cargo.lock" >&2
+          exit 1
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    # Cache the wasm-bindgen binary that wasm-pack downloads in Tier 2.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/.wasm-pack
+        key: wasm-pack-cache-${{ runner.os }}-${{ runner.arch }}-wasm-pack-${{ inputs.wasm-pack-version }}-wasm-bindgen-${{ steps.wasm-bindgen.outputs.version }}
+
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version-file: ".node-version"
+        cache: ${{ inputs.node-cache }}

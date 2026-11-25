@@ -2,9 +2,10 @@
 # npm package.
 #
 # First, build-wasm checks the Rust lints, the docs, the crate archive and the
-# Wasm target on Linux, then uploads pkg/. Next, check-os builds the native
-# library, compiles TypeScript and checks the npm archives on Linux, macOS and
-# Windows. Last, verify reports one status check for branch protection.
+# Wasm target on Linux, then uploads pkg/. In parallel, msrv checks
+# rust-version from Cargo.toml. Next, check-os builds the native library,
+# compiles TypeScript and checks the npm archives on Linux, macOS and Windows.
+# Last, verify reports one status check for branch protection.
 name: CI
 
 on:
@@ -30,27 +31,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+      - uses: ./.github/actions/setup-wasm
         with:
-          toolchain: stable
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          cache-bin: "false"
-      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
-        with:
-          tool: wasm-pack@0.15.1
-          checksum: true
-      # Install Binaryen wasm-opt 133 and verify its SHA-256 checksum.
-      - run: |
-          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz
-          echo "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  $RUNNER_TEMP/binaryen.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "24"
+          node-cache: ""
       - run: cargo fmt --check
       - run: cargo clippy --locked --lib -- -D warnings
       - run: cargo doc --locked --no-deps
@@ -107,7 +91,7 @@ jobs:
           digest-mismatch: error
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version-file: ".node-version"
           cache: "npm"
       - run: cargo build --locked --release
       # Check that Cargo built the native dynamic library for this OS.
@@ -119,20 +103,44 @@ jobs:
       # Pack and check the pre-built files without a second Wasm build.
       - run: npm run verify:pack -- --ignore-scripts
 
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Install rust-version from Cargo.toml.
+      - run: |
+          msrv="$(sed -n 's/^rust-version = "\([0-9][0-9.]*\)"$/\1/p' Cargo.toml)"
+          if [ -z "$msrv" ]; then
+            echo "Cargo.toml does not set rust-version" >&2
+            exit 1
+          fi
+          rustup toolchain install "$msrv" --profile minimal --no-self-update --target wasm32-unknown-unknown
+          echo "RUSTUP_TOOLCHAIN=$msrv" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-bin: "false"
+      - run: cargo build --locked --lib
+      - run: cargo build --locked --lib --target wasm32-unknown-unknown --features wasm
+
   verify:
     needs:
       - build-wasm
       - check-os
+      - msrv
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # Fail if build-wasm or check-os did not succeed.
+      # Fail if build-wasm, check-os or msrv did not succeed.
       - run: |
-          if [ "${BUILD_WASM}" != "success" ] || [ "${CHECK_OS}" != "success" ]; then
-            echo "Upstream job results: build-wasm=${BUILD_WASM}, check-os=${CHECK_OS}" >&2
+          if [ "${BUILD_WASM}" != "success" ] || [ "${CHECK_OS}" != "success" ] || [ "${MSRV}" != "success" ]; then
+            echo "Upstream job results: build-wasm=${BUILD_WASM}, check-os=${CHECK_OS}, msrv=${MSRV}" >&2
             exit 1
           fi
         env:
           BUILD_WASM: ${{ needs.build-wasm.result }}
           CHECK_OS: ${{ needs.check-os.result }}
+          MSRV: ${{ needs.msrv.result }}

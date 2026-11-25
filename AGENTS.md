@@ -99,8 +99,8 @@ cargo clippy --locked --lib -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
 cargo package --locked
 rustup target add wasm32-unknown-unknown
-cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
+cargo clippy --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --release --no-deps --target wasm32-unknown-unknown --features wasm
 ```
 
 If you run `cargo package --locked` before a commit, add `--allow-dirty`.
@@ -110,7 +110,7 @@ In PowerShell on Windows, set `RUSTDOCFLAGS` in the environment before `cargo do
 ```powershell
 $env:RUSTDOCFLAGS = "-D warnings"
 cargo doc --locked --no-deps
-cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
+cargo doc --locked --release --no-deps --target wasm32-unknown-unknown --features wasm
 npm run check:wasm
 Remove-Item Env:RUSTDOCFLAGS
 ```
@@ -118,10 +118,10 @@ Remove-Item Env:RUSTDOCFLAGS
 In `cmd.exe` on Windows, use `set "RUSTDOCFLAGS=-D warnings"` before the doc commands and `set "RUSTDOCFLAGS="` after them.
 
 If you change the Wasm or TypeScript code, also run these commands.
-`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
-`npm run build` compiles `src/wasm.rs` and `src/index.ts`.
-`npm run verify:pack` runs `npm run build` one time and checks the `tunelet`
-and `@bytelandtechnology/tunelet` archives:
+`npm run check:wasm` runs Clippy and rustdoc in release mode for
+`wasm32-unknown-unknown`. `npm run build` compiles `src/wasm.rs` and
+`src/index.ts`. `npm run verify:pack` runs `npm run build` one time and
+checks the `tunelet` and `@bytelandtechnology/tunelet` archives:
 
 ```sh
 npm ci
@@ -139,8 +139,9 @@ npm run verify:pack
   runs on `ubuntu-latest`, `macos-latest` and `windows-latest` with isolated
   failures (`fail-fast: false`). Each runner builds `libtunelet.so`,
   `libtunelet.dylib` or `tunelet.dll`, compiles TypeScript and runs
-  `npm run verify:pack -- --ignore-scripts`. `verify` reports the combined
-  status for branch protection.
+  `npm run verify:pack -- --ignore-scripts`. `msrv` checks `rust-version` from
+  `Cargo.toml` on `ubuntu-latest`. `verify` reports the combined status for
+  branch protection.
 - Make sure that there are no new warnings. This includes broken
   rustdoc links.
 - The crate has no tests (`test = false`). Do not add tests or test

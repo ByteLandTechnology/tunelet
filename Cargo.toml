@@ -1,7 +1,8 @@
 [package]
 name = "tunelet"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
+rust-version = "1.88"
 description = "Safe, portable vocal pitch correction, choir, harmony, formant control and effects"
 license = "MIT"
 readme = "README.md"
