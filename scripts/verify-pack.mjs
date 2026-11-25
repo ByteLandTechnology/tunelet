@@ -319,6 +319,11 @@ function verifyRuntimeImport(consumerDir, packageName) {
       "  processor.free();",
       "}",
       "",
+      'assert.equal(typeof Symbol.dispose, "symbol");',
+      "const disposableProcessor = new rootModule.Tunelet(48000, 128);",
+      'assert.equal(typeof disposableProcessor[Symbol.dispose], "function");',
+      "disposableProcessor[Symbol.dispose]();",
+      "",
     ].join("\n"),
   );
 
@@ -382,6 +387,101 @@ function verifyRuntimeImport(consumerDir, packageName) {
     cwd: consumerDir,
     stdio: "inherit",
   });
+
+  const checkWasmInitPath = path.join(consumerDir, "check-wasm-init.mjs");
+  fs.writeFileSync(
+    checkWasmInitPath,
+    [
+      'import assert from "node:assert/strict";',
+      'import fs from "node:fs";',
+      'import { fileURLToPath } from "node:url";',
+      "",
+      "const packageName = process.argv[2];",
+      "const wasmBytes = fs.readFileSync(",
+      "  fileURLToPath(import.meta.resolve(`${packageName}/pkg/tunelet_bg.wasm`)),",
+      ");",
+      "const wasmModule = await import(`${packageName}/wasm`);",
+      "const exportsFromInit = await wasmModule.default({",
+      "  module_or_path: wasmBytes,",
+      "});",
+      "assert.ok(exportsFromInit);",
+      "const processor = new wasmModule.Tunelet(48000, 128);",
+      "try {",
+      "  assert.equal(processor.sampleRate, 48000);",
+      "} finally {",
+      "  processor.free();",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  execFileSync(process.execPath, [checkWasmInitPath, packageName], {
+    cwd: consumerDir,
+    stdio: "inherit",
+  });
+
+  const checkInitSyncPath = path.join(consumerDir, "check-init-sync.mjs");
+  fs.writeFileSync(
+    checkInitSyncPath,
+    [
+      'import assert from "node:assert/strict";',
+      'import fs from "node:fs";',
+      'import { fileURLToPath } from "node:url";',
+      "",
+      "const packageName = process.argv[2];",
+      "const wasmBytes = fs.readFileSync(",
+      "  fileURLToPath(import.meta.resolve(`${packageName}/tunelet_bg.wasm`)),",
+      ");",
+      "const { initSync, Tunelet } = await import(packageName);",
+      "const exportsFromSync = initSync({ module: wasmBytes });",
+      "assert.ok(exportsFromSync);",
+      "const processor = new Tunelet(48000, 128);",
+      "try {",
+      "  assert.equal(processor.sampleRate, 48000);",
+      "} finally {",
+      "  processor.free();",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  execFileSync(process.execPath, [checkInitSyncPath, packageName], {
+    cwd: consumerDir,
+    stdio: "inherit",
+  });
+
+  const checkWasmInitSyncPath = path.join(
+    consumerDir,
+    "check-wasm-init-sync.mjs",
+  );
+  fs.writeFileSync(
+    checkWasmInitSyncPath,
+    [
+      'import assert from "node:assert/strict";',
+      'import fs from "node:fs";',
+      'import { fileURLToPath } from "node:url";',
+      "",
+      "const packageName = process.argv[2];",
+      "const wasmBytes = fs.readFileSync(",
+      "  fileURLToPath(import.meta.resolve(`${packageName}/pkg/tunelet_bg.wasm`)),",
+      ");",
+      "const wasmModule = await import(`${packageName}/wasm`);",
+      "const exportsFromSync = wasmModule.initSync({ module: wasmBytes });",
+      "assert.ok(exportsFromSync);",
+      "const processor = new wasmModule.Tunelet(48000, 128);",
+      "try {",
+      "  assert.equal(processor.sampleRate, 48000);",
+      "} finally {",
+      "  processor.free();",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  execFileSync(process.execPath, [checkWasmInitSyncPath, packageName], {
+    cwd: consumerDir,
+    stdio: "inherit",
+  });
 }
 
 /** Check strict TypeScript consumer profiles without ambient leakage. */
@@ -437,6 +537,14 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "      },",
     "    },",
     "  };",
+    "  {",
+    "    using disposableProcessor = new Tunelet(",
+    "      48000,",
+    "      128,",
+    "      configWithUndefined,",
+    "    );",
+    "    disposableProcessor.reset();",
+    "  }",
     "  const processor = new Tunelet(48000, 128, configWithUndefined);",
     "  processor.setConfig(configWithUndefined);",
     "  const resynthesisUpdate: ResynthesisConfig = {",
