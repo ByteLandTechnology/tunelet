@@ -1,19 +1,21 @@
 //! Signed fixed-point values that use `i32` storage.
 //!
-//! `Fixed<F>` represents `bits / 2^F`. Addition, subtraction and products
-//! wrap at 32 bits. Multiplication and division state the fractional format
-//! of the result. Callers must supply valid formats and divisors that are
-//! not zero.
+//! `Fixed<F>` represents `bits / 2^F`. Addition, subtraction, negation and
+//! absolute value saturate in `i32`. Multiplication, division and upward
+//! rescale use `i64` arithmetic and clamp to `i32::MIN..=i32::MAX`. Callers
+//! must supply valid formats and divisors that are not zero.
 
+use crate::numeric::clamp_i32;
 use std::ops::{Add, Neg, Shl, Shr, Sub};
 
 /// A signed `i32` word that represents `bits / 2^FRAC`.
 ///
-/// This type only marks the format. It does not find overflow. Arithmetic
-/// wraps at 32 bits before each shift. This is also true for a product
-/// whose rescaled result fits. Callers must use fractional bit counts and
-/// shift differences that are less than 32. Conversions and division have
-/// the conditions that their documentation gives.
+/// This type marks the binary format. Addition, subtraction, negation and
+/// absolute value saturate in `i32`. Products, quotients and upward rescale
+/// use `i64` arithmetic and clamp to `i32::MIN..=i32::MAX`. Callers must
+/// use fractional bit counts and shift differences that are less than 32.
+/// Conversions and division have the conditions that their documentation
+/// gives.
 ///
 /// Comparison compares the signed words in the same format. `Default` is
 /// zero.
@@ -21,6 +23,17 @@ use std::ops::{Add, Neg, Shl, Shr, Sub};
 #[repr(transparent)]
 pub(crate) struct Fixed<const FRAC: u32>(i32);
 
+/// The format with 30 fractional bits, for per-sample envelope coefficients.
+pub(crate) type Q30 = Fixed<30>;
+/// The format with 28 fractional bits, for envelopes, gains and output
+/// ceilings.
+pub(crate) type Q28 = Fixed<28>;
+/// The format with 24 fractional bits, for saturation drive and envelope
+/// ratios.
+pub(crate) type Q24 = Fixed<24>;
+/// The format with 22 fractional bits, for normalization gains and saturator
+/// inputs.
+pub(crate) type Q22 = Fixed<22>;
 /// The format with 14 fractional bits, for audio, ratios, coefficients and
 /// frame positions.
 ///
@@ -66,63 +79,47 @@ impl<const F: u32> Fixed<F> {
         Self((value * f64::from(1u32 << F)) as i32)
     }
 
-    /// Returns `(self * rhs) >> (F + B - R)`, the product in format `R`.
+    /// Returns `(self * rhs) >> (F + B - R)` in format `R`, clamped to `i32`.
     #[inline]
     pub(crate) fn mul<const B: u32, const R: u32>(self, rhs: Fixed<B>) -> Fixed<R> {
         const { assert!(F + B >= R, "product cannot gain fraction bits") };
-        Fixed(self.0.wrapping_mul(rhs.0).wrapping_shr(F + B - R))
+        const { assert!(F + B - R < 64, "product shift must be less than 64") };
+        Fixed(clamp_i32(
+            (i64::from(self.0) * i64::from(rhs.0)) >> (F + B - R),
+        ))
     }
 
-    /// Returns `(self << (R + B - F)) / rhs`, the quotient in format `R`.
+    /// Returns `(self << (R + B - F)) / rhs` in format `R`, clamped to `i32`.
     ///
-    /// The caller must supply a divisor that is not zero. The wrapping
-    /// division panics if the divisor is zero.
+    /// The caller must supply a divisor that is not zero. Division panics if
+    /// the divisor is zero.
     #[inline]
     pub(crate) fn div<const B: u32, const R: u32>(self, rhs: Fixed<B>) -> Fixed<R> {
         const { assert!(R + B >= F, "quotient cannot lose fraction bits") };
-        Fixed(self.0.wrapping_shl(R + B - F).wrapping_div(rhs.0))
+        const { assert!(R + B - F < 32, "quotient shift must be less than 32") };
+        Fixed(clamp_i32(
+            (i64::from(self.0) << (R + B - F)) / i64::from(rhs.0),
+        ))
     }
 
-    /// Returns the same bits, shifted into format `R`.
+    /// Returns the value shifted into format `R`.
     ///
-    /// If `R` adds fractional bits, the shift wraps. If `R` removes
-    /// fractional bits, the shift truncates toward -inf.
+    /// If `R` adds fractional bits, the shift uses `i64` and clamps to `i32`.
+    /// If `R` removes fractional bits, the shift truncates toward -inf.
     #[inline]
     pub(crate) fn rescale<const R: u32>(self) -> Fixed<R> {
+        const { assert!(R.abs_diff(F) < 32, "rescale shift must be less than 32") };
         if R >= F {
-            Fixed(self.0.wrapping_shl(R - F))
+            Fixed(clamp_i32(i64::from(self.0) << R.saturating_sub(F)))
         } else {
-            Fixed(self.0.wrapping_shr(F - R))
+            Fixed(self.0 >> F.saturating_sub(R))
         }
     }
 
-    /// Removes fractional bits to get format `R`, with a signed half-unit
-    /// adjustment.
-    ///
-    /// If the bits are nonnegative, the function adds half a unit. If the
-    /// bits are negative, the function subtracts half a unit. Then an
-    /// arithmetic shift to the right removes the bits. The shift moves
-    /// negative values down. For example, Q1 bits -2 become Q0 bits -2,
-    /// but the input represents -1.
-    #[inline]
-    pub(crate) fn round<const R: u32>(self) -> Fixed<R> {
-        const { assert!(F > R, "rounding must drop fraction bits") };
-        let half = 1 << (F - R - 1);
-        let bits = if self.0 >= 0 {
-            self.0.wrapping_add(half)
-        } else {
-            self.0.wrapping_sub(half)
-        };
-        Fixed(bits >> (F - R))
-    }
-
-    /// Returns the wrapped absolute value. `i32::MIN` stays negative.
-    ///
-    /// The result does not saturate. This agrees with the word arithmetic of
-    /// the signal path.
+    /// Returns the saturated absolute value. `i32::MIN` becomes `i32::MAX`.
     #[inline]
     pub(crate) fn abs(self) -> Self {
-        Self(self.0.wrapping_abs())
+        Self(self.0.saturating_abs())
     }
 }
 
@@ -130,25 +127,25 @@ impl<const F: u32> Add for Fixed<F> {
     type Output = Self;
     #[inline]
     fn add(self, rhs: Self) -> Self {
-        Self(self.0.wrapping_add(rhs.0))
+        Self(self.0.saturating_add(rhs.0))
     }
 }
 impl<const F: u32> Sub for Fixed<F> {
     type Output = Self;
     #[inline]
     fn sub(self, rhs: Self) -> Self {
-        Self(self.0.wrapping_sub(rhs.0))
+        Self(self.0.saturating_sub(rhs.0))
     }
 }
 impl<const F: u32> Neg for Fixed<F> {
     type Output = Self;
     #[inline]
     fn neg(self) -> Self {
-        Self(self.0.wrapping_neg())
+        Self(self.0.saturating_neg())
     }
 }
-/// Raw bit shifts that keep the format, for approximate comparisons and
-/// for scale changes.
+/// Raw bit shifts that keep the format and wrap at 32 bits, for approximate
+/// comparisons and for scale changes.
 impl<const F: u32> Shr<u32> for Fixed<F> {
     type Output = Self;
     #[inline]

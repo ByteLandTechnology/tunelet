@@ -1,6 +1,6 @@
 [package]
 name = "tunelet"
-version = "0.2.0"
+version = "0.3.3"
 edition = "2021"
 description = "Safe, portable vocal pitch correction, choir, harmony, formant control and effects"
 license = "MIT"
@@ -8,7 +8,7 @@ readme = "README.md"
 repository = "https://github.com/ByteLandTechnology/tunelet.git"
 keywords = ["audio", "pitch-correction", "harmony", "dsp", "wasm"]
 categories = ["multimedia::audio", "wasm"]
-include = ["/src/**/*.rs", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+include = ["/src/**/*.rs", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/docs/images/*.svg"]
 
 [lib]
 crate-type = ["rlib", "cdylib"]
@@ -23,3 +23,7 @@ js-sys = { version = "0.3", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 tsify = { version = "0.5.8", default-features = false, features = ["js"], optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
+
+[profile.release]
+lto = true
+codegen-units = 1

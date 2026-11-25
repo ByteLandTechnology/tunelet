@@ -52,9 +52,10 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
   controls, feedback, reset and drain must not allocate memory, acquire
   locks or do I/O. The Wasm binding can also allocate when it converts
   objects, events, feedback and errors.
-- The fixed-point arithmetic uses explicit wrapping and quantization. If
-  you change the operation order, the rounding or a table value, the
-  output samples change. Treat this as a change of behavior.
+- The fixed-point arithmetic uses `i64` products, saturated `i32` bounds
+  and explicit quantization. If you change the operation order, the
+  rounding or a table value, the output samples change. Treat this as a
+  change of behavior.
 - A call that can fail must validate the full block or configuration
   before it changes the state or the output. Keep this rule.
 - The default build has no dependencies. Make each Wasm dependency
@@ -93,18 +94,29 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
-cargo doc --locked --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
+cargo package --locked
+rustup target add wasm32-unknown-unknown
+cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
 ```
+
+If you run `cargo package --locked` before a commit, add `--allow-dirty`.
 
 If you change the Wasm or TypeScript code, also run these commands.
-`npm run build` compiles `src/wasm.rs` and `src/index.ts`:
+`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
+`npm run build` compiles `src/wasm.rs` and `src/index.ts`.
+`npm run verify:pack` runs `npm run build` one time and checks the `tunelet`
+and `@bytelandtechnology/tunelet` archives:
 
 ```sh
-rustup target add wasm32-unknown-unknown
 npm ci
-npm run build
+RUSTDOCFLAGS="-D warnings" npm run check:wasm
+npm run verify:pack
 ```
 
+- `.github/workflows/ci.yml` runs these checks on each pull request and each
+  push to `main`.
 - Make sure that there are no new warnings. This includes broken
   rustdoc links.
 - The crate has no tests (`test = false`). Do not add tests or test
@@ -129,9 +141,12 @@ npm run build
 - Releases: release-please sets the versions and writes `CHANGELOG.md`.
   Do not change the version in `Cargo.toml`, `Cargo.lock`,
   `package.json`, `package-lock.json` or `.release-please-manifest.json`
-  by hand. The commit types and the `!` mark set the next version. The
-  release workflow is `.github/workflows/release.yml`. It publishes to
-  npm and crates.io through trusted publishing, so do not rename it.
+  by hand. The commit types and the `!` mark set the next version. In
+  `.github/workflows/release.yml`, `build-wasm` builds, checks and
+  uploads both `.tgz` archives and `SHA256SUMS.txt`. Then `publish-npm`
+  and `publish-github` verify `SHA256SUMS.txt` and publish those exact
+  `.tgz` archives. The OIDC policies on npm and crates.io name
+  `release.yml`, so do not rename that file.
 
 ## Prohibited changes
 

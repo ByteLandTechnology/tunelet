@@ -1,41 +1,46 @@
 //! The fixed-point operations, the lookup tables and the state that each
 //! processor keeps for these operations.
 //!
-//! Integer products wrap before the shift. Each conversion between integer
-//! and floating-point values is explicit, because intermediate rounding
-//! changes the audio.
+//! Fixed-point products use `i64` arithmetic and clamp to `i32`. Each
+//! conversion between integer and floating-point values is explicit, because
+//! intermediate quantization changes the audio.
 
 pub(crate) mod fixed;
 pub(crate) mod rng;
 mod tables;
+use fixed::Q14;
 use rng::RandomStream;
 use tables::{SINC, TAN};
 
-/// Multiplies two signed words with 32-bit wrap, then does an arithmetic
-/// shift to the right.
-///
-/// The caller must supply a shift that is less than 32. Do not widen the
-/// product. If the intermediate product overflows, a wider product gives a
-/// different result.
+/// Clamps a signed 64-bit integer to `i32::MIN..=i32::MAX`.
 #[inline]
-pub(crate) fn mul_shift(a: i32, b: i32, shift: u32) -> i32 {
-    a.wrapping_mul(b) >> shift
+pub(crate) fn clamp_i32(value: i64) -> i32 {
+    value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
-/// Removes 14 fractional bits with a signed half-unit adjustment.
+/// Multiplies two signed words in `i64`, shifts right and clamps to `i32`.
 ///
-/// If the word is nonnegative, the function adds half a unit. If the word is
-/// negative, the function subtracts half a unit. Then an arithmetic shift
-/// removes the bits. The shift moves negative values down. This is not
-/// round-half-to-even, and it is not truncation toward zero. The half-unit
-/// adjustment also wraps.
+/// The caller must supply a shift that is less than 32.
 #[inline]
-pub(crate) fn round_q14(value: i32) -> i32 {
-    if value >= 0 {
-        value.wrapping_add(8192) >> 14
-    } else {
-        value.wrapping_sub(8192) >> 14
-    }
+pub(crate) fn mul_shift(a: i32, b: i32, shift: u32) -> i32 {
+    clamp_i32((i64::from(a) * i64::from(b)) >> shift)
+}
+
+/// Removes 14 fractional bits with a signed half-unit adjustment and clamps
+/// to `i32`.
+///
+/// If the value is nonnegative, the function adds half a unit. If the value
+/// is negative, the function subtracts half a unit. Then an arithmetic shift
+/// removes the bits, and the function clamps the result to
+/// `i32::MIN..=i32::MAX`. The shift moves negative values down.
+#[inline]
+pub(crate) fn round_q14(value: i64) -> i32 {
+    const MIN_Q28: i64 = ((i32::MIN as i64) << 14) + 8192;
+    const MAX_Q28: i64 = (i32::MAX as i64) << 14;
+    let clamped = value.clamp(MIN_Q28, MAX_Q28);
+    let sign = clamped >> 63;
+    let bias = (8192 ^ sign) - sign;
+    ((clamped + bias) >> 14) as i32
 }
 
 /// Converts an amplitude in decibels to a linear multiplier with
@@ -68,12 +73,16 @@ pub(crate) fn coefficient_to_exp_value(min: f32, max: f32, start: f32, position:
 /// Returns the value of a three-point parabola at a Q14 fractional offset
 /// from the center sample.
 ///
-/// The table words, the sums and the intermediate products wrap.
+/// The tap midpoint and the slope use `i64` arithmetic and clamp to `i32`.
+/// The polynomial sums saturate in `i32`. The products use `i64` arithmetic
+/// and clamp to `i32`.
 #[inline]
-fn quadratic(y0: i32, y1: i32, y2: i32, fraction: i32) -> i32 {
-    let a = (y0.wrapping_add(y2) >> 1).wrapping_sub(y1);
-    let b = y2.wrapping_sub(y0) >> 1;
-    mul_shift(mul_shift(a, fraction, 14).wrapping_add(b), fraction, 14).wrapping_add(y1)
+pub(crate) fn quadratic(left: Q14, middle: Q14, right: Q14, fraction: Q14) -> Q14 {
+    let left_i64 = i64::from(left.to_bits());
+    let right_i64 = i64::from(right.to_bits());
+    let curvature = Q14::from_bits(clamp_i32((left_i64 + right_i64) >> 1)) - middle;
+    let slope = Q14::from_bits(clamp_i32((right_i64 - left_i64) >> 1));
+    middle + (curvature.mul::<14, 14>(fraction) + slope).mul(fraction)
 }
 
 /// Interpolates the table of sinc coefficients at a Q14 phase position.
@@ -84,9 +93,15 @@ fn quadratic(y0: i32, y1: i32, y2: i32, fraction: i32) -> i32 {
 pub(crate) fn fast_sinc(input: i32) -> i32 {
     let scaled = (input >> 1).wrapping_mul(256);
     let index = (scaled.wrapping_add(8192) >> 14).clamp(1, 254);
-    let fraction = scaled.wrapping_sub(index.wrapping_shl(14));
+    let fraction = Q14::from_bits(scaled.wrapping_sub(index.wrapping_shl(14)));
     let i = index as usize;
-    quadratic(SINC[i - 1], SINC[i], SINC[i + 1], fraction)
+    quadratic(
+        Q14::from_bits(SINC[i - 1]),
+        Q14::from_bits(SINC[i]),
+        Q14::from_bits(SINC[i + 1]),
+        fraction,
+    )
+    .to_bits()
 }
 
 /// An arctangent approximation that keeps the last index into the tangent
@@ -110,7 +125,7 @@ impl AtanQ14 {
     ///
     /// The function shifts the input word into Q14 and finds the two adjacent
     /// tangent entries. The caller selects the shift for the input format.
-    /// For example, Punch uses Q8 and a shift of 6. If the magnitude is
+    /// For example, Punch supplies Q14 and a shift of 0. If the magnitude is
     /// larger than the last entry, the function uses a fixed terminal angle.
     /// The signed arithmetic wraps.
     pub(crate) fn process(&mut self, input: i32, shift: u32) -> i32 {
@@ -183,12 +198,23 @@ pub(crate) const HISTORY: usize = 11_568;
 /// scale at runtime.
 pub(crate) const ONE: i32 = 16_384;
 
-/// Multiplies two Q14 words with 32-bit wrap and arithmetic truncation.
+/// Multiplies two Q14 words in `i64` with arithmetic truncation and clamps
+/// to `i32`.
 ///
 /// This function does not add a half-unit adjustment. `round_q14` adds one.
 #[inline]
 pub(crate) fn mul14(left: i32, right: i32) -> i32 {
-    left.wrapping_mul(right) >> 14
+    mul_shift(left, right, 14)
+}
+
+/// Multiplies two bounded Q14 words in `i32` with arithmetic truncation.
+///
+/// Callers must supply inputs with a magnitude of 46,340 or less. This
+/// prevents an `i32` overflow before the shift.
+#[inline]
+pub(crate) fn mul14_bounded(left: i32, right: i32) -> i32 {
+    debug_assert!(left.unsigned_abs() <= 46_340 && right.unsigned_abs() <= 46_340);
+    (left * right) >> 14
 }
 
 /// Wraps a signed frame index into 0..HISTORY with the Euclidean remainder.
