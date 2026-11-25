@@ -515,11 +515,11 @@ midi[1] = (0 << 24) | (0x90 << 16) | (60 << 8) | 100;
 processor.processWithMidi(input, left, right, midi);
 ```
 
-Supported messages are Note On, Note On with zero velocity, Note Off and
+The supported messages are Note On, Note On with zero velocity, Note Off and
 controller 123 (All Notes Off). The processor ignores other three-byte
 messages with valid byte ranges after the offset checks succeed. If
 `midi.length` is odd, a bus is unknown or an offset or MIDI byte is not valid,
-the call rejects the full block. State and output then do not change.
+the call rejects the full block. The state and the output then do not change.
 
 ### Feedback, telemetry and formant envelopes
 

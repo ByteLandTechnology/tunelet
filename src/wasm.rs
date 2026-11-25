@@ -328,8 +328,8 @@ impl WasmProcessor {
     /// for correction MIDI). Bits 16..=23 hold the status byte (`0x80..=0xff`).
     /// Bits 8..=15 and bits 0..=7 hold the two data bytes (`0..=127`).
     ///
-    /// Supported messages are Note On, Note On with zero velocity, Note Off
-    /// and controller 123 (All Notes Off). The processor ignores other
+    /// The supported messages are Note On, Note On with zero velocity, Note
+    /// Off and controller 123 (All Notes Off). The processor ignores other
     /// three-byte messages with valid byte ranges after the offset checks
     /// succeed.
     ///
@@ -586,7 +586,8 @@ impl WasmProcessor {
 /// Copies and validates `(offset, packedMessage)` word pairs from `midi`
 /// before the audio or the state changes.
 ///
-/// Rejects an odd word count before it reserves memory or copies data.
+/// The function rejects an odd word count before it reserves memory or copies
+/// data.
 fn decode_midi_words<'a>(
     buffer: &'a mut Vec<u32>,
     midi: &Uint32Array,

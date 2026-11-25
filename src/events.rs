@@ -266,7 +266,7 @@ pub(crate) struct ValidatedEvents<'a> {
 
 /// A proof that an event passed validation.
 ///
-/// Only `ValidatedEvents` can make this proof.
+/// Only `ValidatedEvents` and `ValidatedPackedMidi` can make this proof.
 pub(crate) struct ValidatedEvent(ControlEvent);
 
 impl ValidatedEvent {
