@@ -55,7 +55,7 @@ jobs:
       - run: cargo doc --locked --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
-      - run: cargo package --list --locked
+      - run: cargo package --locked
       - run: npm ci
       - run: npm run check:wasm
         env:
