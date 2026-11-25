@@ -176,7 +176,8 @@ limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
 multi-voice mixes.
 
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+dry path starts after Warm and has a delay of 1,593 frames. All six reverb
+modes keep the stereo dry signal.
 
 ### Harmony sources
 
@@ -295,7 +296,7 @@ These calls read the state of the processor. They do not change the audio.
 
 | Call                 | Data                                                              |
 | -------------------- | ----------------------------------------------------------------- |
-| `feedback()`         | The pitch, the stereo peak, the correction ratio, the frame count |
+| `feedback()`         | The pitch, the output peak, the correction ratio, the frame count |
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
@@ -311,8 +312,9 @@ The telemetry includes these items:
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
 The peak windows of the telemetry are independent of the peak window of the
-feedback. The latency is nominal. Dry mixes, resampled voices and effects
-have different timing.
+feedback. In mono calls, the output and reverb wet peaks measure the audio
+after the downmix. The dry path has the 1,593-frame delay. Resampled voices,
+choir delays and effects use different delays.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
@@ -502,13 +504,15 @@ call with more points than before reserve memory.
 
 ### Memory allocation
 
-The constructor allocates reusable PCM buffers. A successful call that
+The constructor allocates reusable PCM buffers. The processor also keeps an
+event buffer and uses its capacity again across calls. A successful call that
 processes audio without events does not allocate new Rust PCM storage.
 However, the call copies the audio across the boundary between JavaScript and
 Wasm. These items can allocate:
 
 - Object conversion.
-- Supplied events.
+- Supplied events when a call gives more events than before, or when an event
+  converts a stage configuration.
 - Errors.
 - Feedback and telemetry.
 - The formant envelopes.
@@ -522,36 +526,24 @@ Rust functions.
 
 ### Rust crate
 
-`rust-toolchain.toml` selects Rust `1.100.0` with `rustfmt`, `clippy` and
-the `wasm32-unknown-unknown` target. The minimum Rust version
-(`rust-version` in `Cargo.toml`) is `1.88`.
-
-To build the crate and check the format, the lints and the documentation,
-run these commands:
+To build the crate and check the format, the lints, the documentation and
+the archive, run these commands:
 
 ```sh
-rustup toolchain install
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 cargo doc --locked --no-deps
+cargo package --locked
 ```
 
 To check the `wasm` feature for `wasm32-unknown-unknown` with Cargo, run
 these commands:
 
 ```sh
+rustup target add wasm32-unknown-unknown
 cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
 cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
-```
-
-To check the `1.88` minimum Rust version on the crate and the `wasm`
-target, run these commands:
-
-```sh
-rustup toolchain install 1.88 --target wasm32-unknown-unknown
-cargo +1.88 build --locked --lib
-cargo +1.88 build --locked --lib --target wasm32-unknown-unknown --features wasm
 ```
 
 Native Rust builds and these Wasm checks use Cargo and do not need Node.js
@@ -559,16 +551,12 @@ or npm.
 
 ### npm package
 
-`.nvmrc` pins Node.js `24.22.3`. `package.json` requires Node.js `24.0.0`
-or later, npm `11.5.1` or later and `packageManager` `npm@12.2.3`.
-
-Select Node.js `24.22.3`, install `npm@12.2.3` and install `wasm-pack`.
-Then install the dependencies, check the Wasm bindings and make the
+Install Node.js and `wasm-pack`. Then add the `wasm32-unknown-unknown`
+target, install the dependencies, check the Wasm bindings and make the
 archive:
 
 ```sh
-nvm use
-npm install --global --ignore-scripts npm@12.2.3
+rustup target add wasm32-unknown-unknown
 npm ci
 npm run check:wasm
 npm pack
@@ -576,10 +564,8 @@ npm pack
 
 `npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
 `npm pack` builds the Wasm bindings and the TypeScript entry point. Then it
-creates `tunelet-<version>.tgz`. `npm run verify:pack` builds the package
-and checks the archive files, the Node.js load and the TypeScript
-declarations. To use the archive in a browser project or a Node.js
-project, install it with this command:
+creates `tunelet-<version>.tgz`. To use this archive in a browser project or
+a Node.js project, install it with this command:
 
 ```sh
 npm install /path/to/tunelet-<version>.tgz
@@ -600,19 +586,6 @@ The `build:wasm` script builds the crate in release mode with LTO and one
 codegen unit. Then `wasm-pack` runs Binaryen `wasm-opt` on
 `pkg/tunelet_bg.wasm`. The TypeScript and Node.js type declarations are only
 development dependencies.
-
-### Update toolchains
-
-- To update the pinned Rust compiler, change `channel` in
-  `rust-toolchain.toml` and run the Rust and Wasm checks.
-- To update the minimum Rust version, change `rust-version` in
-  `Cargo.toml` and run the MSRV build for both targets.
-- To update Node.js, change `.nvmrc` and `engines.node` in
-  `package.json`, and run `npm ci` and `npm run verify:pack`.
-- To update npm, change `packageManager` and `engines.npm` in
-  `package.json` to `11.5.1` or later, and run `npm run verify:pack`.
-- After a version change, update the version numbers in this section and
-  in `AGENTS.md`.
 
 ## License
 
