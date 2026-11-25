@@ -85,7 +85,9 @@ pub(crate) struct Alien {
     /// The validated loop length. It is not more than half of the history
     /// capacity.
     loop_len: usize,
-    /// The number of frames captured since Alien became active.
+    /// The number of frames in `buffer` since construction or the last reset.
+    written: usize,
+    /// The number of frames that Alien captured since it became active.
     captured: usize,
     /// The current frame in the 200-frame wet mix ramp, in 0..=200.
     wet_frames: usize,
@@ -106,6 +108,7 @@ impl Alien {
             read: 0,
             phase: 0,
             loop_len: config.loop_frames as usize,
+            written: 0,
             captured,
             wet_frames,
             restart_pending: false,
@@ -155,7 +158,8 @@ impl Alien {
     /// Clears the recorded audio and resets the cursors and ramps, while it
     /// keeps the configured loop.
     pub(crate) fn reset(&mut self) {
-        self.buffer.fill([Q14::default(); 2]);
+        self.buffer[..self.written].fill([Q14::default(); 2]);
+        self.written = 0;
         self.read = 0;
         self.phase = 0;
         if self.config.enabled {
@@ -226,6 +230,9 @@ impl Alien {
             return input;
         }
         self.buffer[self.read] = input;
+        if self.written < HISTORY_FRAMES {
+            self.written += 1;
+        }
         if self.restart_pending {
             let reverse = self.reverse_sample();
             self.wet_frames -= 1;

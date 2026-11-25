@@ -3,6 +3,7 @@
 use crate::error::check_range;
 use crate::filter::{Biquad, Design};
 use crate::numeric::fixed::{Fixed, Q14};
+use crate::processor::OutputLayout;
 use crate::{Error, SampleRate};
 
 /// The step for a 256-frame Q14 gain ramp (`16384 / 256`).
@@ -13,9 +14,8 @@ const RAMP_STEP: Q14 = Q14::from_bits(64);
 /// All modes share one delay buffer. If the mode changes while the reverb is
 /// active, the stage ramps the wet gain to zero over 256 frames. Then it
 /// clears the delay buffer and the damping filters, and ramps the new mode
-/// over 256 frames. The stereo layout of the buffer does not make all modes
-/// give different left and right signals. Schroeder gives the same value on
-/// the two channels.
+/// over 256 frames. All modes keep the stereo dry input. Schroeder adds the
+/// same wet signal to the two channels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -63,9 +63,9 @@ pub struct ReverbConfig {
     pub mode: ReverbMode,
     /// The wet fraction, 0..=1.
     ///
-    /// The default is 0.5. The dry weight is `1 - mix`. Schroeder and Binaural
-    /// use a mono dry signal. The other modes keep the stereo dry input. If
-    /// the network is enabled, a zero mix still advances it.
+    /// The default is 0.5. The dry weight is `1 - mix`. All modes keep the
+    /// stereo dry input. If the network is enabled, a zero mix still advances
+    /// it.
     pub mix: f32,
     /// The diffusion control without a unit, 0..=1.
     ///
@@ -168,6 +168,8 @@ pub(crate) struct Reverb {
     /// The largest absolute Q14 wet contribution in the telemetry window. No
     /// audio calculation reads it.
     wet_peak: i32,
+    /// If `true`, the delay buffer changed since construction or the last reset.
+    dirty: bool,
 }
 
 /// The divisor for a division by two that truncates toward zero, also for
@@ -190,17 +192,6 @@ fn quantize_mix(mix: f32) -> Q14 {
 #[inline]
 fn mul(left: Q14, right: Q14) -> Q14 {
     left.mul(right)
-}
-
-/// Returns the enabled dry pair for a mode, a dry weight and a frame.
-#[inline]
-fn mode_dry(mode: ReverbMode, left: Q14, right: Q14, mono: Q14, dry: Q14) -> [Q14; 2] {
-    if matches!(mode, ReverbMode::Schroeder | ReverbMode::Binaural) {
-        let value = mul(mono, dry);
-        [value, value]
-    } else {
-        [mul(left, dry), mul(right, dry)]
-    }
 }
 
 impl Reverb {
@@ -229,6 +220,7 @@ impl Reverb {
             binaural_offset: layout.binaural_offset,
             scratch: layout.capacity - 1,
             wet_peak: 0,
+            dirty: false,
         };
         result.apply_active_config(config);
         result
@@ -253,6 +245,7 @@ impl Reverb {
     /// Clears the delay buffer and both damping filters after a transition.
     fn clear_all(&mut self) {
         self.delay.reset();
+        self.dirty = false;
         self.lpf1.reset();
         self.lpf2.reset();
         self.bypass_quiet_frames = 0;
@@ -299,7 +292,10 @@ impl Reverb {
     /// Clears the delay contents and transition state, while it keeps the
     /// write cursor and the damping memories.
     pub(crate) fn reset(&mut self) {
-        self.delay.reset();
+        if self.dirty {
+            self.delay.reset();
+            self.dirty = false;
+        }
         self.apply_active_config(self.config);
         self.enable_fade = if self.config.enabled {
             Q14::ONE
@@ -336,246 +332,24 @@ impl Reverb {
     pub(crate) fn clear_wet_peak(&mut self) {
         self.wet_peak = 0;
     }
-    /// Calculates the selected network one time and advances the ring by one
-    /// frame.
-    ///
-    /// When the stage is idle in bypass, no delay or filter history advances.
-    /// The internal mono averages use integer division toward zero. The PCM
-    /// downmix in the processor uses a shift.
-    pub(crate) fn process_sample(&mut self, frame: [Q14; 2]) -> [Q14; 2] {
-        if !self.config.enabled
-            && self.bypass_remaining == 0
-            && !self.fading_out_mode
-            && self.enable_fade == Q14::ZERO
-        {
-            return frame;
-        }
-        if self.config.enabled && self.enable_fade < Q14::ONE {
-            self.enable_fade = (self.enable_fade + RAMP_STEP).min(Q14::ONE);
-        } else if !self.config.enabled && self.enable_fade > Q14::ZERO {
-            self.enable_fade = (self.enable_fade - RAMP_STEP).max(Q14::ZERO);
-        }
-        if self.fading_out_mode {
-            self.mode_fade = (self.mode_fade - RAMP_STEP).max(Q14::ZERO);
-        } else if self.mode_fade < Q14::ONE {
-            self.mode_fade = (self.mode_fade + RAMP_STEP).min(Q14::ONE);
-        }
-
-        let [left, right] = frame;
-        let mono =
-            Q14::from_bits(((i64::from(left.to_bits()) + i64::from(right.to_bits())) / 2) as i32);
+    /// Evaluates the active delay topology one time, advances the delay ring
+    /// and returns the scaled wet stereo pair.
+    fn step_network(&mut self, left: Q14, right: Q14, mono: Q14, wet_gain: Q14) -> [Q14; 2] {
         let t = self.taps;
-        let dry = Q14::ONE - self.mix;
-
-        // Keep the exact steady-state arithmetic when no transition is active.
-        if self.config.enabled
-            && !self.fading_out_mode
-            && self.enable_fade == Q14::ONE
-            && self.mode_fade == Q14::ONE
-        {
-            let d = &mut self.delay;
-            let mut result = match self.active_config.mode {
-                ReverbMode::Echo => {
-                    d.put(mono, t[0]);
-                    let echo: Fixed<0> = Fixed::<0>::from_bits(t[39] as i32).mul(self.diffuse);
-                    d.comb(t[0], echo.to_bits() as usize, self.decay);
-                    [
-                        mul(left, dry) + mul(self.mix, d.get(t[25]) - d.get(t[32])),
-                        mul(right, dry) - mul(self.mix, d.get(t[26]) - d.get(t[31])),
-                    ]
-                }
-                ReverbMode::Schroeder => {
-                    for i in [0, 13, 23, 29] {
-                        d.put(mono.div::<0, 14>(TWO), t[i]);
-                    }
-                    for (a, b, g) in [(0, 12, 0.9), (13, 22, 0.89), (23, 28, 0.87), (29, 34, 0.86)]
-                    {
-                        d.comb(t[a], t[b], q14(g));
-                    }
-                    d.fir(
-                        t[40],
-                        &[
-                            (t[12], q14(0.25)),
-                            (t[22], q14(0.25)),
-                            (t[28], q14(0.25)),
-                            (t[34], q14(0.25)),
-                        ],
-                    );
-                    d.allpass(t[40], t[43], self.decay);
-                    d.allpass(t[44], t[45], self.decay);
-                    let value = mul(mono, dry) + mul(self.mix, d.get(t[45]));
-                    [value, value]
-                }
-                ReverbMode::SmallRoom => {
-                    d.put(left, t[0]);
-                    d.put(right, t[40]);
-                    for (a, b, g) in [(1, 15, 0.3), (2, 7, 0.7), (8, 14, 0.5), (18, 24, 0.5)] {
-                        d.allpass(t[a], t[b], q14(g));
-                    }
-                    d.comb_lpf(t[40], t[35], self.decay, &mut self.lpf1);
-                    for (a, b, g) in [(41, 50, 0.3), (42, 46, 0.6), (53, 57, 0.5)] {
-                        d.allpass(t[a], t[b], q14(g));
-                    }
-                    d.comb_lpf(t[0], t[66], self.decay, &mut self.lpf2);
-                    [
-                        d.fir(
-                            self.scratch,
-                            &[(t[16], q14(0.2)), (t[32], q14(0.2)), (t[51], q14(0.2))],
-                        ),
-                        d.fir(
-                            self.scratch,
-                            &[(t[49], q14(0.2)), (t[65], q14(0.2)), (t[17], q14(0.2))],
-                        ),
-                    ]
-                }
-                ReverbMode::Binaural => {
-                    let seed = t[10];
-                    let tap = t[25];
-                    let filter = tap + self.binaural_offset;
-                    d.put(left, t[0]);
-                    d.put(right, t[40]);
-                    let a = mul(
-                        self.diffuse >> 1,
-                        d.get(t[0] + seed) + d.get(t[11] + seed) + d.get(t[21] + seed),
-                    );
-                    d.put(a, tap);
-                    d.lpf(filter, &mut self.lpf1);
-                    let out = mul(mono, dry) + mul(self.mix, d.get(t[40] + filter) + a);
-                    let b = mul(
-                        self.diffuse >> 1,
-                        d.get(t[47] + seed) + d.get(t[48] + seed) + d.get(t[54] + seed),
-                    );
-                    d.put(b, t[40] + tap);
-                    d.lpf(t[40] + filter, &mut self.lpf2);
-                    [out, mul(mono, dry) + mul(self.mix, d.get(filter) + b)]
-                }
-                ReverbMode::MediumHall => {
-                    d.put(mono.div::<0, 14>(TWO), t[0]);
-                    d.lpf(t[2], &mut self.lpf1);
-                    for (a, b, g) in [(3, 15, 0.4), (4, 7, 0.9), (8, 14, 0.6), (18, 24, 0.6)] {
-                        d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
-                    }
-                    d.put(d.get(t[35]), t[40]);
-                    for (a, b, g) in [(41, 50, 0.5), (42, 46, 0.8)] {
-                        d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
-                    }
-                    d.comb_lpf(t[0], t[66], self.decay, &mut self.lpf2);
-                    [
-                        d.fir(
-                            self.scratch,
-                            &[
-                                (t[16], q14(-0.25)),
-                                (t[33], q14(0.25)),
-                                (t[51], q14(-0.25)),
-                                (t[55], q14(0.25)),
-                            ],
-                        ),
-                        d.fir(
-                            self.scratch,
-                            &[
-                                (t[16], q14(0.25)),
-                                (t[32], q14(0.25)),
-                                (t[52], q14(0.25)),
-                                (t[56], q14(0.2)),
-                            ],
-                        ),
-                    ]
-                }
-                ReverbMode::LargeHall => {
-                    d.put(mono, t[0]);
-                    d.lpf(t[2], &mut self.lpf1);
-                    for (a, b, g) in [(3, 5, 0.6), (6, 9, 0.6), (19, 30, 0.95), (20, 27, 0.5)] {
-                        d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
-                    }
-                    d.put(d.get(t[38]), t[40]);
-                    for (a, b, g) in [(41, 63, 0.95), (42, 58, 0.5), (59, 62, 0.5)] {
-                        d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
-                    }
-                    d.comb_lpf(t[1], t[64], self.decay, &mut self.lpf2);
-                    [
-                        d.fir(
-                            self.scratch,
-                            &[(t[10], q14(0.6)), (t[36], q14(0.3)), (t[61], q14(0.3))],
-                        ),
-                        d.fir(
-                            self.scratch,
-                            &[(t[10], q14(0.6)), (t[37], q14(0.3)), (t[60], q14(0.3))],
-                        ),
-                    ]
-                }
-            };
-            if matches!(
-                self.active_config.mode,
-                ReverbMode::SmallRoom | ReverbMode::MediumHall | ReverbMode::LargeHall
-            ) {
-                result[0] = mul(left, dry) + mul(self.mix, result[0]);
-                result[1] = mul(right, dry) + mul(self.mix, result[1]);
-            }
-            d.step();
-            let dry_input = if matches!(
-                self.active_config.mode,
-                ReverbMode::Schroeder | ReverbMode::Binaural
-            ) {
-                [mono, mono]
-            } else {
-                [left, right]
-            };
-            for (value, input) in result.iter().zip(dry_input) {
-                let wet = (*value - mul(input, dry)).abs().to_bits();
-                self.wet_peak = self.wet_peak.max(wet);
-            }
-            return result;
-        }
-
-        // Transition or bypass-tail path: zero network input in bypass,
-        // ramped input when reverb becomes active, and ramped wet gain across
-        // mode switches.
-        let (net_left, net_right, net_mono) = if self.config.enabled {
-            let nl = mul(left, self.enable_fade);
-            let nr = mul(right, self.enable_fade);
-            let nm =
-                Q14::from_bits(((i64::from(nl.to_bits()) + i64::from(nr.to_bits())) / 2) as i32);
-            (nl, nr, nm)
-        } else {
-            (Q14::ZERO, Q14::ZERO, Q14::ZERO)
-        };
-        let wet_gain = mul(self.mix, self.mode_fade);
-        let active_dry = mode_dry(self.active_config.mode, left, right, mono, dry);
-        let enabled_dry = if self.fading_out_mode && self.config.enabled {
-            let target = mode_dry(
-                self.config.mode,
-                left,
-                right,
-                mono,
-                Q14::ONE - self.target_mix,
-            );
-            [
-                mul(active_dry[0], self.mode_fade) + mul(target[0], Q14::ONE - self.mode_fade),
-                mul(active_dry[1], self.mode_fade) + mul(target[1], Q14::ONE - self.mode_fade),
-            ]
-        } else {
-            active_dry
-        };
-        let bypass_weight = Q14::ONE - self.enable_fade;
-        let dry_terms = [
-            mul(left, bypass_weight) + mul(enabled_dry[0], self.enable_fade),
-            mul(right, bypass_weight) + mul(enabled_dry[1], self.enable_fade),
-        ];
-
         let d = &mut self.delay;
         let wet_terms = match self.active_config.mode {
             ReverbMode::Echo => {
-                d.put(net_mono, t[0]);
+                d.put(mono, t[0]);
                 let echo: Fixed<0> = Fixed::<0>::from_bits(t[39] as i32).mul(self.diffuse);
                 d.comb(t[0], echo.to_bits() as usize, self.decay);
                 [
                     mul(wet_gain, d.get(t[25]) - d.get(t[32])),
-                    -mul(wet_gain, d.get(t[26]) - d.get(t[31])),
+                    mul(wet_gain, d.get(t[26]) - d.get(t[31])),
                 ]
             }
             ReverbMode::Schroeder => {
                 for i in [0, 13, 23, 29] {
-                    d.put(net_mono.div::<0, 14>(TWO), t[i]);
+                    d.put(mono.div::<0, 14>(TWO), t[i]);
                 }
                 for (a, b, g) in [(0, 12, 0.9), (13, 22, 0.89), (23, 28, 0.87), (29, 34, 0.86)] {
                     d.comb(t[a], t[b], q14(g));
@@ -595,8 +369,8 @@ impl Reverb {
                 [wet, wet]
             }
             ReverbMode::SmallRoom => {
-                d.put(net_left, t[0]);
-                d.put(net_right, t[40]);
+                d.put(left, t[0]);
+                d.put(right, t[40]);
                 for (a, b, g) in [(1, 15, 0.3), (2, 7, 0.7), (8, 14, 0.5), (18, 24, 0.5)] {
                     d.allpass(t[a], t[b], q14(g));
                 }
@@ -605,40 +379,40 @@ impl Reverb {
                     d.allpass(t[a], t[b], q14(g));
                 }
                 d.comb_lpf(t[0], t[66], self.decay, &mut self.lpf2);
-                let l = d.fir(
+                let wet_left = d.fir(
                     self.scratch,
                     &[(t[16], q14(0.2)), (t[32], q14(0.2)), (t[51], q14(0.2))],
                 );
-                let r = d.fir(
+                let wet_right = d.fir(
                     self.scratch,
                     &[(t[49], q14(0.2)), (t[65], q14(0.2)), (t[17], q14(0.2))],
                 );
-                [mul(wet_gain, l), mul(wet_gain, r)]
+                [mul(wet_gain, wet_left), mul(wet_gain, wet_right)]
             }
             ReverbMode::Binaural => {
                 let seed = t[10];
                 let tap = t[25];
                 let filter = tap + self.binaural_offset;
-                d.put(net_left, t[0]);
-                d.put(net_right, t[40]);
+                d.put(left, t[0]);
+                d.put(right, t[40]);
                 let a = mul(
                     self.diffuse >> 1,
                     d.get(t[0] + seed) + d.get(t[11] + seed) + d.get(t[21] + seed),
                 );
                 d.put(a, tap);
                 d.lpf(filter, &mut self.lpf1);
-                let wet_l = mul(wet_gain, d.get(t[40] + filter) + a);
+                let wet_left = mul(wet_gain, d.get(t[40] + filter) + a);
                 let b = mul(
                     self.diffuse >> 1,
                     d.get(t[47] + seed) + d.get(t[48] + seed) + d.get(t[54] + seed),
                 );
                 d.put(b, t[40] + tap);
                 d.lpf(t[40] + filter, &mut self.lpf2);
-                let wet_r = mul(wet_gain, d.get(filter) + b);
-                [wet_l, wet_r]
+                let wet_right = mul(wet_gain, d.get(filter) + b);
+                [wet_left, wet_right]
             }
             ReverbMode::MediumHall => {
-                d.put(net_mono.div::<0, 14>(TWO), t[0]);
+                d.put(mono.div::<0, 14>(TWO), t[0]);
                 d.lpf(t[2], &mut self.lpf1);
                 for (a, b, g) in [(3, 15, 0.4), (4, 7, 0.9), (8, 14, 0.6), (18, 24, 0.6)] {
                     d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
@@ -648,28 +422,28 @@ impl Reverb {
                     d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
                 }
                 d.comb_lpf(t[0], t[66], self.decay, &mut self.lpf2);
-                let l = d.fir(
-                    self.scratch,
-                    &[
-                        (t[16], q14(-0.25)),
-                        (t[33], q14(0.25)),
-                        (t[51], q14(-0.25)),
-                        (t[55], q14(0.25)),
-                    ],
-                );
-                let r = d.fir(
+                let wet_left = d.fir(
                     self.scratch,
                     &[
                         (t[16], q14(0.25)),
+                        (t[33], q14(0.25)),
+                        (t[51], q14(0.25)),
+                        (t[55], q14(0.25)),
+                    ],
+                );
+                let wet_right = d.fir(
+                    self.scratch,
+                    &[
+                        (t[17], q14(0.25)),
                         (t[32], q14(0.25)),
                         (t[52], q14(0.25)),
                         (t[56], q14(0.2)),
                     ],
                 );
-                [mul(wet_gain, l), mul(wet_gain, r)]
+                [mul(wet_gain, wet_left), mul(wet_gain, wet_right)]
             }
             ReverbMode::LargeHall => {
-                d.put(net_mono, t[0]);
+                d.put(mono, t[0]);
                 d.lpf(t[2], &mut self.lpf1);
                 for (a, b, g) in [(3, 5, 0.6), (6, 9, 0.6), (19, 30, 0.95), (20, 27, 0.5)] {
                     d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
@@ -679,24 +453,105 @@ impl Reverb {
                     d.allpass(t[a], t[b], mul(self.diffuse, q14(g)));
                 }
                 d.comb_lpf(t[1], t[64], self.decay, &mut self.lpf2);
-                let l = d.fir(
+                let wet_left = d.fir(
                     self.scratch,
                     &[(t[10], q14(0.6)), (t[36], q14(0.3)), (t[61], q14(0.3))],
                 );
-                let r = d.fir(
+                let wet_right = d.fir(
                     self.scratch,
                     &[(t[10], q14(0.6)), (t[37], q14(0.3)), (t[60], q14(0.3))],
                 );
-                [mul(wet_gain, l), mul(wet_gain, r)]
+                [mul(wet_gain, wet_left), mul(wet_gain, wet_right)]
             }
         };
         d.step();
-        // Telemetry only. The wet contribution is the output minus the dry
-        // term. While the reverb is disabled, the window gets no new values.
+        wet_terms
+    }
+    /// Calculates the selected network one time and advances the ring by one
+    /// frame.
+    ///
+    /// When the stage is idle in bypass, no delay or filter history advances.
+    /// The internal mono averages use integer division toward zero. `layout`
+    /// selects the stereo or mono wet peak measurement. The mono measurement
+    /// uses a shift.
+    pub(crate) fn process_sample(&mut self, frame: [Q14; 2], layout: OutputLayout) -> [Q14; 2] {
+        if !self.config.enabled
+            && self.bypass_remaining == 0
+            && !self.fading_out_mode
+            && self.enable_fade == Q14::ZERO
+        {
+            return frame;
+        }
+        self.dirty = true;
+        if self.config.enabled && self.enable_fade < Q14::ONE {
+            self.enable_fade = (self.enable_fade + RAMP_STEP).min(Q14::ONE);
+        } else if !self.config.enabled && self.enable_fade > Q14::ZERO {
+            self.enable_fade = (self.enable_fade - RAMP_STEP).max(Q14::ZERO);
+        }
+        if self.fading_out_mode {
+            self.mode_fade = (self.mode_fade - RAMP_STEP).max(Q14::ZERO);
+        } else if self.mode_fade < Q14::ONE {
+            self.mode_fade = (self.mode_fade + RAMP_STEP).min(Q14::ONE);
+        }
+
+        let [left, right] = frame;
+        let mono =
+            Q14::from_bits(((i64::from(left.to_bits()) + i64::from(right.to_bits())) / 2) as i32);
+        let dry = Q14::ONE - self.mix;
+        let steady = self.config.enabled
+            && !self.fading_out_mode
+            && self.enable_fade == Q14::ONE
+            && self.mode_fade == Q14::ONE;
+        let (dry_terms, wet_terms) = if steady {
+            let wet_terms = self.step_network(left, right, mono, self.mix);
+            ([mul(left, dry), mul(right, dry)], wet_terms)
+        } else {
+            let (net_left, net_right, net_mono) = if self.config.enabled {
+                let nl = mul(left, self.enable_fade);
+                let nr = mul(right, self.enable_fade);
+                let nm = Q14::from_bits(
+                    ((i64::from(nl.to_bits()) + i64::from(nr.to_bits())) / 2) as i32,
+                );
+                (nl, nr, nm)
+            } else {
+                (Q14::ZERO, Q14::ZERO, Q14::ZERO)
+            };
+            let enabled_dry = if self.fading_out_mode && self.config.enabled {
+                mul(dry, self.mode_fade)
+                    + mul(Q14::ONE - self.target_mix, Q14::ONE - self.mode_fade)
+            } else {
+                dry
+            };
+            let bypass_weight = Q14::ONE - self.enable_fade;
+            let dry_terms = [
+                mul(left, bypass_weight) + mul(mul(left, enabled_dry), self.enable_fade),
+                mul(right, bypass_weight) + mul(mul(right, enabled_dry), self.enable_fade),
+            ];
+            let wet_gain = mul(self.mix, self.mode_fade);
+            let wet_terms = self.step_network(net_left, net_right, net_mono, wet_gain);
+            (dry_terms, wet_terms)
+        };
         let result = [dry_terms[0] + wet_terms[0], dry_terms[1] + wet_terms[1]];
+        // Telemetry only. The wet contribution is the output minus the dry
+        // term. Mono calls measure the wet signal after the downmix.
         if self.config.enabled {
-            for wet in wet_terms {
-                self.wet_peak = self.wet_peak.max(wet.abs().to_bits());
+            let left_wet = result[0] - dry_terms[0];
+            let right_wet = result[1] - dry_terms[1];
+            match layout {
+                OutputLayout::Stereo => {
+                    for wet in [left_wet, right_wet] {
+                        self.wet_peak = self.wet_peak.max(wet.abs().to_bits());
+                    }
+                }
+                OutputLayout::Mono => {
+                    let wet = Q14::from_bits(
+                        ((i64::from(left_wet.to_bits()) + i64::from(right_wet.to_bits())) >> 1)
+                            as i32,
+                    )
+                    .abs()
+                    .to_bits();
+                    self.wet_peak = self.wet_peak.max(wet);
+                }
             }
         }
         if self.fading_out_mode && self.mode_fade == Q14::ZERO {

@@ -7,11 +7,10 @@
 mod chords;
 
 use crate::error::{check_count, check_range};
-use crate::midi::{note_period, velocity_gain, MidiEvent};
+use crate::midi::{velocity_gain, MidiEvent};
 use crate::numeric::fixed::{Q12, Q14, Q6};
 use crate::scale::PitchClass;
 use crate::{Error, SampleRate};
-use chords::SCALE_TONES;
 
 /// The number of harmony voices in addition to the lead voice: four.
 /// The interval arrays and the voice allocation for MIDI channels use the
@@ -635,12 +634,8 @@ impl HarmonyState {
         relative.div_euclid(12) * 7 + table[relative.rem_euclid(12) as usize]
     }
     /// Maps a one-based degree through the selected scale and key.
-    ///
-    /// Euclidean division keeps the octave offset for negative degrees.
     fn degree_to_chromatic(&self, degree: i32) -> i32 {
-        let zero = degree - 1;
-        zero.div_euclid(7) * 12
-            + SCALE_TONES[self.config.scale as usize][zero.rem_euclid(7) as usize]
+        chords::scale_degree_semitones(self.config.scale, degree - 1)
             + i32::from(self.config.key.semitone())
     }
     /// Builds 78 target bins and 79 period boundaries for one voice.
@@ -719,100 +714,99 @@ impl HarmonyState {
         self.event_counter = self.event_counter.wrapping_add(1);
         let gain = self.gains[velocity as usize];
         if velocity == 0 {
-            self.pending_gain[note] = Q12::ZERO;
-            self.pending_order[note] = 0;
+            self.clear_pending(note);
         }
-        if matches!(
-            self.config.source,
-            HarmonySource::MidiOmni | HarmonySource::ChordViaMidi
-        ) {
-            if velocity == 0 {
-                let mut released = None;
-                for voice in 0..HARMONY_VOICES {
-                    if self.midi_period[voice] != Q6::ZERO && self.midi_note[voice] == note as i32 {
-                        self.midi_period[voice] = Q6::ZERO;
-                        released = Some(voice);
-                    }
-                }
-                if let Some(voice) = released {
-                    let mut best_order = 0;
-                    let mut best = None;
-                    for (pending, &order) in self.pending_order.iter().enumerate() {
-                        if order > best_order {
-                            best_order = order;
-                            best = Some(pending);
+        let control_due = match self.config.source {
+            HarmonySource::MidiOmni | HarmonySource::ChordViaMidi => {
+                if velocity == 0 {
+                    let mut released = None;
+                    for voice in 0..HARMONY_VOICES {
+                        if self.voice_has_note(voice, note) {
+                            self.midi_period[voice] = Q6::ZERO;
+                            released = Some(voice);
                         }
                     }
-                    if let Some(pending) = best {
-                        self.midi_period[voice] = note_period(self.rate, pending as i32);
-                        self.midi_note[voice] = pending as i32;
-                        self.midi_gain[voice] = self.pending_gain[pending];
-                        self.midi_order[voice] = self.pending_order[pending];
-                        self.pending_gain[pending] = Q12::ZERO;
-                        self.pending_order[pending] = 0;
+                    if let Some(voice) = released {
+                        let mut best_order = 0;
+                        let mut best = None;
+                        for (pending, &order) in self.pending_order.iter().enumerate() {
+                            if order > best_order {
+                                best_order = order;
+                                best = Some(pending);
+                            }
+                        }
+                        if let Some(pending) = best {
+                            let pending_gain = self.pending_gain[pending];
+                            self.assign(voice, pending, pending_gain, best_order);
+                            self.clear_pending(pending);
+                        }
                     }
-                }
-                if self.config.source == HarmonySource::ChordViaMidi {
-                    self.setup_chord();
-                }
-                return true;
-            }
-            for voice in 0..HARMONY_VOICES {
-                if self.midi_period[voice] != Q6::ZERO && self.midi_note[voice] == note as i32 {
+                    true
+                } else if let Some(voice) =
+                    (0..HARMONY_VOICES).find(|&v| self.voice_has_note(v, note))
+                {
                     self.midi_gain[voice] = gain;
                     self.midi_order[voice] = self.event_counter;
-                    if self.config.source == HarmonySource::ChordViaMidi {
-                        self.setup_chord();
+                    false
+                } else {
+                    let voice = if let Some(free) =
+                        (0..HARMONY_VOICES).find(|&v| self.midi_period[v] == Q6::ZERO)
+                    {
+                        self.portamento_period[free] = Q6::ZERO;
+                        free
+                    } else {
+                        let mut oldest = 0;
+                        for i in 1..HARMONY_VOICES {
+                            if self.midi_order[i] < self.midi_order[oldest] {
+                                oldest = i;
+                            }
+                        }
+                        let stolen = self.midi_note[oldest] as usize;
+                        self.pending_gain[stolen] = self.midi_gain[oldest];
+                        self.pending_order[stolen] = self.midi_order[oldest];
+                        oldest
+                    };
+                    self.assign(voice, note, gain, self.event_counter);
+                    true
+                }
+            }
+            HarmonySource::MidiChannels if channel < 4 => {
+                let voice = usize::from(channel);
+                if velocity == 0 {
+                    if self.voice_has_note(voice, note) {
+                        self.midi_period[voice] = Q6::ZERO;
                     }
-                    return false;
-                }
-            }
-            let voice = if let Some(free) =
-                (0..HARMONY_VOICES).find(|&v| self.midi_period[v] == Q6::ZERO)
-            {
-                self.portamento_period[free] = Q6::ZERO;
-                free
-            } else {
-                let mut oldest = 0;
-                for i in 1..4 {
-                    if self.midi_order[i] < self.midi_order[oldest] {
-                        oldest = i;
+                    false
+                } else {
+                    if self.midi_period[voice] == Q6::ZERO {
+                        self.portamento_period[voice] = Q6::ZERO;
                     }
+                    self.assign(voice, note, gain, self.event_counter);
+                    true
                 }
-                let stolen = self.midi_note[oldest] as usize;
-                self.pending_gain[stolen] = self.midi_gain[oldest];
-                self.pending_order[stolen] = self.midi_order[oldest];
-                oldest
-            };
-            self.assign(voice, note, gain);
-            if self.config.source == HarmonySource::ChordViaMidi {
-                self.setup_chord();
             }
-            return true;
+            _ => false,
+        };
+        if self.config.source == HarmonySource::ChordViaMidi {
+            self.setup_chord();
         }
-        if self.config.source == HarmonySource::MidiChannels && channel < 4 {
-            let voice = usize::from(channel);
-            if velocity == 0 {
-                if self.midi_period[voice] != Q6::ZERO && self.midi_note[voice] == note as i32 {
-                    self.midi_period[voice] = Q6::ZERO;
-                }
-            } else {
-                if self.midi_period[voice] == Q6::ZERO {
-                    self.portamento_period[voice] = Q6::ZERO;
-                }
-                self.assign(voice, note, gain);
-                return true;
-            }
-        }
-        false
+        control_due
     }
-    /// Assigns a validated MIDI pitch and gain to a voice and records the
-    /// current event order.
-    fn assign(&mut self, voice: usize, note: usize, gain: Q12) {
-        self.midi_period[voice] = note_period(self.rate, note as i32);
+    /// If `voice` has an active MIDI assignment for `note`, returns `true`.
+    fn voice_has_note(&self, voice: usize, note: usize) -> bool {
+        self.midi_period[voice] != Q6::ZERO && self.midi_note[voice] == note as i32
+    }
+    /// Clears the stolen-note state of `note`.
+    fn clear_pending(&mut self, note: usize) {
+        self.pending_gain[note] = Q12::ZERO;
+        self.pending_order[note] = 0;
+    }
+    /// Assigns a validated MIDI pitch, gain and event order to a voice.
+    fn assign(&mut self, voice: usize, note: usize, gain: Q12, order: i32) {
+        self.midi_period[voice] = self.cents_period(f64::from((note as i32 - 60) * 100));
         self.midi_note[voice] = note as i32;
         self.midi_gain[voice] = gain;
-        self.midi_order[voice] = self.event_counter;
+        self.midi_order[voice] = order;
     }
     /// Advances one voice from the Q6 tracked input period to a Q14 ratio and
     /// a Q12 gain.
@@ -880,28 +874,25 @@ impl HarmonyState {
                 }
                 Q12::ONE
             }
-            HarmonySource::ChordByDegree | HarmonySource::ChordByName => {
-                self.target_period[voice] = self.chord_period[voice];
-                if self.target_period[voice] != Q6::ZERO {
-                    Q12::ONE
-                } else {
+            HarmonySource::ChordByDegree
+            | HarmonySource::ChordByName
+            | HarmonySource::ChordViaMidi
+            | HarmonySource::MidiOmni
+            | HarmonySource::MidiChannels => {
+                let (target, gain) = match self.config.source {
+                    HarmonySource::ChordViaMidi => {
+                        (self.chord_period[voice], self.chord_gain[voice])
+                    }
+                    HarmonySource::MidiOmni | HarmonySource::MidiChannels => {
+                        (self.midi_period[voice], self.midi_gain[voice])
+                    }
+                    _ => (self.chord_period[voice], Q12::ONE),
+                };
+                self.target_period[voice] = target;
+                if self.target_period[voice] == Q6::ZERO {
                     Q12::ZERO
-                }
-            }
-            HarmonySource::ChordViaMidi => {
-                self.target_period[voice] = self.chord_period[voice];
-                if self.target_period[voice] != Q6::ZERO {
-                    self.chord_gain[voice]
                 } else {
-                    Q12::ZERO
-                }
-            }
-            HarmonySource::MidiOmni | HarmonySource::MidiChannels => {
-                self.target_period[voice] = self.midi_period[voice];
-                if self.target_period[voice] != Q6::ZERO {
-                    self.midi_gain[voice]
-                } else {
-                    Q12::ZERO
+                    gain
                 }
             }
         }
