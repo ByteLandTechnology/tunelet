@@ -2,10 +2,11 @@
   <title id="title">Timed events in one block</title>
   <desc id="desc">A block of 16 frames. Events apply immediately before the frame at their offset. Two events at the same offset execute in slice order.</desc>
   <style>
-    svg { --text: #1f2328; --muted: #59636e; --line: #8c959f; --fill: #f6f8fa; --accent: #8250df; --accent-fill: #fbefff; --frame: #ddf4ff; --frame-line: #0969da; }
+    svg { --bg: #ffffff; --text: #1f2328; --muted: #59636e; --line: #656d76; --fill: #f6f8fa; --accent: #8250df; --accent-fill: #fbefff; --frame: #ddf4ff; --frame-line: #0969da; }
     @media (prefers-color-scheme: dark) {
-      svg { --text: #e6edf3; --muted: #9198a1; --line: #6e7681; --fill: #161b22; --accent: #ab7df8; --accent-fill: #2b1d47; --frame: #0c2d52; --frame-line: #4493f8; }
+      svg { --bg: #0d1117; --text: #e6edf3; --muted: #9198a1; --line: #7d8590; --fill: #161b22; --accent: #ab7df8; --accent-fill: #2b1d47; --frame: #0c2d52; --frame-line: #58a6ff; }
     }
+    .bg { fill: var(--bg); }
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--text); }
     .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .event { fill: var(--accent-fill); stroke: var(--accent); stroke-width: 1.3; }
@@ -22,6 +23,7 @@
       <path class="head" d="M0,0 L10,5 L0,10 z"/>
     </marker>
   </defs>
+  <rect class="bg" width="100%" height="100%" fill="#ffffff"/>
 
   <!-- Events: offset 0 -->
   <rect class="event" x="20" y="14" width="150" height="26" rx="6"/>
