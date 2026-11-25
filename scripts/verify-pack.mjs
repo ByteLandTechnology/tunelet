@@ -1,7 +1,7 @@
 /**
  * This script builds the package one time and packs `tunelet` and
  * `@bytelandtechnology/tunelet`. For each archive, it checks the eight files,
- * runs all Wasm loader paths in Node.js and checks consumer TypeScript
+ * `loadTunelet()`, the HTTP Wasm loaders and the `NodeNext` TypeScript
  * declarations.
  *
  * If you give `--out-dir <dir>`, the script writes both `.tgz` archives and
@@ -188,9 +188,9 @@ function packArchive(
 }
 
 /** Check that the archive contains only the eight expected files. */
-function verifyArchiveEntries(workDir, relativeArchivePath) {
+function verifyArchiveEntries(tempDir, relativeArchivePath) {
   const rawList = execFileSync("tar", ["-tzf", relativeArchivePath], {
-    cwd: workDir,
+    cwd: tempDir,
     encoding: "utf8",
   });
   const actualPaths = rawList
@@ -204,15 +204,15 @@ function verifyArchiveEntries(workDir, relativeArchivePath) {
 
 /** Extract the archive into an isolated `node_modules` directory. */
 function installArchive(
-  workDir,
+  tempDir,
   relativeArchivePath,
   consumerDir,
   packageName,
 ) {
-  const extractDir = path.join(workDir, "extract");
-  fs.mkdirSync(extractDir, { recursive: true });
+  const extractDir = path.join(tempDir, "extract");
+  fs.mkdirSync(extractDir);
   execFileSync("tar", ["-xzf", relativeArchivePath, "-C", "extract"], {
-    cwd: workDir,
+    cwd: tempDir,
   });
 
   const installedDir = path.join(
@@ -222,7 +222,6 @@ function installArchive(
   );
   fs.mkdirSync(path.dirname(installedDir), { recursive: true });
   fs.renameSync(path.join(extractDir, "package"), installedDir);
-  fs.rmSync(extractDir, { recursive: true, force: true });
 
   for (const archivePath of EXPECTED_ARCHIVE_PATHS) {
     const relativeFile = archivePath.slice("package/".length);
@@ -245,11 +244,148 @@ function installArchive(
       type: "module",
     }),
   );
-
-  return installedDir;
 }
 
-/** Run one isolated Node.js child process while the HTTP server stays active. */
+/** Import the installed package in Node.js and process one audio block. */
+function verifyRuntimeImport(consumerDir, packageName) {
+  const checkPath = path.join(consumerDir, "check.mjs");
+  fs.writeFileSync(
+    checkPath,
+    [
+      'import assert from "node:assert/strict";',
+      "",
+      "const packageName = process.argv[2];",
+      "const rootModule = await import(packageName);",
+      "const wasmModule = await import(`${packageName}/wasm`);",
+      "",
+      'assert.equal(typeof rootModule.loadTunelet, "function");',
+      "assert.equal(rootModule.default, rootModule.loadTunelet);",
+      'assert.equal(typeof rootModule.initSync, "function");',
+      'assert.equal(typeof rootModule.Tunelet, "function");',
+      'assert.equal(typeof rootModule.defaultConfig, "function");',
+      'assert.equal(typeof wasmModule.default, "function");',
+      'assert.equal(typeof wasmModule.initSync, "function");',
+      "",
+      "const wasmExports = await rootModule.loadTunelet();",
+      "assert.ok(wasmExports);",
+      "",
+      "const config = rootModule.defaultConfig();",
+      "const processor = new rootModule.Tunelet(48000, 128, config);",
+      "try {",
+      "  const input = new Int16Array(128);",
+      "  const left = new Int16Array(128);",
+      "  const right = new Int16Array(128);",
+      "  processor.process(input, left, right);",
+      "} finally {",
+      "  processor.free();",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  execFileSync(process.execPath, [checkPath, packageName], {
+    cwd: consumerDir,
+    stdio: "inherit",
+  });
+}
+
+/** Check TypeScript resolution for the root entry and the `./wasm` entry. */
+function verifyTypeDeclarations(consumerDir, packageName) {
+  const checkTsPath = path.join(consumerDir, "check.ts");
+  const pkgLiteral = JSON.stringify(packageName);
+  const wasmLiteral = JSON.stringify(`${packageName}/wasm`);
+  fs.writeFileSync(
+    checkTsPath,
+    [
+      "import loadTunelet, {",
+      "  defaultConfig,",
+      "  initSync as rootInitSync,",
+      "  loadTunelet as namedLoadTunelet,",
+      "  Tunelet,",
+      "  type ProcessorConfig,",
+      "  type SyncInitInput as RootSyncInitInput,",
+      `} from ${pkgLiteral};`,
+      "import init, {",
+      "  initSync as wasmInitSync,",
+      "  type InitInput,",
+      "  type InitOutput,",
+      "  type SyncInitInput,",
+      `} from ${wasmLiteral};`,
+      "",
+      "export async function verifyTypes(",
+      "  source?: InitInput,",
+      "  syncSource?: SyncInitInput & RootSyncInitInput,",
+      "): Promise<void> {",
+      "  const exportsFromRoot: InitOutput = await loadTunelet(source);",
+      "  const exportsFromNamed: InitOutput = await namedLoadTunelet(source);",
+      "  const exportsFromWasm: InitOutput =",
+      "    source === undefined",
+      "      ? await init()",
+      "      : await init({ module_or_path: source });",
+      "  const config: ProcessorConfig = defaultConfig();",
+      "  const processor = new Tunelet(48000, 128, config);",
+      "  const input = new Int16Array(128);",
+      "  const left = new Int16Array(128);",
+      "  const right = new Int16Array(128);",
+      "  processor.process(input, left, right);",
+      "  processor.free();",
+      "  if (syncSource !== undefined) {",
+      "    const syncExportsFromRoot: InitOutput = rootInitSync({",
+      "      module: syncSource,",
+      "    });",
+      "    const syncExportsFromWasm: InitOutput = wasmInitSync({",
+      "      module: syncSource,",
+      "    });",
+      "    void syncExportsFromRoot;",
+      "    void syncExportsFromWasm;",
+      "  }",
+      "  void exportsFromRoot;",
+      "  void exportsFromNamed;",
+      "  void exportsFromWasm;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const tscBin = path.join(
+    repoRoot,
+    "node_modules",
+    "typescript",
+    "bin",
+    "tsc",
+  );
+  execFileSync(
+    process.execPath,
+    [
+      tscBin,
+      "--noEmit",
+      "--module",
+      "NodeNext",
+      "--moduleResolution",
+      "NodeNext",
+      "--target",
+      "ES2020",
+      "--lib",
+      "ES2020,ESNext.Disposable,DOM",
+      "--strict",
+      checkTsPath,
+    ],
+    { cwd: consumerDir, stdio: "inherit" },
+  );
+}
+
+/** Check the archive list, runtime imports and TypeScript declarations. */
+async function verifyPackedArchive(workDir, relativeArchivePath, packageName) {
+  const consumerDir = path.join(workDir, "consumer");
+  fs.mkdirSync(consumerDir);
+  verifyArchiveEntries(workDir, relativeArchivePath);
+  installArchive(workDir, relativeArchivePath, consumerDir, packageName);
+  verifyRuntimeImport(consumerDir, packageName);
+  await verifyHttpLoaders(consumerDir, packageName);
+  verifyTypeDeclarations(consumerDir, packageName);
+}
+
+/** Run one isolated Node.js child process while the HTTP server is active. */
 function runNodeScript(scriptPath, args, cwd) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [scriptPath, ...args], {
@@ -317,21 +453,25 @@ function startWasmServer(wasmBytes) {
   });
 }
 
-/** Execute all documented loader modes in isolated Node.js child processes. */
-async function verifyRuntimeImport(consumerDir, installedDir, packageName) {
-  const wasmPath = path.join(installedDir, "pkg", "tunelet_bg.wasm");
-  const wasmBytes = fs.readFileSync(wasmPath);
-  const checkPath = path.join(consumerDir, "check.mjs");
+/** Check the HTTP Wasm loaders in isolated Node.js child processes. */
+async function verifyHttpLoaders(consumerDir, packageName) {
+  const installedDir = path.join(
+    consumerDir,
+    "node_modules",
+    ...packageName.split("/"),
+  );
+  const wasmBytes = fs.readFileSync(
+    path.join(installedDir, "pkg", "tunelet_bg.wasm"),
+  );
+  const checkHttpPath = path.join(consumerDir, "check-http.mjs");
 
   fs.writeFileSync(
-    checkPath,
+    checkHttpPath,
     [
       'import assert from "node:assert/strict";',
-      'import fs from "node:fs";',
       "",
-      "const [packageName, mode, baseUrl, wasmPath] = process.argv.slice(2);",
+      "const [packageName, mode, baseUrl] = process.argv.slice(2);",
       "const rootModule = await import(packageName);",
-      "const wasmModule = await import(`${packageName}/wasm`);",
       "",
       "function verifyPcmBlock(moduleNamespace) {",
       "  const config = moduleNamespace.defaultConfig();",
@@ -349,26 +489,11 @@ async function verifyRuntimeImport(consumerDir, installedDir, packageName) {
       "    processor.processMono(mono);",
       "    assert.equal(processor.feedback().processedFrames, 256n);",
       "  } finally {",
-      '    if (typeof Symbol.dispose === "symbol" && typeof processor[Symbol.dispose] === "function") {',
-      "      processor[Symbol.dispose]();",
-      "    } else {",
-      "      processor.free();",
-      "    }",
+      "    processor.free();",
       "  }",
       "}",
       "",
-      'if (mode === "default-file") {',
-      '  assert.equal(typeof rootModule.loadTunelet, "function");',
-      "  assert.equal(rootModule.default, rootModule.loadTunelet);",
-      '  assert.equal(typeof rootModule.initSync, "function");',
-      '  assert.equal(typeof rootModule.Tunelet, "function");',
-      '  assert.equal(typeof rootModule.defaultConfig, "function");',
-      '  assert.equal(typeof wasmModule.default, "function");',
-      '  assert.equal(typeof wasmModule.initSync, "function");',
-      "  const wasmExports = await rootModule.loadTunelet();",
-      "  assert.ok(wasmExports);",
-      "  verifyPcmBlock(rootModule);",
-      '} else if (mode === "http-404-retry") {',
+      'if (mode === "http-404-retry") {',
       "  await assert.rejects(",
       "    () => rootModule.loadTunelet(`${baseUrl}/missing.wasm`),",
       "    /404/,",
@@ -452,32 +577,8 @@ async function verifyRuntimeImport(consumerDir, installedDir, packageName) {
       "  assert.equal(warnings.length, 1);",
       "  assert.match(String(warnings[0][0]), /application\\/wasm/);",
       "  verifyPcmBlock(rootModule);",
-      '} else if (mode === "uint8array") {',
-      "  const bytes = Uint8Array.from(fs.readFileSync(wasmPath));",
-      "  assert.equal(bytes.constructor, Uint8Array);",
-      "  const wasmExports = await rootModule.loadTunelet(bytes);",
-      "  assert.ok(wasmExports);",
-      "  verifyPcmBlock(rootModule);",
-      '} else if (mode === "module-promise") {',
-      "  const bytes = Uint8Array.from(fs.readFileSync(wasmPath));",
-      "  const modulePromise = WebAssembly.compile(bytes);",
-      "  const wasmExports = await rootModule.loadTunelet(modulePromise);",
-      "  assert.ok(wasmExports);",
-      "  verifyPcmBlock(rootModule);",
-      '} else if (mode === "init-sync-root") {',
-      "  const bytes = Uint8Array.from(fs.readFileSync(wasmPath));",
-      "  const wasmExports = rootModule.initSync({ module: bytes });",
-      "  assert.ok(wasmExports);",
-      "  verifyPcmBlock(rootModule);",
-      '} else if (mode === "init-sync-wasm") {',
-      "  const bytes = Uint8Array.from(fs.readFileSync(wasmPath));",
-      "  const compiledModule = new WebAssembly.Module(bytes);",
-      "  const wasmExports = wasmModule.initSync({ module: compiledModule });",
-      "  assert.ok(wasmExports);",
-      "  verifyPcmBlock(wasmModule);",
-      "  verifyPcmBlock(rootModule);",
       "} else {",
-      "  throw new Error(`Unknown runtime mode: ${mode}`);",
+      "  throw new Error(`Unknown HTTP loader mode: ${mode}`);",
       "}",
       "",
     ].join("\n"),
@@ -486,19 +587,14 @@ async function verifyRuntimeImport(consumerDir, installedDir, packageName) {
   const server = await startWasmServer(wasmBytes);
   try {
     const modes = [
-      "default-file",
       "http-404-retry",
       "http-response-wasm",
       "http-response-octet-stream",
-      "uint8array",
-      "module-promise",
-      "init-sync-root",
-      "init-sync-wasm",
     ];
     for (const mode of modes) {
       await runNodeScript(
-        checkPath,
-        [packageName, mode, server.baseUrl, wasmPath],
+        checkHttpPath,
+        [packageName, mode, server.baseUrl],
         consumerDir,
       );
     }
@@ -508,191 +604,6 @@ async function verifyRuntimeImport(consumerDir, installedDir, packageName) {
   } finally {
     await server.close();
   }
-}
-
-/** Build the TypeScript source for one consumer profile. */
-function buildConsumerCheckSource(packageName, profileScopeLines) {
-  const pkgLiteral = JSON.stringify(packageName);
-  const wasmLiteral = JSON.stringify(`${packageName}/wasm`);
-  return [
-    "import loadTunelet, {",
-    "  defaultConfig,",
-    "  initSync as rootInitSync,",
-    "  loadTunelet as namedLoadTunelet,",
-    "  Tunelet,",
-    "  type ProcessorConfig,",
-    "  type SyncInitInput as RootSyncInitInput,",
-    `} from ${pkgLiteral};`,
-    "import init, {",
-    "  initSync as wasmInitSync,",
-    "  type InitInput,",
-    "  type InitOutput,",
-    "  type SyncInitInput,",
-    `} from ${wasmLiteral};`,
-    "",
-    ...profileScopeLines,
-    "",
-    "export async function verifyTypes(",
-    "  source: InitInput | undefined,",
-    "  bytes: Uint8Array,",
-    "  buffer: ArrayBuffer,",
-    "  compiledModule: WebAssembly.Module,",
-    "  modulePromise: Promise<WebAssembly.Module>,",
-    "  syncSource: SyncInitInput & RootSyncInitInput,",
-    "): Promise<InitOutput> {",
-    "  const exportsFromRoot: InitOutput = await loadTunelet(source);",
-    "  const exportsFromNamed: InitOutput = await namedLoadTunelet(source);",
-    "  const exportsFromWasm: InitOutput =",
-    "    source === undefined",
-    "      ? await init()",
-    "      : await init({ module_or_path: source });",
-    '  await loadTunelet("https://example.invalid/tunelet_bg.wasm");',
-    '  await loadTunelet(new Request("https://example.invalid/tunelet_bg.wasm"));',
-    '  await loadTunelet(new URL("https://example.invalid/tunelet_bg.wasm"));',
-    '  await loadTunelet(await fetch("https://example.invalid/tunelet_bg.wasm"));',
-    "  await loadTunelet(bytes);",
-    "  await loadTunelet(buffer);",
-    "  await loadTunelet(compiledModule);",
-    "  await loadTunelet(modulePromise);",
-    "  const syncFromRoot: InitOutput = rootInitSync({ module: syncSource });",
-    "  const syncFromWasm: InitOutput = wasmInitSync({ module: syncSource });",
-    "  const syncFromBytes: InitOutput = wasmInitSync({ module: bytes });",
-    "  const syncFromModule: InitOutput = wasmInitSync({ module: compiledModule });",
-    "  const config: ProcessorConfig = defaultConfig();",
-    "  using disposableProcessor = new Tunelet(48000, 128, config);",
-    "  const input = new Int16Array(128);",
-    "  const left = new Int16Array(128);",
-    "  const right = new Int16Array(128);",
-    "  disposableProcessor.process(input, left, right);",
-    "  const manualProcessor = new Tunelet(48000, 128, config);",
-    "  manualProcessor[Symbol.dispose]();",
-    "  manualProcessor.free();",
-    "  void exportsFromNamed;",
-    "  void exportsFromWasm;",
-    "  void syncFromRoot;",
-    "  void syncFromWasm;",
-    "  void syncFromBytes;",
-    "  void syncFromModule;",
-    "  return exportsFromRoot;",
-    "}",
-    "",
-  ].join("\n");
-}
-
-/** Check strict TypeScript resolution across browser, WebWorker and Node.js. */
-function verifyTypeDeclarations(consumerDir, packageName) {
-  const tscBin = path.join(
-    repoRoot,
-    "node_modules",
-    "typescript",
-    "bin",
-    "tsc",
-  );
-  const nodeTypesRoot = path.join(repoRoot, "node_modules", "@types");
-
-  const profiles = [
-    {
-      name: "browser",
-      compilerOptions: {
-        target: "ES2022",
-        module: "ESNext",
-        moduleResolution: "Bundler",
-        lib: ["ES2022", "DOM"],
-        types: [],
-        strict: true,
-        skipLibCheck: false,
-        noEmit: true,
-      },
-      scopeLines: ["const browserWindow: Window = window;", "void browserWindow;"],
-    },
-    {
-      name: "webworker",
-      compilerOptions: {
-        target: "ES2022",
-        module: "ESNext",
-        moduleResolution: "Bundler",
-        lib: ["ES2022", "WebWorker"],
-        types: [],
-        strict: true,
-        skipLibCheck: false,
-        noEmit: true,
-      },
-      scopeLines: [
-        "// @ts-expect-error window is absent in WebWorker scopes.",
-        "void window;",
-        "const workerScope: WorkerGlobalScope = self;",
-        "void workerScope;",
-      ],
-    },
-    {
-      name: "node",
-      compilerOptions: {
-        target: "ES2022",
-        module: "NodeNext",
-        moduleResolution: "NodeNext",
-        lib: ["ES2022"],
-        types: ["node"],
-        typeRoots: [nodeTypesRoot],
-        strict: true,
-        skipLibCheck: false,
-        noEmit: true,
-      },
-      scopeLines: [
-        "// @ts-expect-error window is absent in Node.js scopes.",
-        "void window;",
-        "const timer: NodeJS.Timeout = setTimeout(() => {}, 0);",
-        "clearTimeout(timer);",
-      ],
-    },
-  ];
-
-  for (const profile of profiles) {
-    const profileDir = path.join(consumerDir, "typecheck", profile.name);
-    fs.mkdirSync(profileDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(profileDir, "package.json"),
-      JSON.stringify({
-        name: `tunelet-typecheck-${profile.name}`,
-        private: true,
-        type: "module",
-      }),
-    );
-    fs.writeFileSync(
-      path.join(profileDir, "tsconfig.json"),
-      `${JSON.stringify(
-        {
-          compilerOptions: profile.compilerOptions,
-          include: ["check.ts"],
-        },
-        null,
-        2,
-      )}\n`,
-    );
-    fs.writeFileSync(
-      path.join(profileDir, "check.ts"),
-      buildConsumerCheckSource(packageName, profile.scopeLines),
-    );
-
-    execFileSync(process.execPath, [tscBin, "-p", profileDir], {
-      cwd: profileDir,
-      stdio: "inherit",
-    });
-  }
-}
-
-/** Check the archive list, Node.js loaders and TypeScript declarations. */
-async function verifyPackedArchive(workDir, relativeArchivePath, packageName) {
-  const consumerDir = path.join(workDir, "consumer");
-  fs.mkdirSync(consumerDir);
-  verifyArchiveEntries(workDir, relativeArchivePath);
-  const installedDir = installArchive(
-    workDir,
-    relativeArchivePath,
-    consumerDir,
-    packageName,
-  );
-  await verifyRuntimeImport(consumerDir, installedDir, packageName);
-  verifyTypeDeclarations(consumerDir, packageName);
 }
 
 /** Copy both verified archives and write `SHA256SUMS.txt` in `outDir`. */

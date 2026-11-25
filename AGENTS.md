@@ -105,9 +105,9 @@ If you run `cargo package --locked` before a commit, add `--allow-dirty`.
 
 If you change the Wasm or TypeScript code, also run these commands.
 `npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
-`npm run build` compiles `src/wasm.rs`, normalizes `pkg/tunelet.d.ts` and
-compiles `src/index.ts`. `npm run verify:pack` runs `npm run build` one time
-and checks the `tunelet` and `@bytelandtechnology/tunelet` archives:
+`npm run build` compiles `src/wasm.rs` and `src/index.ts`.
+`npm run verify:pack` runs `npm run build` one time and checks the `tunelet`
+and `@bytelandtechnology/tunelet` archives:
 
 ```sh
 npm ci
@@ -115,16 +115,6 @@ RUSTDOCFLAGS="-D warnings" npm run check:wasm
 npm run verify:pack
 ```
 
-- `npm run verify:pack` runs strict `tsc --noEmit` without `skipLibCheck`
-  for browser (`ES2022,DOM`), WebWorker (`ES2022,WebWorker`) and Node.js
-  (`ES2022`, `NodeNext` and `@types/node`) projects. It also checks that
-  `window` is absent in non-DOM scopes and that `setTimeout` keeps
-  `NodeJS.Timeout` in Node.js.
-- `npm run verify:pack` processes PCM audio in isolated Node.js processes
-  after default `file:` loads, HTTP `404` retries and HTTP `Response` loads
-  (`application/wasm` and `application/octet-stream`). It also checks
-  `loadTunelet` with `Uint8Array` and `Promise<WebAssembly.Module>`, and
-  `initSync` from the root and `./wasm` exports.
 - `.github/workflows/ci.yml` runs these checks on each pull request and each
   push to `main`.
 - Make sure that there are no new warnings. This includes broken
