@@ -184,8 +184,11 @@ pub(crate) struct Formant {
     /// stage tries to make a model.
     design_counter: i32,
     /// The separate Q14 feedback rings of the synthesis, each with two copies
-    /// of `MAX_ORDER` entries. Mono synthesis uses channel zero.
+    /// of `MAX_ORDER` entries. Choir uses channel zero, and mono harmony
+    /// copies to channel one.
     history: [[i32; MAX_ORDER * 2]; 2],
+    /// If `true`, the two channels of `history` hold equal samples.
+    histories_match: bool,
     /// The start slot in the synthesis history. The two channels use the same
     /// slot.
     history_index: usize,
@@ -273,6 +276,7 @@ impl Formant {
             blend: 0,
             design_counter: 0,
             history: [[0; MAX_ORDER * 2]; 2],
+            histories_match: true,
             history_index: 0,
             correlation_history: [[0; 111]; 2],
             correlation_sum: [0; 111],
@@ -337,6 +341,7 @@ impl Formant {
 
         self.stamps.fill(Stamp::default());
         self.history = [[0; MAX_ORDER * 2]; 2];
+        self.histories_match = true;
         self.history_index = 0;
         self.current = BANKS - 1;
         self.next_filter();
@@ -857,8 +862,55 @@ impl Formant {
             self.history_index = MAX_ORDER;
         }
         self.history_index -= 1;
-        self.history[0][self.history_index] = sample;
-        self.history[0][self.history_index + MAX_ORDER] = sample;
+        let index = self.history_index;
+        self.history[0][index] = sample;
+        self.history[0][index + MAX_ORDER] = sample;
+        if self.histories_match {
+            self.histories_match = sample == self.history[1][index];
+        } else if sample == self.history[1][index] {
+            self.histories_match = self.history[0][..MAX_ORDER] == self.history[1][..MAX_ORDER];
+        }
+        round_q14(i64::from(sample) * i64::from(self.width))
+    }
+    /// Returns `true` if the two channels of `history` hold equal samples.
+    #[inline]
+    pub(crate) fn histories_match(&self) -> bool {
+        self.histories_match
+    }
+    /// Synthesizes one Q14 channel and copies the new feedback sample to
+    /// channel one. The two channels of `history` must be equal before this
+    /// call.
+    ///
+    /// If aspiration is active, the function reads one random value for each
+    /// frame. It adds the saturated excitation change before the feedback sum.
+    /// The history cursor moves one time.
+    pub(crate) fn forward_mono(
+        &mut self,
+        sample: i32,
+        position: i32,
+        context: &mut NumericContext,
+    ) -> i32 {
+        self.dirty = true;
+        let noise = self.add_noise(sample, context).saturating_sub(sample);
+        let sample = sample.saturating_add(noise);
+        let mut blended;
+        let coefficients = if let Some(slice) = self.coefficients(position) {
+            slice
+        } else {
+            blended = [0; MAX_ORDER];
+            self.blend_coefficients(position, &mut blended)
+        };
+        let sum = tap_sum(&self.history[0][self.history_index..], coefficients);
+        let sample = sample.saturating_add(round_q14(sum));
+        if self.history_index == 0 {
+            self.history_index = MAX_ORDER;
+        }
+        self.history_index -= 1;
+        let index = self.history_index;
+        for channel in &mut self.history {
+            channel[index] = sample;
+            channel[index + MAX_ORDER] = sample;
+        }
         round_q14(i64::from(sample) * i64::from(self.width))
     }
     /// Synthesizes two Q14 channels with one stamped model for the two
@@ -902,6 +954,11 @@ impl Formant {
             self.history[channel][next] = *sample;
             self.history[channel][next + MAX_ORDER] = *sample;
             *sample = round_q14(i64::from(*sample) * i64::from(self.width));
+        }
+        if self.histories_match {
+            self.histories_match = self.history[0][next] == self.history[1][next];
+        } else if self.history[0][next] == self.history[1][next] {
+            self.histories_match = self.history[0][..MAX_ORDER] == self.history[1][..MAX_ORDER];
         }
         self.history_index = next;
         samples
