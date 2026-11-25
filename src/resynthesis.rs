@@ -113,11 +113,11 @@ pub struct CorrectionConfig {
     /// milliseconds. If the target bin, the note table or `pitch_ratio`
     /// changes, or if the pitch tracker starts again, the half-life returns to
     /// `retune_ms`. Zero disables this relaxation. In JavaScript, the field is
-    /// optional and an absent value gives 0.
+    /// optional and an absent or `undefined` value gives 0.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(default),
-        tsify(optional)
+        serde(default, deserialize_with = "deserialize_zero_f32"),
+        tsify(optional, type = "number | undefined")
     )]
     pub humanize: f32,
     /// The outer soft-zone width of each target bin without a unit, 0..=1.
@@ -128,13 +128,22 @@ pub struct CorrectionConfig {
     /// `flex_tune` fraction, the pull decreases to zero at the midpoint
     /// boundary. Zero applies full pull across the whole bin, and 1 softens
     /// pull from the target outward. In JavaScript, the field is optional and
-    /// an absent value gives 0.
+    /// an absent or `undefined` value gives 0.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
-        serde(default),
-        tsify(optional)
+        serde(default, deserialize_with = "deserialize_zero_f32"),
+        tsify(optional, type = "number | undefined")
     )]
     pub flex_tune: f32,
+}
+
+/// Decodes an optional correction control and maps an absent value to 0.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn deserialize_zero_f32<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<f32, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<f32>::deserialize(deserializer)?.unwrap_or(0.0))
 }
 
 impl Default for CorrectionConfig {
