@@ -1,6 +1,6 @@
-//! MIDI note messages, pitch periods and the conversion of velocity to gain.
+//! MIDI note messages and the conversion of velocity to gain.
 
-use crate::numeric::fixed::{Q12, Q6};
+use crate::numeric::fixed::Q12;
 use crate::Error;
 
 /// The supported MIDI note controls, with zero-based channel numbers.
@@ -42,7 +42,7 @@ pub enum MidiEvent {
     /// releases the chord voices. The gain envelopes do not change, so the
     /// released voices decay. The prepared targets of the named and degree
     /// chord sources do not change. For the correction keyboard, it clears
-    /// keys 0..=126 and keeps key 127.
+    /// keys 0..=127 and loads the configured correction notes again.
     AllNotesOff,
 }
 
@@ -105,14 +105,6 @@ impl MidiEvent {
             _ => Ok(()),
         }
     }
-}
-
-/// Returns the period of MIDI `note` at `rate`, as a Q6 count of samples.
-pub(crate) fn note_period(rate: f32, note: i32) -> Q6 {
-    let period = ((f64::from(rate) / 440.0)
-        / ((f64::from(note as f32 - 69.0) * std::f64::consts::LN_2) / 12.0).exp())
-        as f32;
-    Q6::from_f64(f64::from(period))
 }
 
 /// Returns the MIDI gain for `velocity`, quantized to Q12.

@@ -159,11 +159,10 @@ pub(crate) struct CorrectionTable {
     pub notes: [i32; 12],
     /// The prepared periods for all classes.
     ///
-    /// If these periods change, the active targets do not reload.
+    /// If the sample rate changes, `set_sample_rate` builds the active targets
+    /// again from these periods.
     base_periods: [i32; 12],
-    /// The held MIDI keys.
-    ///
-    /// A reset keeps key 127, and mask creation excludes it.
+    /// The held MIDI keys 0..=127.
     pub keyboard: [bool; 128],
 }
 
@@ -183,10 +182,11 @@ impl CorrectionTable {
         result
     }
 
-    /// Calculates the period table again for `rate`, but does not reload the
-    /// active scale.
+    /// Calculates the period table again for `rate` and builds the active
+    /// targets again.
     ///
-    /// The new periods apply from the next `set_notes` call.
+    /// If `count` is zero, the active targets and their midpoint boundaries do
+    /// not change.
     pub(crate) fn set_sample_rate(&mut self, rate: SampleRate) {
         let frequency = ((-9.0 * std::f64::consts::LN_2 / 12.0).exp() * 440.0) as f32;
         let mut base = rate.hz() / frequency;
@@ -196,6 +196,13 @@ impl CorrectionTable {
         self.base_periods = std::array::from_fn(|n| {
             (f64::from(base) * 2.0_f64.powf((100.0 + n as f64 * 100.0) / 1200.0) + 0.5) as i32
         });
+        if self.count > 0 {
+            let mut mask = [false; 12];
+            for &note in &self.notes[..self.count] {
+                mask[note as usize] = true;
+            }
+            self.set_notes(NoteMask(mask));
+        }
     }
     /// Builds the active targets and their midpoint boundaries again.
     ///
@@ -219,26 +226,33 @@ impl CorrectionTable {
             self.midpoints[0] = self.midpoints[self.count] / 2;
         }
     }
-    /// Releases keys 0..=126, and keeps key 127 and the active target table.
-    ///
-    /// A later MIDI event builds the table again from the new keyboard state.
-    pub(crate) fn reset(&mut self) {
-        self.keyboard[..127].fill(false);
+    /// Releases keys 0..=127 and loads `notes` again.
+    pub(crate) fn reset(&mut self, notes: NoteMask) {
+        self.keyboard.fill(false);
+        self.set_notes(notes);
     }
     /// Applies an event whose MIDI ranges were already checked.
-    pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent) {
+    ///
+    /// If no key in 0..=127 is held, this method loads `notes` again.
+    pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent, notes: NoteMask) {
         match event {
             MidiEvent::NoteOn { note, velocity, .. } => {
-                self.keyboard[note as usize] = velocity != 0
+                self.keyboard[usize::from(note)] = velocity != 0
             }
-            MidiEvent::NoteOff { note, .. } => self.keyboard[note as usize] = false,
-            MidiEvent::AllNotesOff => self.reset(),
+            MidiEvent::NoteOff { note, .. } => self.keyboard[usize::from(note)] = false,
+            MidiEvent::AllNotesOff => {
+                self.reset(notes);
+                return;
+            }
         }
         let mut mask = [false; 12];
-        // Correction excludes key 127, and a reset keeps that key.
-        for i in 0..127 {
-            mask[i % 12] |= self.keyboard[i];
+        for (i, &held) in self.keyboard.iter().enumerate() {
+            mask[i % 12] |= held;
         }
-        self.set_notes(NoteMask(mask));
+        if mask == [false; 12] {
+            self.set_notes(notes);
+        } else {
+            self.set_notes(NoteMask(mask));
+        }
     }
 }

@@ -9,16 +9,19 @@
 //! wasm-pack can do the two steps in one command. The npm entry point uses
 //! `loadTunelet()` to initialize these bindings in browsers and in Node.js.
 //!
-//! The exported `Tunelet` class owns a native [`Processor`] and three reusable
-//! PCM buffers. JavaScript gives the `Int16Array` input and output buffers. The
-//! PCM API does not give buffer pointers or long-lived memory views to
-//! JavaScript. The class copies the input before it writes the output.
+//! The exported `Tunelet` class owns a native [`Processor`], three reusable
+//! `i16` PCM buffers and three fixed-capacity `f32` buffers. JavaScript can
+//! pass `Int16Array` or `Float32Array` buffers, which the class copies in and
+//! out on each call. JavaScript can also read `inputF32Ptr`, `leftF32Ptr` and
+//! `rightF32Ptr` to process `Float32Array` views over Wasm linear memory in
+//! place.
 //!
 //! Configuration objects obey these rules:
 //!
 //! - Field names use camelCase.
 //! - Enum values are strings.
 //! - Each object must contain all required fields.
+//! - The optional correction `humanize` and `flexTune` fields default to 0.
 //! - The optional harmony `voices` field defaults to 4.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
@@ -28,25 +31,32 @@
 //! that validation uses.
 //!
 //! The class allocates the PCM storage at construction and uses it again for
-//! each block. These operations can allocate:
+//! each block. It also keeps an event buffer and uses that capacity again
+//! across calls. These operations can allocate:
 //!
-//! - The decode of events.
+//! - Event decode when a call gives more events than before, or when an event
+//!   converts a stage configuration.
 //! - The conversion of configurations.
-//! - Feedback and telemetry objects.
+//! - Feedback, control-activity and telemetry objects.
 //! - The buffers of the formant envelopes.
 //! - Errors.
 //!
-//! The JavaScript glue can also make temporary views when it copies data. This
-//! generic binding does not guarantee an AudioWorklet callback that is free of
-//! allocation. If you do not need a processor any more, call the generated
-//! `free()` method.
+//! When the JavaScript glue copies `Int16Array` or `Float32Array` arguments,
+//! it makes temporary views. By contrast, in-place `Float32` calls without
+//! events do not allocate or call JavaScript imports. If Wasm memory grows,
+//! previous `ArrayBuffer` views detach, so recheck `memory.buffer` before you
+//! read or write views. If you do not need a processor any more, call `free()`
+//! and do not touch its views again.
 
+use crate::events::ValidatedEvents;
+use crate::processor::EnvelopeKey;
 use crate::{
-    Error, Feedback, PrepareConfig, Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
+    ControlActivity, ControlEvent, Error, Feedback, MidiEvent, PrepareConfig, Processor,
+    ProcessorConfig, SampleRate, Telemetry, TimedEvent,
 };
-use js_sys::{Float32Array, Int16Array};
+use js_sys::{Array, Float32Array, Int16Array, Reflect};
 use serde::{Deserialize, Serialize};
-use tsify::{Ts, Tsify};
+use tsify::{serde_wasm_bindgen, Ts, Tsify};
 use wasm_bindgen::prelude::*;
 
 /// The events for one call that processes audio (`TimedEvent[]` in TypeScript).
@@ -69,26 +79,36 @@ pub struct BlockEvents(Vec<TimedEvent>);
 ///
 /// # Errors
 ///
-/// If the conversion to a JavaScript object fails, this function returns a
+/// If the conversion to a JavaScript object fails, this function throws a
 /// JavaScript `Error`.
 #[wasm_bindgen(js_name = defaultConfig)]
 pub fn default_config() -> Result<Ts<ProcessorConfig>, JsError> {
     Ok(ProcessorConfig::default().into_ts()?)
 }
 
-/// A stateful PCM processor that JavaScript uses as the `Tunelet` class.
+/// A stateful vocal processor that JavaScript uses as the `Tunelet` class.
 ///
-/// The input is signed 16-bit mono PCM. The output is planar stereo or an
-/// in-place mono downmix. The quantization, latency and configuration behavior
-/// are the same as in the native processor. Buffer lengths count frames, not
-/// bytes.
+/// The input is mono `Int16Array` PCM or mono `Float32Array` audio. The output
+/// is planar stereo or an in-place mono downmix. The quantization, the output
+/// scale, the latency and the configuration behavior match [`Processor`].
+/// Buffer lengths and frame arguments count frames, not bytes.
 ///
-/// These rules apply to the buffers:
+/// These rules apply to `Int16Array` and `Float32Array` buffer arguments:
 ///
 /// - Separate stereo output arrays must not overlap.
 /// - The input can overlap an output, because the class copies the input
 ///   first.
 /// - All buffers must stay attached until each call is complete.
+///
+/// These rules apply to in-place `Float32` calls:
+///
+/// - `inputF32Ptr`, `leftF32Ptr` and `rightF32Ptr` are fixed byte offsets for
+///   `maxBlockFrames` `f32` samples until `free()`.
+/// - `Float32Array` buffer calls and in-place `Float32` calls share those
+///   three `f32` buffers.
+/// - Check `memory.buffer` before input writes and after calls that pass
+///   `events`, because Wasm memory growth detaches old views.
+/// - Do not read or write the views of an instance after `free()`.
 ///
 /// If a call that processes audio fails, it throws a JavaScript `Error` before
 /// the audio state or the output changes. The class rejects malformed
@@ -109,10 +129,22 @@ pub struct WasmProcessor {
     /// The reusable PCM buffer for the right channel, which the class copies to
     /// the caller only after a successful call.
     right: Vec<i16>,
+    /// The fixed-capacity `f32` buffer for mono input and in-place mono output.
+    input_f32: Vec<f32>,
+    /// The fixed-capacity `f32` buffer for the left stereo output channel.
+    left_f32: Vec<f32>,
+    /// The fixed-capacity `f32` buffer for the right stereo output channel.
+    right_f32: Vec<f32>,
     /// The reusable buffers for the two formant envelopes. They become longer
     /// when a call needs more points, and they do not become shorter.
     envelope_input: Vec<f32>,
     envelope_output: Vec<f32>,
+    /// The key and the result of the last formant envelope that the buffers
+    /// hold.
+    envelope_cache: Option<(EnvelopeKey, bool)>,
+    /// The reusable buffer for block events. It becomes longer when a call
+    /// gives more events, and it does not become shorter.
+    events: Vec<TimedEvent>,
 }
 
 #[wasm_bindgen(js_class = Tunelet)]
@@ -170,9 +202,42 @@ impl WasmProcessor {
             input: pcm_buffer(max_block_frames)?,
             left: pcm_buffer(max_block_frames)?,
             right: pcm_buffer(max_block_frames)?,
+            input_f32: f32_buffer(max_block_frames)?,
+            left_f32: f32_buffer(max_block_frames)?,
+            right_f32: f32_buffer(max_block_frames)?,
             envelope_input: Vec::new(),
             envelope_output: Vec::new(),
+            envelope_cache: None,
+            events: Vec::new(),
         })
+    }
+
+    /// The byte offset in Wasm memory of the `maxBlockFrames` `f32` input
+    /// buffer.
+    ///
+    /// Mono in-place calls also write their output to this buffer. This offset
+    /// stays constant until `free()`.
+    #[wasm_bindgen(getter, js_name = inputF32Ptr)]
+    pub fn input_f32_ptr(&self) -> usize {
+        self.input_f32.as_ptr() as usize
+    }
+
+    /// The byte offset in Wasm memory of the `maxBlockFrames` left `f32`
+    /// output buffer.
+    ///
+    /// This offset stays constant until `free()`.
+    #[wasm_bindgen(getter, js_name = leftF32Ptr)]
+    pub fn left_f32_ptr(&self) -> usize {
+        self.left_f32.as_ptr() as usize
+    }
+
+    /// The byte offset in Wasm memory of the `maxBlockFrames` right `f32`
+    /// output buffer.
+    ///
+    /// This offset stays constant until `free()`.
+    #[wasm_bindgen(getter, js_name = rightF32Ptr)]
+    pub fn right_f32_ptr(&self) -> usize {
+        self.right_f32.as_ptr() as usize
     }
 
     /// The sample rate of the input and the output in hertz.
@@ -193,9 +258,9 @@ impl WasmProcessor {
 
     /// The nominal resynthesis latency: 1,593 frames at both sample rates.
     ///
-    /// The dry path has a delay of 1,543 frames. Resampled voices, choir delays
-    /// and effects have their own timing. Thus, this value does not align all
-    /// paths.
+    /// The dry path also has a delay of 1,593 frames. Resampled voices, choir
+    /// delays and effects have their own timing. Thus, this value does not
+    /// align all paths.
     #[wasm_bindgen(getter, js_name = latencyFrames)]
     pub fn latency_frames(&self) -> usize {
         self.processor.latency_frames()
@@ -256,13 +321,16 @@ impl WasmProcessor {
         Error::check_length(frames, left.length() as usize)?;
         Error::check_length(frames, right.length() as usize)?;
         self.processor.check_block(frames)?;
-        let events = decode_events(events)?;
+        let events = match events {
+            Some(events) => decode_events(&mut self.events, events, frames)?,
+            None => &[],
+        };
         input.copy_to(&mut self.input[..frames]);
         self.processor.process_planar(
             &self.input[..frames],
             &mut self.left[..frames],
             &mut self.right[..frames],
-            &events.0,
+            events,
         )?;
         left.copy_from(&self.left[..frames]);
         right.copy_from(&self.right[..frames]);
@@ -272,8 +340,8 @@ impl WasmProcessor {
     /// Replaces the audio in a mono `Int16Array` with the stereo downmix.
     ///
     /// The timing, the events and the drain cancellation are the same as for
-    /// `process`. Peak feedback measures the stereo output before the downmix,
-    /// as in the native processor.
+    /// `process`. Peak feedback and telemetry measure the mono signal after the
+    /// downmix, as in the native processor.
     ///
     /// # Errors
     ///
@@ -287,19 +355,158 @@ impl WasmProcessor {
     ) -> Result<(), JsError> {
         let frames = audio.length() as usize;
         self.processor.check_block(frames)?;
-        let events = decode_events(events)?;
+        let events = match events {
+            Some(events) => decode_events(&mut self.events, events, frames)?,
+            None => &[],
+        };
         audio.copy_to(&mut self.input[..frames]);
         self.processor
-            .process_mono_in_place(&mut self.input[..frames], &events.0)?;
+            .process_mono_in_place(&mut self.input[..frames], events)?;
         audio.copy_from(&self.input[..frames]);
+        Ok(())
+    }
+
+    /// Processes mono `Float32Array` input into left and right `Float32Array`
+    /// buffers of equal length.
+    ///
+    /// For each input sample, `NaN` becomes `0`, and other values clamp to
+    /// `-1..=1`, multiply by `32767` and round to `-32767..=32767`. Each
+    /// clipped stereo sample divides by `32768`, so each output value is in
+    /// `-32767 / 32768..=32767 / 32768`. Events, empty blocks, drain
+    /// cancellation and buffer reuse obey the same rules as in `process`.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if the channel lengths are not equal. It also throws
+    /// if the block is larger than `maxBlockFrames` or an event is not valid.
+    /// The call checks the lengths and the block size before it decodes and
+    /// validates the events. If an error occurs, the output buffers and the DSP
+    /// state do not change.
+    #[wasm_bindgen(js_name = processF32)]
+    pub fn process_f32(
+        &mut self,
+        input: &Float32Array,
+        left: &Float32Array,
+        right: &Float32Array,
+        events: Option<Ts<BlockEvents>>,
+    ) -> Result<(), JsError> {
+        let frames = input.length() as usize;
+        Error::check_length(frames, left.length() as usize)?;
+        Error::check_length(frames, right.length() as usize)?;
+        self.processor.check_block(frames)?;
+        let events = match events {
+            Some(events) => decode_events(&mut self.events, events, frames)?,
+            None => &[],
+        };
+        input.copy_to(&mut self.input_f32[..frames]);
+        self.processor.process_planar_f32(
+            &self.input_f32[..frames],
+            &mut self.left_f32[..frames],
+            &mut self.right_f32[..frames],
+            events,
+        )?;
+        left.copy_from(&self.left_f32[..frames]);
+        right.copy_from(&self.right_f32[..frames]);
+        Ok(())
+    }
+
+    /// Replaces the audio in a mono `Float32Array` with the stereo downmix.
+    ///
+    /// Input quantization, `1 / 32768` output division, events and drain
+    /// cancellation are the same as for `processF32`. Peak feedback and
+    /// telemetry measure the mono signal after the downmix, as in the native
+    /// processor.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if the block is too large or an event is not valid.
+    /// It throws before the audio of the caller or the DSP state changes.
+    #[wasm_bindgen(js_name = processMonoF32)]
+    pub fn process_mono_f32(
+        &mut self,
+        audio: &Float32Array,
+        events: Option<Ts<BlockEvents>>,
+    ) -> Result<(), JsError> {
+        let frames = audio.length() as usize;
+        self.processor.check_block(frames)?;
+        let events = match events {
+            Some(events) => decode_events(&mut self.events, events, frames)?,
+            None => &[],
+        };
+        audio.copy_to(&mut self.input_f32[..frames]);
+        self.processor
+            .process_mono_in_place_f32(&mut self.input_f32[..frames], events)?;
+        audio.copy_from(&self.input_f32[..frames]);
+        Ok(())
+    }
+
+    /// Processes `frames` samples from `inputF32Ptr` into `leftF32Ptr` and
+    /// `rightF32Ptr`.
+    ///
+    /// `frames` must be an integer in `0..=maxBlockFrames`. Input quantization,
+    /// the output scale, timed events and drain cancellation match
+    /// [`Processor::process_planar_f32`]. If you pass `events`, recheck
+    /// `memory.buffer` before you read the output views.
+    ///
+    /// # Errors
+    ///
+    /// If `frames` is not an integer in `0..=maxBlockFrames`, or if an event is
+    /// not valid, this method throws. All checks finish before the buffers or
+    /// the DSP state change.
+    #[wasm_bindgen(js_name = processF32InPlace)]
+    pub fn process_f32_in_place(
+        &mut self,
+        frames: f64,
+        events: Option<Ts<BlockEvents>>,
+    ) -> Result<(), JsError> {
+        let frames = self.check_frames(frames)?;
+        let events = match events {
+            Some(events) => decode_events(&mut self.events, events, frames)?,
+            None => &[],
+        };
+        self.processor.process_planar_f32(
+            &self.input_f32[..frames],
+            &mut self.left_f32[..frames],
+            &mut self.right_f32[..frames],
+            events,
+        )?;
+        Ok(())
+    }
+
+    /// Replaces `frames` samples at `inputF32Ptr` with the mono `f32` downmix.
+    ///
+    /// `frames` must be an integer in `0..=maxBlockFrames`. Input quantization,
+    /// the output scale, peak measurements, events and drain cancellation match
+    /// [`Processor::process_mono_in_place_f32`]. If you pass `events`, recheck
+    /// `memory.buffer` before you read the output view.
+    ///
+    /// # Errors
+    ///
+    /// If `frames` is not an integer in `0..=maxBlockFrames`, or if an event is
+    /// not valid, this method throws. All checks finish before the buffer or
+    /// the DSP state changes.
+    #[wasm_bindgen(js_name = processMonoF32InPlace)]
+    pub fn process_mono_f32_in_place(
+        &mut self,
+        frames: f64,
+        events: Option<Ts<BlockEvents>>,
+    ) -> Result<(), JsError> {
+        let frames = self.check_frames(frames)?;
+        let events = match events {
+            Some(events) => decode_events(&mut self.events, events, frames)?,
+            None => &[],
+        };
+        self.processor
+            .process_mono_in_place_f32(&mut self.input_f32[..frames], events)?;
         Ok(())
     }
 
     /// Starts a finite tail budget and returns its frame count as a number.
     ///
-    /// Call this method one time after the final input block. Another call
-    /// starts the full budget again, but it does not clear the histories. Refer
-    /// to `drain` for completion.
+    /// Call this method one time after the final input block. Then call `drain`
+    /// or `drainMono` until the call returns zero. Completion resets the audio
+    /// histories and the feedback in the final drain call. Another call starts
+    /// the full budget again, and it does not clear the histories.
     #[wasm_bindgen(js_name = beginDrain)]
     pub fn begin_drain(&mut self) -> usize {
         self.processor.begin_drain()
@@ -337,11 +544,14 @@ impl WasmProcessor {
         Ok(count)
     }
 
-    /// Renders a mono tail block and returns its frame count.
+    /// Renders a mono tail block in `audio` and returns its frame count.
     ///
-    /// The method fills the unused output with zeros. The downmix and the peak
-    /// feedback are the same as for `processMono`. The return values, empty
-    /// arrays and completion are the same as for `drain`.
+    /// The method mixes each stereo tail frame to mono and fills the unused
+    /// output with zeros. Peak feedback and telemetry measure the mono signal
+    /// after the mono downmix. If the drain is not active or is complete, the
+    /// method returns zero. Empty arrays do not use the budget. Completion
+    /// resets the histories and the feedback in the final drain call, also when
+    /// that call returns audio.
     ///
     /// # Errors
     ///
@@ -354,6 +564,94 @@ impl WasmProcessor {
         let count = self.processor.drain_mono(&mut self.input[..frames])?;
         audio.copy_from(&self.input[..frames]);
         Ok(count)
+    }
+
+    /// Renders stereo tail frames into `Float32Array` buffers of equal length.
+    ///
+    /// Each rendered sample is in `-32767 / 32768..=32767 / 32768`, and unused
+    /// output frames get `0`. The return values, empty arrays and completion
+    /// are the same as for `drain`.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if the channel lengths are not equal or if a block is
+    /// larger than `maxBlockFrames`. After an error, both output arrays and the
+    /// drain state do not change.
+    #[wasm_bindgen(js_name = drainF32)]
+    pub fn drain_f32(
+        &mut self,
+        left: &Float32Array,
+        right: &Float32Array,
+    ) -> Result<usize, JsError> {
+        let frames = left.length() as usize;
+        Error::check_length(frames, right.length() as usize)?;
+        self.processor.check_block(frames)?;
+        let count = self
+            .processor
+            .drain_planar_f32(&mut self.left_f32[..frames], &mut self.right_f32[..frames])?;
+        left.copy_from(&self.left_f32[..frames]);
+        right.copy_from(&self.right_f32[..frames]);
+        Ok(count)
+    }
+
+    /// Renders a mono `Float32Array` tail block and returns its frame count.
+    ///
+    /// The method fills the unused output with `0`. The downmix, the `1 / 32768`
+    /// output division and the peak measurements are the same as for
+    /// `processMonoF32`. The return values, empty arrays and completion are the
+    /// same as for `drain`.
+    ///
+    /// # Errors
+    ///
+    /// If the block is larger than `maxBlockFrames`, this method throws before
+    /// the output or the state changes.
+    #[wasm_bindgen(js_name = drainMonoF32)]
+    pub fn drain_mono_f32(&mut self, audio: &Float32Array) -> Result<usize, JsError> {
+        let frames = audio.length() as usize;
+        self.processor.check_block(frames)?;
+        let count = self
+            .processor
+            .drain_mono_f32(&mut self.input_f32[..frames])?;
+        audio.copy_from(&self.input_f32[..frames]);
+        Ok(count)
+    }
+
+    /// Renders up to `frames` stereo tail frames into `leftF32Ptr` and
+    /// `rightF32Ptr`.
+    ///
+    /// `frames` must be an integer in `0..=maxBlockFrames`. The method returns
+    /// the rendered frame count and fills unused frames up to `frames` with
+    /// `0.0`. Empty blocks and drain completion match `drain`.
+    ///
+    /// # Errors
+    ///
+    /// If `frames` is not an integer in `0..=maxBlockFrames`, this method
+    /// throws. On error, the output buffers and the drain state do not change.
+    #[wasm_bindgen(js_name = drainF32InPlace)]
+    pub fn drain_f32_in_place(&mut self, frames: f64) -> Result<usize, JsError> {
+        let frames = self.check_frames(frames)?;
+        Ok(self
+            .processor
+            .drain_planar_f32(&mut self.left_f32[..frames], &mut self.right_f32[..frames])?)
+    }
+
+    /// Renders up to `frames` mono tail frames into `inputF32Ptr` and returns
+    /// their count.
+    ///
+    /// `frames` must be an integer in `0..=maxBlockFrames`. The method fills
+    /// unused samples up to `frames` with `0.0`. The downmix, the output scale,
+    /// empty blocks and drain completion match `drainMono`.
+    ///
+    /// # Errors
+    ///
+    /// If `frames` is not an integer in `0..=maxBlockFrames`, this method
+    /// throws. On error, the output buffer and the drain state do not change.
+    #[wasm_bindgen(js_name = drainMonoF32InPlace)]
+    pub fn drain_mono_f32_in_place(&mut self, frames: f64) -> Result<usize, JsError> {
+        let frames = self.check_frames(frames)?;
+        Ok(self
+            .processor
+            .drain_mono_f32(&mut self.input_f32[..frames])?)
     }
 
     /// Returns a new feedback object and does not clear the peak window.
@@ -376,7 +674,7 @@ impl WasmProcessor {
         Ok(self.processor.feedback().into_ts()?)
     }
 
-    /// Returns the feedback and clears only the stereo peak window.
+    /// Returns the feedback and clears only the peak window.
     ///
     /// The other feedback fields and all audio histories do not change.
     ///
@@ -390,6 +688,21 @@ impl WasmProcessor {
         let feedback = self.processor.feedback().into_ts()?;
         self.processor.take_feedback();
         Ok(feedback)
+    }
+
+    /// Returns which choir, harmony and reverb controls change the audio in
+    /// the active configuration.
+    ///
+    /// A `false` flag means that the related control makes no sample change in
+    /// the active voice mode, harmony source or reverb network. The audio
+    /// state does not change.
+    ///
+    /// # Errors
+    ///
+    /// If the conversion to a JavaScript object fails, this method throws.
+    #[wasm_bindgen(js_name = controlActivity)]
+    pub fn control_activity(&self) -> Result<Ts<ControlActivity>, JsError> {
+        Ok(self.processor.control_activity().into_ts()?)
     }
 
     /// Returns a new telemetry object and does not clear its peak windows.
@@ -456,14 +769,25 @@ impl WasmProcessor {
     ) -> Result<bool, JsError> {
         let points = input.length() as usize;
         // Check before the buffers become longer for a call that cannot succeed.
-        Error::check_length(points, output.length() as usize)?;
+        let key =
+            self.processor
+                .envelope_key(max_frequency_hz, points, output.length() as usize)?;
+        if let Some((cached, valid)) = self.envelope_cache {
+            if cached == key {
+                input.copy_from(&self.envelope_input[..points]);
+                output.copy_from(&self.envelope_output[..points]);
+                return Ok(valid);
+            }
+        }
         let analysis = envelope_buffer(&mut self.envelope_input, points)?;
         let synthesis = envelope_buffer(&mut self.envelope_output, points)?;
+        self.envelope_cache = None;
         let valid = self
             .processor
             .formant_envelope(max_frequency_hz, analysis, synthesis)?;
-        input.copy_from(analysis);
-        output.copy_from(synthesis);
+        self.envelope_cache = Some((key, valid));
+        input.copy_from(&self.envelope_input[..points]);
+        output.copy_from(&self.envelope_output[..points]);
         Ok(valid)
     }
 
@@ -475,17 +799,220 @@ impl WasmProcessor {
     pub fn reset(&mut self) {
         self.processor.reset();
     }
+
+    /// Validates a JavaScript frame count before buffer slices or DSP state
+    /// change.
+    fn check_frames(&self, frames: f64) -> Result<usize, JsError> {
+        if !(0.0..=f64::from(u32::MAX)).contains(&frames) || frames.fract() != 0.0 {
+            return Err(JsError::new("frames must be an integer in 0..=4294967295"));
+        }
+        let frames = frames as usize;
+        self.processor.check_block(frames)?;
+        Ok(frames)
+    }
 }
 
-/// Decodes the optional block controls before the audio state changes.
+/// The cached property keys and variant names for JavaScript events.
+struct EventKeys {
+    offset: JsValue,
+    event: JsValue,
+    kind: JsValue,
+    value: JsValue,
+    channel: JsValue,
+    note: JsValue,
+    velocity: JsValue,
+    midi: JsValue,
+    correction_midi: JsValue,
+    output_gain: JsValue,
+    reset: JsValue,
+    configure: JsValue,
+    resynthesis: JsValue,
+    punch: JsValue,
+    warm: JsValue,
+    alien: JsValue,
+    reverb: JsValue,
+    note_on: JsValue,
+    note_off: JsValue,
+    all_notes_off: JsValue,
+}
+
+impl EventKeys {
+    /// Allocates the property keys and variant names one time for this thread.
+    fn new() -> Self {
+        Self {
+            offset: JsValue::from_str("offset"),
+            event: JsValue::from_str("event"),
+            kind: JsValue::from_str("type"),
+            value: JsValue::from_str("value"),
+            channel: JsValue::from_str("channel"),
+            note: JsValue::from_str("note"),
+            velocity: JsValue::from_str("velocity"),
+            midi: JsValue::from_str("midi"),
+            correction_midi: JsValue::from_str("correctionMidi"),
+            output_gain: JsValue::from_str("outputGain"),
+            reset: JsValue::from_str("reset"),
+            configure: JsValue::from_str("configure"),
+            resynthesis: JsValue::from_str("resynthesis"),
+            punch: JsValue::from_str("punch"),
+            warm: JsValue::from_str("warm"),
+            alien: JsValue::from_str("alien"),
+            reverb: JsValue::from_str("reverb"),
+            note_on: JsValue::from_str("noteOn"),
+            note_off: JsValue::from_str("noteOff"),
+            all_notes_off: JsValue::from_str("allNotesOff"),
+        }
+    }
+}
+
+thread_local! {
+    static EVENT_KEYS: EventKeys = EventKeys::new();
+}
+
+/// Decodes and validates the block controls before the audio or the state
+/// changes.
 ///
-/// If there is no value, the result is an empty `Vec`, and no allocation
-/// occurs. If the caller gives an array, the decode can allocate storage.
-fn decode_events(events: Option<Ts<BlockEvents>>) -> Result<BlockEvents, JsError> {
-    Ok(match events {
-        Some(value) => value.to_rust()?,
-        None => BlockEvents::default(),
+/// The function clears `buffer` and uses its capacity again. Only a call with
+/// more events than the current capacity reserves more space.
+fn decode_events(
+    buffer: &mut Vec<TimedEvent>,
+    events: Ts<BlockEvents>,
+    frames: usize,
+) -> Result<&[TimedEvent], JsError> {
+    let value = JsValue::from(events);
+    let Some(array) = value.dyn_ref::<Array>() else {
+        return Err(JsError::new("events must be an Array"));
+    };
+    buffer.clear();
+    let count = array.length();
+    if count > 0 {
+        buffer.try_reserve(count as usize)?;
+        EVENT_KEYS.with(|keys| -> Result<(), JsError> {
+            for index in 0..count {
+                buffer.push(decode_timed_event(&array.get(index), keys)?);
+            }
+            Ok(())
+        })?;
+    }
+    ValidatedEvents::new(buffer, frames)?;
+    Ok(buffer)
+}
+
+/// Decodes one JavaScript object into a `TimedEvent`.
+fn decode_timed_event(item: &JsValue, keys: &EventKeys) -> Result<TimedEvent, JsError> {
+    let offset = decode_offset(&get_property(item, &keys.offset)?)?;
+    let event = decode_control_event(&get_property(item, &keys.event)?, keys)?;
+    Ok(TimedEvent { offset, event })
+}
+
+/// Decodes one `ControlEvent` from its cached discriminant.
+fn decode_control_event(event: &JsValue, keys: &EventKeys) -> Result<ControlEvent, JsError> {
+    let kind = get_property(event, &keys.kind)?;
+    if kind == keys.midi {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Midi(decode_midi_event(&value, keys)?))
+    } else if kind == keys.correction_midi {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::CorrectionMidi(decode_midi_event(
+            &value, keys,
+        )?))
+    } else if kind == keys.output_gain {
+        let value = get_property(event, &keys.value)?;
+        let Some(gain) = value.as_f64() else {
+            return Err(JsError::new("outputGain value must be a number"));
+        };
+        Ok(ControlEvent::OutputGain(gain as f32))
+    } else if kind == keys.reset {
+        let value = get_property(event, &keys.value)?;
+        if !value.is_undefined() && !value.is_null() {
+            return Err(JsError::new("reset event must not have a value"));
+        }
+        Ok(ControlEvent::Reset)
+    } else if kind == keys.configure {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Configure(serde_wasm_bindgen::from_value(
+            value,
+        )?))
+    } else if kind == keys.resynthesis {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Resynthesis(serde_wasm_bindgen::from_value(
+            value,
+        )?))
+    } else if kind == keys.punch {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Punch(serde_wasm_bindgen::from_value(value)?))
+    } else if kind == keys.warm {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Warm(serde_wasm_bindgen::from_value(value)?))
+    } else if kind == keys.alien {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Alien(serde_wasm_bindgen::from_value(value)?))
+    } else if kind == keys.reverb {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Reverb(serde_wasm_bindgen::from_value(value)?))
+    } else {
+        Err(JsError::new("event type is absent or unknown"))
+    }
+}
+
+/// Decodes one `MidiEvent` object from its cached discriminant.
+fn decode_midi_event(value: &JsValue, keys: &EventKeys) -> Result<MidiEvent, JsError> {
+    let kind = get_property(value, &keys.kind)?;
+    if kind == keys.note_on {
+        let channel = decode_u8(&get_property(value, &keys.channel)?, "MIDI channel")?;
+        let note = decode_u8(&get_property(value, &keys.note)?, "MIDI note")?;
+        let velocity = decode_u8(&get_property(value, &keys.velocity)?, "MIDI velocity")?;
+        Ok(MidiEvent::NoteOn {
+            channel,
+            note,
+            velocity,
+        })
+    } else if kind == keys.note_off {
+        let channel = decode_u8(&get_property(value, &keys.channel)?, "MIDI channel")?;
+        let note = decode_u8(&get_property(value, &keys.note)?, "MIDI note")?;
+        Ok(MidiEvent::NoteOff { channel, note })
+    } else if kind == keys.all_notes_off {
+        Ok(MidiEvent::AllNotesOff)
+    } else {
+        Err(JsError::new("MIDI event type is absent or unknown"))
+    }
+}
+
+/// Reads a property from a JavaScript object and converts any exception.
+fn get_property(target: &JsValue, key: &JsValue) -> Result<JsValue, JsError> {
+    Reflect::get(target, key).map_err(|err| match err.dyn_ref::<js_sys::Error>() {
+        Some(error) => JsError::new(&String::from(error.message())),
+        None => JsError::new("event must be an object"),
     })
+}
+
+/// Converts a JavaScript number into a valid wasm32 frame offset.
+fn decode_offset(value: &JsValue) -> Result<usize, JsError> {
+    let Some(number) = value.as_f64() else {
+        return Err(JsError::new(
+            "event offset must be an integer in 0..=4294967295",
+        ));
+    };
+    if !(0.0..=f64::from(u32::MAX)).contains(&number) || number.fract() != 0.0 {
+        return Err(JsError::new(
+            "event offset must be an integer in 0..=4294967295",
+        ));
+    }
+    Ok(number as usize)
+}
+
+/// Converts a JavaScript number into a `u8` integer.
+fn decode_u8(value: &JsValue, field: &str) -> Result<u8, JsError> {
+    let Some(number) = value.as_f64() else {
+        return Err(JsError::new(&format!(
+            "{field} must be an integer in 0..=255"
+        )));
+    };
+    if !(0.0..=255.0).contains(&number) || number.fract() != 0.0 {
+        return Err(JsError::new(&format!(
+            "{field} must be an integer in 0..=255"
+        )));
+    }
+    Ok(number as u8)
 }
 
 /// Returns the first `points` entries of a reusable envelope buffer. If the
@@ -509,6 +1036,17 @@ fn pcm_buffer(frames: usize) -> Result<Vec<i16>, JsError> {
     let mut buffer = Vec::new();
     buffer.try_reserve_exact(frames)?;
     buffer.resize(frames, 0);
+    Ok(buffer)
+}
+
+/// Allocates `f32` audio storage that contains zeros.
+///
+/// If the capacity overflows or the allocation fails, this function returns a
+/// JavaScript error. It does not panic.
+fn f32_buffer(frames: usize) -> Result<Vec<f32>, JsError> {
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(frames)?;
+    buffer.resize(frames, 0.0);
     Ok(buffer)
 }
 

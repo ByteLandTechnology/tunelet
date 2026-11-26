@@ -50,8 +50,9 @@ browsers and Node.js.
 - **No dependencies**: The default Rust build has no dependencies and uses
   only safe Rust.
 
-The input is mono signed 16-bit PCM at 44.1 kHz or 48 kHz. The output is
-stereo or mono 16-bit PCM.
+The input is mono signed 16-bit PCM or normalized 32-bit floating-point audio
+at 44.1 kHz or 48 kHz. The output is stereo or mono in 16-bit PCM or 32-bit
+floating-point form.
 
 ## Installation
 
@@ -175,8 +176,14 @@ The internal Q14 stages use `i64` products and saturate at the `i32`
 limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
 multi-voice mixes.
 
+`resynthesis.correction.humanize` sets the relaxation on sustained notes, in
+`0..=1`. The default is 0. `resynthesis.correction.flex_tune` sets the outer
+fraction of each half-bin where pull toward the target decreases, in `0..=1`.
+The default is 0, which applies full pull across the whole bin.
+
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,543 frames.
+dry path starts after Warm and has a delay of 1,593 frames. All six reverb
+modes keep the stereo dry signal.
 
 ### Harmony sources
 
@@ -216,11 +223,19 @@ processor.
 
 Select the process function for your output layout:
 
-| Output layout                  | Function for input      | Function for the tail |
-| ------------------------------ | ----------------------- | --------------------- |
-| `[[i16; 2]]` stereo frames     | `process`               | `drain`               |
-| Separate left and right slices | `process_planar`        | `drain_planar`        |
-| Mono slice                     | `process_mono_in_place` | `drain_mono`          |
+| Output layout                        | Function for input          | Function for the tail |
+| ------------------------------------ | --------------------------- | --------------------- |
+| `[[i16; 2]]` stereo frames           | `process`                   | `drain`               |
+| `[[f32; 2]]` stereo frames           | `process_f32`               | `drain_f32`           |
+| Separate `i16` left and right slices | `process_planar`            | `drain_planar`        |
+| Separate `f32` left and right slices | `process_planar_f32`        | `drain_planar_f32`    |
+| Mono `i16` slice                     | `process_mono_in_place`     | `drain_mono`          |
+| Mono `f32` slice                     | `process_mono_in_place_f32` | `drain_mono_f32`      |
+
+The `f32` methods convert `NaN` input samples to `0`. They clamp other input
+values to `-1.0..=1.0`, multiply by `32767.0` in `f64` and round to `i16`. They
+divide each `i16` output sample by `32768.0` and fill unused tail frames with
+`0.0`.
 
 These rules apply to each call:
 
@@ -276,7 +291,7 @@ The drain gives the tail of the reverb and the voices after the last input
 block. To get the tail, do these steps:
 
 1. Call `begin_drain()` one time.
-2. Call `drain`, `drain_planar` or `drain_mono` until the call returns zero.
+2. Call the drain method for your layout until the call returns zero.
 3. From each drain call, use only the frames that the call returns.
 
 The drain fills the unused output with zeros. The drain has a finite budget,
@@ -295,12 +310,18 @@ These calls read the state of the processor. They do not change the audio.
 
 | Call                 | Data                                                              |
 | -------------------- | ----------------------------------------------------------------- |
-| `feedback()`         | The pitch, the stereo peak, the correction ratio, the frame count |
+| `control_activity()` | Which choir, harmony and reverb controls are active               |
+| `feedback()`         | The pitch, the output peak, the correction ratio, the frame count |
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
 | `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
+
+`Processor::control_activity()` and `ProcessorConfig::control_activity()`
+return a `ControlActivity` struct. A `false` flag means that the related
+control makes no sample change in the active voice mode, harmony source or
+reverb network.
 
 The telemetry includes these items:
 
@@ -311,8 +332,9 @@ The telemetry includes these items:
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
 The peak windows of the telemetry are independent of the peak window of the
-feedback. The latency is nominal. Dry mixes, resampled voices and effects
-have different timing.
+feedback. In mono calls, the output and reverb wet peaks measure the audio
+after the downmix. The dry path has the 1,593-frame delay. Resampled voices,
+choir delays and effects use different delays.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
@@ -336,6 +358,7 @@ allocate memory, acquire locks or do I/O:
 
 - Processing
 - Configuration
+- Control activity
 - MIDI
 - Feedback
 - Telemetry
@@ -382,22 +405,26 @@ and you can try again. A Node.js file error goes to the caller.
 For a custom asset location, give one of these sources to
 `loadTunelet(source)`:
 
-- A URL.
+- A URL or URL string.
 - A fetch Response.
 - A byte buffer.
 - A compiled `WebAssembly.Module`.
 - A promise for one of these.
 
-For a Node.js `file:` source, use a URL object. A string source obeys fetch
-rules. The first concurrent call selects the source. Later arguments do not
-replace an initialized module. A custom binary must match the generated
-bindings.
+In Node.js, `loadTunelet` reads `file:` `URL` objects and `"file:"` URL strings
+from disk. Other URLs and string sources obey fetch rules. The first concurrent
+call selects the source. Later arguments do not replace an initialized module.
+A custom binary must match the generated bindings.
 
 The package root also exports `loadTunelet` as its default export. For direct
 control of Wasm initialization, `tunelet/wasm` gives the generated default
-initializer and `initSync`. The package root re-exports `initSync` too. Use
-only one initialization entry point for each module instance. The package
-gives only ESM exports. CommonJS applications can use `await import("tunelet")`.
+initializer and `initSync`. The package root re-exports `initSync` too. The
+package exports the Wasm binary at `tunelet/pkg/tunelet_bg.wasm` and
+`tunelet/tunelet_bg.wasm`. Use only one initialization entry point for each
+module instance.
+
+The package gives only ESM exports. CommonJS applications can use
+`await import("tunelet")`.
 
 ### Deployment
 
@@ -413,33 +440,86 @@ page that opens the JavaScript.
 
 ### TypeScript API
 
-| Operation                         | TypeScript API                                           |
-| --------------------------------- | -------------------------------------------------------- |
-| Shared initialization             | `loadTunelet(source?)`                                   |
-| Mono PCM to planar stereo         | `process(input, left, right, events?)`                   |
-| In-place mono downmix             | `processMono(audio, events?)`                            |
-| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`       |
-| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`          |
-| Feedback                          | `feedback()`, `takeFeedback()`                           |
-| Telemetry                         | `telemetry()`, `takeTelemetry()`                         |
-| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`         |
-| Finite tail                       | `beginDrain()`, `drain(left, right)`, `drainMono(audio)` |
-| Configured tail budget            | `tailFrames()`                                           |
-| Reset or release memory           | `reset()`, `free()`                                      |
+| Operation                         | TypeScript API                                                           |
+| --------------------------------- | ------------------------------------------------------------------------ |
+| Shared initialization             | `loadTunelet(source?)`                                                   |
+| Mono `Int16Array` to stereo       | `process(input, left, right, events?)`                                   |
+| Mono `Float32Array` to stereo     | `processF32(input, left, right, events?)`                                |
+| In-place `Int16Array` mono        | `processMono(audio, events?)`                                            |
+| In-place `Float32Array` mono      | `processMonoF32(audio, events?)`                                         |
+| Fixed `Float32` buffer offsets    | `inputF32Ptr`, `leftF32Ptr`, `rightF32Ptr`                               |
+| Cached `Float32` memory views     | `new TuneletAudioViews(memory, processor)`                               |
+| Zero-copy `Float32` stereo        | `processF32InPlace(frames, events?)`                                     |
+| Zero-copy `Float32` mono          | `processMonoF32InPlace(frames, events?)`                                 |
+| Configuration                     | `config()`, `setConfig(config)`, `defaultConfig()`                       |
+| Control activity                  | `controlActivity()`                                                      |
+| Information about the preparation | `sampleRate`, `maxBlockFrames`, `latencyFrames`                          |
+| Feedback                          | `feedback()`, `takeFeedback()`                                           |
+| Telemetry                         | `telemetry()`, `takeTelemetry()`                                         |
+| Formant envelopes                 | `formantEnvelope(maxFrequencyHz, input, output)`                         |
+| `Int16Array` finite tail          | `beginDrain()`, `drain(left, right)`, `drainMono(audio)`                 |
+| `Float32Array` finite tail        | `beginDrain()`, `drainF32(left, right)`, `drainMonoF32(audio)`           |
+| Zero-copy `Float32` tail          | `beginDrain()`, `drainF32InPlace(frames)`, `drainMonoF32InPlace(frames)` |
+| Configured tail budget            | `tailFrames()`                                                           |
+| Reset or release memory           | `reset()`, `free()`, `views.dispose()`                                   |
 
 ### Audio buffers
 
-All audio buffers are `Int16Array` buffers, and they must fit in the prepared
-frame limit. These rules apply:
+The package offers copied `Int16Array` and `Float32Array` calls and zero-copy
+in-place `Float32` calls. All blocks must fit in `maxBlockFrames`. This
+package does not install an AudioWorklet or an integration with an audio
+device.
+
+For `process`, `processMono`, `drain`, `drainMono`, `processF32`,
+`processMonoF32`, `drainF32` and `drainMonoF32`, pass `Int16Array` or
+`Float32Array` buffers. These rules apply:
 
 - Stereo output arrays must not overlap.
 - The input can overlap an output, because the binding copies the input
   first.
 - Buffers must stay attached during each call.
 
-Web Audio uses Float32 samples, which you must convert to and from 16-bit
-PCM. This package does not install an AudioWorklet or an integration with an
-audio device.
+For `Float32` input, `NaN` becomes `0`, and other values clamp to `-1..=1`,
+multiply by `32767` in `f64` and round to `-32767..=32767`. Each `Float32`
+output sample divides the clipped `i16` sample or downmix by `32768`, and
+unused drain frames get `0`. Web Audio channels can go directly to
+`processF32` or `processMonoF32`.
+
+For zero-copy blocks in an AudioWorklet, bind `TuneletAudioViews` to
+`InitOutput["memory"]` and a `Tunelet` instance:
+
+```ts
+const wasm = await loadTunelet();
+const processor = new Tunelet(48000, 128);
+const views = new TuneletAudioViews(wasm.memory, processor);
+
+views.input.set(monoChunk); // monoChunk.length <= 128
+processor.processF32InPlace(monoChunk.length);
+const left = views.left;
+const right = views.right;
+
+views.dispose();
+processor.free();
+```
+
+`inputF32Ptr`, `leftF32Ptr` and `rightF32Ptr` stay at fixed byte offsets until
+`processor.free()`. Copied `Float32Array` calls and in-place `Float32` calls
+share those three `f32` buffers. Mono in-place calls read and write
+`views.input`. Stereo in-place calls read `views.input` and write `views.left`
+and `views.right`.
+
+These lifetime rules apply to `Float32` views:
+
+- A new `Tunelet`, `setConfig`, `events`, `controlActivity`, feedback,
+  telemetry or `formantEnvelope` can grow Wasm memory and detach
+  `memory.buffer`.
+- Read `views.input` before each input write so `TuneletAudioViews` checks
+  `memory.buffer` and refreshes detached views.
+- If an in-place call supplies `events`, read `views.left` and `views.right`
+  (or `views.input` for mono) again after that call.
+- When you finish with the views, call `views.dispose()`.
+- Do not read or write the views or pointers of an instance after
+  `processor.free()`, because `free()` returns those buffers to the allocator.
 
 ### Configuration objects
 
@@ -451,10 +531,12 @@ and show enums as string literals. To change the configuration, do these steps:
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent. The conversion ignores extra object properties. The
-generated declarations contain the parameter documentation from the Rust
-types.
+JavaScript `Error`. If an optional field is absent or `undefined`, it gets its
+default. `resynthesis.correction.humanize` and
+`resynthesis.correction.flexTune` default to 0, and
+`resynthesis.harmony.voices` defaults to 4. The conversion ignores extra object
+properties. The generated declarations contain the parameter documentation from
+the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
@@ -482,7 +564,9 @@ bindings.
 
 ### Feedback, telemetry and formant envelopes
 
-`telemetry()` and `takeTelemetry()` return a `Telemetry` object.
+`controlActivity()` returns a `ControlActivity` object with camelCase boolean
+flags for the choir, harmony and reverb controls. `telemetry()` and
+`takeTelemetry()` return a `Telemetry` object.
 
 In feedback, `targetMidiNote` is `undefined` in these cases, which are also
 the cases where `voiced` is `false`:
@@ -502,34 +586,42 @@ call with more points than before reserve memory.
 
 ### Memory allocation
 
-The constructor allocates reusable PCM buffers. A successful call that
-processes audio without events does not allocate new Rust PCM storage.
-However, the call copies the audio across the boundary between JavaScript and
-Wasm. These items can allocate:
+The constructor allocates reusable `i16` and `f32` buffers of length
+`maxBlockFrames`. The processor also keeps an event buffer and uses its
+capacity again across calls. `processF32InPlace`, `processMonoF32InPlace`,
+`drainF32InPlace` and `drainMonoF32InPlace` without `events` do not allocate
+Rust storage, make JavaScript views or call JavaScript imports. If Wasm memory
+does not grow, `TuneletAudioViews` also allocates no new `Float32Array` views
+after construction.
 
-- Object conversion.
-- Supplied events.
+`Int16Array` and `Float32Array` buffer calls copy samples across the boundary
+and make temporary views in the generated glue. These operations can also
+allocate and grow Wasm memory:
+
+- A new `Tunelet` instance.
+- Configuration conversion.
+- Supplied events when a call gives more events than before, or when an event
+  converts a stage configuration.
 - Errors.
-- Feedback and telemetry.
+- Control activity, feedback and telemetry.
 - The formant envelopes.
 
-The generated glue can also make temporary views. This binding is for general
-use, and it does not guarantee hard real-time behavior for allocation or
-scheduling. Drain completion and reset keep the same state as the equivalent
-Rust functions.
+Drain completion and reset keep the same state as the equivalent Rust
+functions.
 
 ## Build from source
 
 ### Rust crate
 
-To build the crate and check the format, the lints and the documentation,
-run these commands:
+To build the crate and check the format, the lints, the documentation and
+the archive, run these commands:
 
 ```sh
 cargo build --locked --release
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 cargo doc --locked --no-deps
+cargo package --locked
 ```
 
 To check the `wasm` feature for `wasm32-unknown-unknown` with Cargo, run
@@ -537,8 +629,8 @@ these commands:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo clippy --locked --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
-cargo doc --locked --no-deps --target wasm32-unknown-unknown --features wasm
+cargo clippy --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
+cargo doc --locked --release --no-deps --target wasm32-unknown-unknown --features wasm
 ```
 
 Native Rust builds and these Wasm checks use Cargo and do not need Node.js
@@ -557,10 +649,11 @@ npm run check:wasm
 npm pack
 ```
 
-`npm run check:wasm` runs Clippy and rustdoc for `wasm32-unknown-unknown`.
-`npm pack` builds the Wasm bindings and the TypeScript entry point. Then it
-creates `tunelet-<version>.tgz`. To use this archive in a browser project or
-a Node.js project, install it with this command:
+`npm run check:wasm` runs Clippy and rustdoc in release mode for
+`wasm32-unknown-unknown`. `npm pack` builds the Wasm bindings and the
+TypeScript entry point. Then it creates `tunelet-<version>.tgz`. To use
+this archive in a browser project or a Node.js project, install it with
+this command:
 
 ```sh
 npm install /path/to/tunelet-<version>.tgz

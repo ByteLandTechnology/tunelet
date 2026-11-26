@@ -26,15 +26,25 @@
 //!
 //! # Audio and timed controls
 //!
-//! There are three process methods:
+//! Each buffer layout has an `i16` method and an `f32` method:
 //!
-//! - [`Processor::process`] writes `[left, right]` frames.
-//! - [`Processor::process_planar`] writes separate channels.
-//! - [`Processor::process_mono_in_place`] replaces the input with the stereo
+//! - [`Processor::process`] and [`Processor::process_f32`] write `[left, right]`
+//!   frames.
+//! - [`Processor::process_planar`] and [`Processor::process_planar_f32`] write
+//!   separate channels.
+//! - [`Processor::process_mono_in_place`] and
+//!   [`Processor::process_mono_in_place_f32`] replace the input with the stereo
 //!   downmix.
 //!
+//! [`Processor::drain`], [`Processor::drain_planar`] and
+//! [`Processor::drain_mono`] have the equivalents [`Processor::drain_f32`],
+//! [`Processor::drain_planar_f32`] and [`Processor::drain_mono_f32`].
 //! These layouts do not depend on [`ResynthesisConfig::stereo_output`], which
-//! controls voice panning. The output is clipped to -32767..=32767.
+//! controls voice panning. The `i16` output is clipped to `-32767..=32767`.
+//! For `f32` calls, `NaN` input becomes `0`, and other values clamp to
+//! `-1.0..=1.0`, multiply by `32767.0` and round to `-32767..=32767`. Each
+//! `f32` output sample divides the clipped `i16` sample or downmix by
+//! `32768.0`, and unused drain frames get `0.0`.
 //!
 //! An event applies before its selected frame. Offsets must be in the current
 //! block and must not decrease. Events with equal offsets execute in slice
@@ -49,19 +59,22 @@
 //! # Feedback, latency and lifecycle
 //!
 //! [`Processor::feedback`] gives the pitch, the correction ratio, the
-//! accumulated stereo peak and the frame count.
+//! accumulated output peak and the frame count.
 //! [`Processor::take_feedback`] also clears the peak window. The pitch
 //! reporting bounds change only the reports. They do not change the detection
 //! or the audio signal. [`Processor::latency_frames`] gives a nominal
-//! resynthesis delay. Voice delays, pitch changes and effects have their own
-//! timing.
+//! resynthesis delay, which the dry path also uses. Voice delays, pitch
+//! changes and effects have their own timing.
 //!
-//! [`Processor::telemetry`] gives data for meters and displays: the ratio and
-//! the gain of each voice, the input and output peaks, the pitch clarity and
-//! the state of the effects. [`Processor::take_telemetry`] also clears the
-//! peak windows of the telemetry. [`Processor::formant_envelope`] writes the
-//! LPC envelopes before and after the formant controls. These calls do not
-//! change the audio.
+//! [`Processor::control_activity`] and [`ProcessorConfig::control_activity`]
+//! give [`ControlActivity`], which shows the active choir, harmony and reverb
+//! controls. [`Processor::telemetry`] gives data for meters and displays: the
+//! ratio and the gain of each voice, the input and output peaks, the pitch
+//! clarity and the state of the effects. In mono calls, the feedback and
+//! telemetry peaks measure the audio after the downmix.
+//! [`Processor::take_telemetry`] also clears the peak windows of the
+//! telemetry. [`Processor::formant_envelope`] writes the LPC envelopes before
+//! and after the formant controls. These calls do not change the audio.
 //!
 //! After the last input block, call [`Processor::begin_drain`] one time. Then
 //! render drain blocks until a call returns zero. Each call fills the unused
@@ -92,9 +105,9 @@
 //!
 //! To export JavaScript bindings and generated TypeScript definitions, enable
 //! the optional `wasm` feature for `wasm32-unknown-unknown`. The binding owns
-//! PCM buffers that it uses again. Configuration conversion, event conversion,
-//! feedback objects and errors cause more allocation at the JavaScript
-//! boundary.
+//! reusable `i16` and `f32` buffers, and exposes fixed `f32` pointers for
+//! in-place audio. Configuration conversion, event conversion, feedback objects
+//! and errors cause more allocation at the JavaScript boundary.
 //! Refer to the README for how to build the shared package for browsers and
 //! Node.js.
 
@@ -130,7 +143,7 @@ mod scale;
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub mod wasm;
 
-pub use config::{PrepareConfig, ProcessorConfig, SampleRate};
+pub use config::{ControlActivity, PrepareConfig, ProcessorConfig, SampleRate};
 pub use effects::alien::AlienConfig;
 pub use effects::punch::PunchConfig;
 pub use effects::reverb::{ReverbConfig, ReverbMode};

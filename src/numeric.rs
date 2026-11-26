@@ -8,8 +8,9 @@
 pub(crate) mod fixed;
 pub(crate) mod rng;
 mod tables;
+use fixed::Q14;
 use rng::RandomStream;
-use tables::{SINC, TAN};
+use tables::{SINC, TAN, TAN_BASE};
 
 /// Clamps a signed 64-bit integer to `i32::MIN..=i32::MAX`.
 #[inline]
@@ -34,12 +35,12 @@ pub(crate) fn mul_shift(a: i32, b: i32, shift: u32) -> i32 {
 /// `i32::MIN..=i32::MAX`. The shift moves negative values down.
 #[inline]
 pub(crate) fn round_q14(value: i64) -> i32 {
-    let rounded = if value >= 0 {
-        value.saturating_add(8192) >> 14
-    } else {
-        value.saturating_sub(8192) >> 14
-    };
-    clamp_i32(rounded)
+    const MIN_Q28: i64 = ((i32::MIN as i64) << 14) + 8192;
+    const MAX_Q28: i64 = (i32::MAX as i64) << 14;
+    let clamped = value.clamp(MIN_Q28, MAX_Q28);
+    let sign = clamped >> 63;
+    let bias = (8192 ^ sign) - sign;
+    ((clamped + bias) >> 14) as i32
 }
 
 /// Converts an amplitude in decibels to a linear multiplier with
@@ -72,13 +73,16 @@ pub(crate) fn coefficient_to_exp_value(min: f32, max: f32, start: f32, position:
 /// Returns the value of a three-point parabola at a Q14 fractional offset
 /// from the center sample.
 ///
-/// The table words and the sums wrap. The intermediate products clamp to
-/// `i32`.
+/// The tap midpoint and the slope use `i64` arithmetic and clamp to `i32`.
+/// The polynomial sums saturate in `i32`. The products use `i64` arithmetic
+/// and clamp to `i32`.
 #[inline]
-fn quadratic(y0: i32, y1: i32, y2: i32, fraction: i32) -> i32 {
-    let a = (y0.wrapping_add(y2) >> 1).wrapping_sub(y1);
-    let b = y2.wrapping_sub(y0) >> 1;
-    mul_shift(mul_shift(a, fraction, 14).wrapping_add(b), fraction, 14).wrapping_add(y1)
+pub(crate) fn quadratic(left: Q14, middle: Q14, right: Q14, fraction: Q14) -> Q14 {
+    let left_i64 = i64::from(left.to_bits());
+    let right_i64 = i64::from(right.to_bits());
+    let curvature = Q14::from_bits(clamp_i32((left_i64 + right_i64) >> 1)) - middle;
+    let slope = Q14::from_bits(clamp_i32((right_i64 - left_i64) >> 1));
+    middle + (curvature.mul::<14, 14>(fraction) + slope).mul(fraction)
 }
 
 /// Interpolates the table of sinc coefficients at a Q14 phase position.
@@ -89,9 +93,15 @@ fn quadratic(y0: i32, y1: i32, y2: i32, fraction: i32) -> i32 {
 pub(crate) fn fast_sinc(input: i32) -> i32 {
     let scaled = (input >> 1).wrapping_mul(256);
     let index = (scaled.wrapping_add(8192) >> 14).clamp(1, 254);
-    let fraction = scaled.wrapping_sub(index.wrapping_shl(14));
+    let fraction = Q14::from_bits(scaled.wrapping_sub(index.wrapping_shl(14)));
     let i = index as usize;
-    quadratic(SINC[i - 1], SINC[i], SINC[i + 1], fraction)
+    quadratic(
+        Q14::from_bits(SINC[i - 1]),
+        Q14::from_bits(SINC[i]),
+        Q14::from_bits(SINC[i + 1]),
+        fraction,
+    )
+    .to_bits()
 }
 
 /// An arctangent approximation that keeps the last index into the tangent
@@ -111,31 +121,54 @@ impl Default for AtanQ14 {
     }
 }
 impl AtanQ14 {
-    /// Returns the interpolated arctangent of the input as Q14 radians.
+    /// The 48-bit reciprocals `ceil(2^48 / step)` for adjacent `TAN` entries.
+    const STEP_RECIP: [u64; TAN.len()] = {
+        let mut table = [0; TAN.len()];
+        let mut i = 1;
+        while i < TAN.len() {
+            let den = (TAN[i] - TAN[i - 1]) as u64;
+            table[i] = (1u64 << 48).div_ceil(den);
+            i += 1;
+        }
+        table
+    };
+    /// The 48-bit reciprocal `ceil(2^48 / 300)` for the angle fraction.
+    const DIV300_RECIP: u64 = (1u64 << 48).div_ceil(300);
+
+    /// Returns the interpolated arctangent of a Q14 input as Q14 radians.
     ///
-    /// The function shifts the input word into Q14 and finds the two adjacent
-    /// tangent entries. The caller selects the shift for the input format.
-    /// For example, Punch uses Q8 and a shift of 6. If the magnitude is
-    /// larger than the last entry, the function uses a fixed terminal angle.
-    /// The signed arithmetic wraps.
-    pub(crate) fn process(&mut self, input: i32, shift: u32) -> i32 {
-        let value = input.wrapping_shl(shift);
-        let negative = value < 0;
-        let value = value.wrapping_abs();
-        if TAN[self.index] > value {
-            while TAN[self.index - 1] > value {
-                self.index -= 1;
+    /// The function finds the two adjacent tangent entries for the Q14 input.
+    /// If the magnitude is larger than the last entry, the function uses a
+    /// fixed terminal angle. The signed arithmetic wraps.
+    pub(crate) fn process(&mut self, input: i32) -> i32 {
+        let negative = input < 0;
+        let value = input.wrapping_abs();
+        let mut index = self.index;
+        if TAN[index] > value {
+            let stop = index.saturating_sub(8).max(1);
+            while index > stop && TAN[index - 1] > value {
+                index -= 1;
+            }
+            if index == stop && index > 1 && TAN[index - 1] > value {
+                index = TAN[..index - 1]
+                    .partition_point(|&entry| entry <= value)
+                    .max(1);
             }
         } else {
-            while self.index <= 298 && TAN[self.index] < value {
-                self.index += 1;
+            let stop = (index + 8).min(299);
+            while index < stop && TAN[index] < value {
+                index += 1;
+            }
+            if index == stop && index < 299 && TAN[index] < value {
+                index =
+                    (index + 1 + TAN[index + 1..].partition_point(|&entry| entry < value)).min(299);
             }
         }
-        let index = self.index;
+        self.index = index;
         let angle = if TAN[index] >= value {
-            let fraction = value.wrapping_sub(TAN[index - 1]).wrapping_mul(64)
-                / TAN[index].wrapping_sub(TAN[index - 1]);
-            ((index as i32 - 1) * 16384) / 300 + fraction.wrapping_shl(8) / 300
+            let num = u64::from(value.wrapping_sub(TAN[index - 1]).wrapping_mul(64) as u32);
+            let fraction = (num * Self::STEP_RECIP[index]) >> 48;
+            TAN_BASE[index] + (((fraction << 8) * Self::DIV300_RECIP) >> 48) as i32
         } else {
             0x3fc9
         };
@@ -195,6 +228,16 @@ pub(crate) const ONE: i32 = 16_384;
 #[inline]
 pub(crate) fn mul14(left: i32, right: i32) -> i32 {
     mul_shift(left, right, 14)
+}
+
+/// Multiplies two bounded Q14 words in `i32` with arithmetic truncation.
+///
+/// Callers must supply inputs with a magnitude of 46,340 or less. This
+/// prevents an `i32` overflow before the shift.
+#[inline]
+pub(crate) fn mul14_bounded(left: i32, right: i32) -> i32 {
+    debug_assert!(left.unsigned_abs() <= 46_340 && right.unsigned_abs() <= 46_340);
+    (left * right) >> 14
 }
 
 /// Wraps a signed frame index into 0..HISTORY with the Euclidean remainder.

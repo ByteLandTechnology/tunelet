@@ -27,7 +27,7 @@
 //! - The order in which stages read random values.
 //! - The order of the fixed-point arithmetic.
 
-mod history;
+pub(crate) mod history;
 
 use crate::error::{check_count, check_range};
 use crate::filter::{Biquad, Design};
@@ -35,12 +35,12 @@ use crate::formant::{Formant, FormantConfig, ANALYSIS_FRAMES};
 use crate::harmony::{HarmonyConfig, HarmonyState, HARMONY_VOICES};
 use crate::midi::MidiEvent;
 use crate::numeric::fixed::{Q12, Q14, Q6, Q8};
-use crate::numeric::{clamp_i32, ring, NumericContext, HISTORY};
+use crate::numeric::{clamp_i32, quadratic, ring, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
 use crate::{Error, SampleRate};
-use history::prepare_history;
+use history::{clear_dirty_ring, prepare_history, record_history};
 
 /// The method that resynthesis uses to render its voices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -61,24 +61,22 @@ pub enum MultiVoiceMode {
 /// The controls for pitch-class correction, with target selection in the
 /// period domain.
 ///
-/// Correction is enabled by default, with all chromatic notes and a retune
-/// time of zero. Target selection and the smoothing of the correction ratio
-/// occur at each update of the pitch tracking. When a period is tracked,
-/// this update usually occurs every five frames. If the active note table is
-/// empty or correction is disabled, the ratio moves toward 1.0 at the same
-/// rate.
+/// Correction is enabled by default, with all chromatic notes, a retune time
+/// of zero, zero humanize and zero flex-tune. Target selection and the
+/// smoothing of the correction ratio occur at each update of the pitch
+/// tracking. When a period is tracked, this update usually occurs every five
+/// frames. If the active note table is empty or correction is disabled, the
+/// ratio moves toward 1.0 with `retune_ms`.
 ///
-/// Correction MIDI replaces the active note table. It does not change this
-/// configuration. A change to `notes` or to `enabled` loads the configured
-/// mask again. Reset releases the correction keys 0..=126. It keeps key 127
-/// and the active note table. Key 127 has no effect on the note table.
+/// While at least one key in 0..=127 is held, correction MIDI replaces the
+/// active note table. It does not change this configuration. When all keys
+/// release, on All Notes Off or on reset, the configured `notes` load again.
+/// A change to `notes` or to `enabled` also loads the configured mask again.
+/// Reset releases the correction keys 0..=127.
 ///
-/// At construction, the chromatic table uses 44.1 kHz periods, also for a
-/// 48 kHz processor. Each of these events loads the periods for the prepared
-/// rate:
-/// - An initial mask that is not chromatic.
-/// - A later change to the mask or to `enabled`.
-/// - A correction MIDI event.
+/// Construction loads the configured `notes` mask with the periods for the
+/// prepared sample rate. Later changes to `notes`, to `enabled` or from
+/// correction MIDI also use the periods for the prepared sample rate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -96,8 +94,9 @@ pub struct CorrectionConfig {
     /// The configured target pitch classes. The default is
     /// [`NoteMask::CHROMATIC`].
     ///
-    /// All boolean masks are valid. MIDI can replace the active table. This
-    /// replacement stays until this mask or `enabled` changes.
+    /// All boolean masks are valid. Held keys from correction MIDI replace the
+    /// active table. When all keys release, or if this mask or `enabled`
+    /// changes, this mask loads again.
     pub notes: NoteMask,
     /// The half-life of the smoothing in milliseconds, 0..=400. The default
     /// is 0.
@@ -106,6 +105,45 @@ pub struct CorrectionConfig {
     /// tracking update. A value that is not zero is a half-life. It is not a
     /// fixed time to get exactly to the target.
     pub retune_ms: f32,
+    /// The relaxation on sustained notes without a unit, 0..=1. The default
+    /// is 0.
+    ///
+    /// While the tracked pitch stays in one target bin, the half-life
+    /// increases smoothly toward `retune_ms + (400 - retune_ms) * humanize`
+    /// milliseconds. If the target bin, the note table or `pitch_ratio`
+    /// changes, or if the pitch tracker starts again, the half-life returns to
+    /// `retune_ms`. Zero disables this relaxation. In JavaScript, the field is
+    /// optional and an absent or `undefined` value gives 0.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default, deserialize_with = "deserialize_zero_f32"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub humanize: f32,
+    /// The outer soft-zone width of each target bin without a unit, 0..=1.
+    /// The default is 0.
+    ///
+    /// Pitches in the inner `1 - flex_tune` fraction of the half-bin around a
+    /// target period get the full pull toward the target. In the outer
+    /// `flex_tune` fraction, the pull decreases to zero at the midpoint
+    /// boundary. Zero applies full pull across the whole bin, and 1 softens
+    /// pull from the target outward. In JavaScript, the field is optional and
+    /// an absent or `undefined` value gives 0.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default, deserialize_with = "deserialize_zero_f32"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub flex_tune: f32,
+}
+
+/// Decodes an optional correction control and maps an absent value to 0.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn deserialize_zero_f32<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<f32, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<f32>::deserialize(deserializer)?.unwrap_or(0.0))
 }
 
 impl Default for CorrectionConfig {
@@ -114,6 +152,8 @@ impl Default for CorrectionConfig {
             enabled: true,
             notes: NoteMask::default(),
             retune_ms: 0.0,
+            humanize: 0.0,
+            flex_tune: 0.0,
         }
     }
 }
@@ -121,21 +161,24 @@ impl Default for CorrectionConfig {
 impl CorrectionConfig {
     /// Validates all fields, also if correction is disabled.
     ///
-    /// All values of `enabled` and `notes` are valid. `retune_ms` must be
-    /// finite and in its documented inclusive range. Validation does not
-    /// clamp values. It does not change the state of the processor.
+    /// All values of `enabled` and `notes` are valid. `retune_ms`, `humanize`
+    /// and `flex_tune` must be finite and in their documented inclusive ranges.
+    /// Validation does not clamp values. It does not change the state of the
+    /// processor.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfig`], with the dotted path of the field and
-    /// the problem, if `retune_ms` is not valid.
+    /// the problem, if a field is not valid.
     pub fn validate(self) -> Result<(), Error> {
         check_range(
             "resynthesis.correction.retune_ms",
             self.retune_ms,
             0.0,
             400.0,
-        )
+        )?;
+        check_range("resynthesis.correction.humanize", self.humanize, 0.0, 1.0)?;
+        check_range("resynthesis.correction.flex_tune", self.flex_tune, 0.0, 1.0)
     }
 }
 
@@ -153,10 +196,11 @@ impl CorrectionConfig {
 /// Validation applies to all controls, also when their stage or voice mode
 /// is not active.
 ///
-/// The dry path takes the audio after Punch and Warm and delays it by 1,543
-/// frames. The wet voice readers have more delay, which changes with the
-/// pitch. After this stage, the two paths go through Alien, reverb and the
-/// final output gain.
+/// The dry path takes the audio after Punch and Warm and delays it by 1,593
+/// frames. At unity pitch and zero choir delay, the wet voices have the same
+/// nominal delay. Resampled voices and choir delays use different delays.
+/// After this stage, the two paths go through Alien, reverb and the final
+/// output gain.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -239,7 +283,7 @@ pub struct ResynthesisConfig {
     ///
     /// The code truncates this value to Q8. The wet weight is 1.0 minus the
     /// Q8 dry weight. The dry path starts after Punch and Warm and has a
-    /// delay of 1,543 frames. Alien, reverb and the output gain still occur
+    /// delay of 1,593 frames. Alien, reverb and the output gain still occur
     /// after this stage.
     pub dry_mix: f32,
     /// The seed for choir drift and aspiration, which use the same stream.
@@ -321,8 +365,7 @@ const SEEDS: [i32; 16] = [
     0x0dda, 0x01da, 0x167f, 0x0896,
 ];
 
-/// The length of the analysis overlap buffer. The dry path has the same
-/// delay.
+/// The length of the analysis overlap buffer.
 const OVERLAP_FRAMES: usize = 1543;
 /// The offset from the history position of a reader to its position for
 /// formant synthesis.
@@ -332,7 +375,7 @@ const READER_LAG_FRAMES: i32 = 50;
 /// The nominal latency of resynthesis. Each reader moves with the pitch and
 /// the delay.
 ///
-/// The dry path uses only `OVERLAP_FRAMES`.
+/// The dry path also uses `LATENCY_FRAMES`.
 pub(crate) const LATENCY_FRAMES: usize = OVERLAP_FRAMES + READER_LAG_FRAMES as usize;
 /// The counter value at which a control step runs. Usually, a step runs
 /// every 101 eligible frames.
@@ -445,6 +488,21 @@ pub(crate) struct Resynthesis {
     /// The Q14 half-life coefficient for correction updates. These updates
     /// usually occur every five frames.
     correction_decay: Q14,
+    /// The Q14 terminal half-life coefficient for `humanize`, to a 400 ms
+    /// limit.
+    sustained_decay: Q14,
+    /// The Q20 retune half-life in milliseconds, for the humanize ramp.
+    retune_half_life: i64,
+    /// The Q20 sustained half-life in milliseconds, to a 400 ms limit.
+    sustained_half_life: i64,
+    /// Half of the five-frame period step times `ln(2)`, in Q20 milliseconds.
+    decay_half_step: i64,
+    /// The Q14 dwell progress in the current target bin, 0..=1.
+    dwell: Q14,
+    /// The Q14 dwell increment for each five-frame period update.
+    dwell_step: Q14,
+    /// The Q14 outer soft-zone width of each half-bin, 0..=1.
+    flex_tune: Q14,
     /// If `true`, the current correction target and octave are selected.
     scale_initialized: bool,
     /// The number of frames that the histories hold since the last reset.
@@ -455,6 +513,10 @@ pub(crate) struct Resynthesis {
     /// The signed power-of-two exponent that normalizes the input period
     /// into the range of the correction table.
     octave: i32,
+    /// The target index from the previous period update, for dwell resets.
+    previous_scale_index: usize,
+    /// The octave exponent from the previous period update, for dwell resets.
+    previous_octave: i32,
     /// The Q14 global pitch multiplier.
     shift: Q14,
     /// The plain integer modulation depth. It is the public control times
@@ -507,17 +569,7 @@ impl Resynthesis {
             },
             formant: Formant::new(rate, config.formant),
             harmony: HarmonyState::new(rate, config.harmony),
-            scale: {
-                // The initial chromatic table uses 44.1 kHz periods at the two
-                // rates. If the notes load again, the periods for the
-                // configured rate become active.
-                let mut scale = CorrectionTable::new(SampleRate::Hz44100, NoteMask::default());
-                scale.set_sample_rate(rate);
-                if config.correction.notes != NoteMask::default() {
-                    scale.set_notes(config.correction.notes);
-                }
-                scale
-            },
+            scale: CorrectionTable::new(rate, config.correction.notes),
             filtered: prepare_history(Q14::ZERO),
             lead: prepare_history(Q14::ZERO),
             periods: prepare_history(Q6::ZERO),
@@ -539,15 +591,24 @@ impl Resynthesis {
             post: [Biquad::new(), Biquad::new()],
             correction: Q14::ONE,
             correction_decay: Q14::ZERO,
+            sustained_decay: Q14::ZERO,
+            retune_half_life: 0,
+            sustained_half_life: 0,
+            decay_half_step: 0,
+            dwell: Q14::ZERO,
+            dwell_step: Q14::ZERO,
+            flex_tune: Q14::ZERO,
             scale_initialized: false,
             written: 0,
             scale_index: 0,
             octave: 0,
+            previous_scale_index: 0,
+            previous_octave: 0,
             shift: Q14::ONE,
             modulation: 0,
             modulation_phase: Q14::ZERO,
             dry_mix: Q8::ZERO,
-            old_position: position_of(-READER_LAG_FRAMES),
+            old_position: Q14::ZERO,
             fade: Q14::ONE,
             current_output_period: Q6::ZERO,
             control_counter: CONTROL_DUE,
@@ -565,11 +626,12 @@ impl Resynthesis {
     /// Quantizes the controls and calculates the decay coefficients and the
     /// voice pan gains again.
     ///
-    /// The coefficients are the correction decay, the drift decay and the
-    /// drift amount. The histories and the controller phase do not change.
-    /// The stereo pan gains include the harmony gain. The mono harmony path
-    /// uses a separate Q14 gain.
+    /// The coefficients cover correction, humanize, flex-tune and choir drift.
+    /// The histories and the controller phase do not change. The stereo pan
+    /// gains include the harmony gain. The mono harmony path uses a separate
+    /// Q14 gain.
     fn configure_coefficients(&mut self) {
+        const Q20_SCALE: f64 = (1_u32 << 20) as f64;
         self.shift = Q14::from_f64(self.config.pitch_ratio as f64);
         self.modulation = (self.config.harmonic_modulation as f64 / 8.0 * 16.0) as i32;
         self.dry_mix = Q8::from_f64((self.config.dry_mix * 100.0) as f64 / 100.0);
@@ -578,6 +640,29 @@ impl Resynthesis {
         } else {
             let t = self.config.correction.retune_ms / 1000.0;
             Q14::from_f64(0.5_f64.powf(1.0 / ((self.rate.hz() / 5.0) * t) as f64))
+        };
+        let retune_ms = f64::from(self.config.correction.retune_ms);
+        self.retune_half_life = (retune_ms * Q20_SCALE + 0.5) as i64;
+        self.decay_half_step =
+            (2500.0 * std::f64::consts::LN_2 / f64::from(self.rate.hz()) * Q20_SCALE + 0.5) as i64;
+        if self.config.correction.humanize == 0.0 {
+            self.sustained_decay = self.correction_decay;
+            self.sustained_half_life = self.retune_half_life;
+            self.dwell_step = Q14::ZERO;
+        } else {
+            let sustained_ms =
+                retune_ms + (400.0 - retune_ms) * f64::from(self.config.correction.humanize);
+            let t = sustained_ms / 1000.0;
+            self.sustained_decay =
+                Q14::from_f64(0.5_f64.powf(1.0 / ((f64::from(self.rate.hz()) / 5.0) * t)));
+            self.sustained_half_life = (sustained_ms * Q20_SCALE + 0.5) as i64;
+            self.dwell_step = Q14::from_f64(1.0 / ((f64::from(self.rate.hz()) / 5.0) * 0.18))
+                .max(Q14::from_bits(1));
+        }
+        self.flex_tune = if self.config.correction.flex_tune == 0.0 {
+            Q14::ZERO
+        } else {
+            Q14::from_f64(self.config.correction.flex_tune as f64).max(Q14::from_bits(1))
         };
         let base = (self.rate.hz() / 100.0) as f64 * 0.2;
         let decay = (-std::f64::consts::LN_2 / base).exp();
@@ -657,9 +742,14 @@ impl Resynthesis {
         {
             self.scale.set_notes(config.correction.notes);
             self.scale_initialized = false;
+            self.dwell = Q14::ZERO;
+        } else if config.correction.humanize == 0.0 {
+            self.dwell = Q14::ZERO;
         }
         if old.pitch_ratio != config.pitch_ratio {
             self.configure_shift_filters();
+            self.scale_initialized = false;
+            self.dwell = Q14::ZERO;
         }
         if old.mode != config.mode || old.choir_delay != config.choir_delay {
             self.create_delays();
@@ -677,12 +767,13 @@ impl Resynthesis {
         }
     }
 
-    /// Releases the correction keys 0..=126 and resets the audio state.
+    /// Releases the correction keys 0..=127, loads the configured correction
+    /// notes again and resets the audio state.
     ///
-    /// The active correction table, key 127 and the items that
-    /// `reset_audio` keeps do not change.
+    /// The items that `reset_audio` keeps do not change, except the correction
+    /// keyboard and the active note table.
     pub(crate) fn reset(&mut self) {
-        self.scale.reset();
+        self.scale.reset(self.config.correction.notes);
         self.reset_audio();
     }
 
@@ -702,39 +793,27 @@ impl Resynthesis {
         let written = usize::from(self.written);
         self.written = 0;
         self.pitch.reset();
-        if written == HISTORY {
-            self.raw.fill(Q14::ZERO);
-            self.filtered.fill(Q14::ZERO);
-            self.lead.fill(Q14::ZERO);
-            self.periods.fill(Q6::ZERO);
-            self.previous_periods.fill(Q6::ZERO);
-            self.ratios.fill(Q14::ONE);
-        } else if written > 0 {
-            let end = written + 1;
+        clear_dirty_ring(self.raw.as_mut_slice(), written, Q14::ZERO);
+        clear_dirty_ring(self.filtered.as_mut_slice(), written, Q14::ZERO);
+        clear_dirty_ring(self.lead.as_mut_slice(), written, Q14::ZERO);
+        if written > 0 {
             let lead_start = HISTORY - OVERLAP_FRAMES + 1;
-            self.raw[1..end].fill(Q14::ZERO);
-            self.filtered[1..end].fill(Q14::ZERO);
-            self.lead[1..end].fill(Q14::ZERO);
             if written < OVERLAP_FRAMES {
-                self.periods[1..end].fill(Q6::ZERO);
+                self.periods[1..=written].fill(Q6::ZERO);
                 self.periods[lead_start..lead_start + written].fill(Q6::ZERO);
             } else if written < HISTORY - OVERLAP_FRAMES {
-                self.periods[..end].fill(Q6::ZERO);
+                self.periods[..=written].fill(Q6::ZERO);
                 self.periods[lead_start..].fill(Q6::ZERO);
             } else {
                 self.periods.fill(Q6::ZERO);
             }
-            self.previous_periods[1..end].fill(Q6::ZERO);
-            self.ratios[1..end].fill(Q14::ONE);
         }
+        clear_dirty_ring(self.previous_periods.as_mut_slice(), written, Q6::ZERO);
+        clear_dirty_ring(self.ratios.as_mut_slice(), written, Q14::ONE);
         self.write = 0;
         self.formant.reset();
         self.harmony.reset();
-        if written >= OVERLAP_FRAMES {
-            self.overlap.fill(Q14::ZERO);
-        } else if written > 0 {
-            self.overlap[1..written + 1].fill(Q14::ZERO);
-        }
+        clear_dirty_ring(self.overlap.as_mut_slice(), written, Q14::ZERO);
         self.overlap_index = 0;
         self.previous_output = [Q14::ZERO; 2];
         for filter in &mut self.post {
@@ -749,7 +828,10 @@ impl Resynthesis {
         self.formant_position = 0;
         self.current_output_period = Q6::ZERO;
         self.correction = Q14::ONE;
+        self.dwell = Q14::ZERO;
         self.scale_initialized = false;
+        self.previous_scale_index = 0;
+        self.previous_octave = 0;
     }
 
     /// Applies a MIDI event that the API or the block code checked before.
@@ -762,8 +844,10 @@ impl Resynthesis {
     /// Applies a correction MIDI event that the API or the block code checked
     /// before.
     pub(crate) fn apply_correction_midi(&mut self, event: MidiEvent) {
-        self.scale.apply_validated_midi(event);
+        self.scale
+            .apply_validated_midi(event, self.config.correction.notes);
         self.scale_initialized = false;
+        self.dwell = Q14::ZERO;
     }
 
     /// Returns the finite number of frames for a drain of resynthesis.
@@ -867,6 +951,19 @@ impl Resynthesis {
     pub(crate) fn formant_generation(&self) -> u32 {
         self.formant.generation()
     }
+    /// Returns the formant state that selects the current envelope response.
+    pub(crate) fn envelope_stamp(&self) -> (bool, u64, u8, u8, u16, i32) {
+        let (bank_epoch, current, previous, blend, width) =
+            self.formant.envelope_stamp(self.formant_position);
+        (
+            self.config.formant.enabled,
+            bank_epoch,
+            current,
+            previous,
+            blend,
+            width,
+        )
+    }
     /// Writes the formant envelopes of the model that the audio used for the
     /// last frame. Refer to `Formant::envelope`.
     ///
@@ -886,32 +983,63 @@ impl Resynthesis {
         self.formant
             .envelope(self.formant_position, max_frequency_hz, input, output)
     }
-    /// Selects a target in the period domain and smooths the Q14 correction
-    /// ratio.
+    /// Clears the dwell progress and the previous target bin.
+    fn reset_dwell(&mut self) {
+        self.dwell = Q14::ZERO;
+        self.previous_scale_index = 0;
+        self.previous_octave = 0;
+    }
+
+    /// Maps the current dwell progress to a Q14 half-life decay coefficient.
     ///
-    /// The Q6 input period must be a usable tracking result. The target
-    /// search moves through the midpoints, also across octave limits. The
-    /// global shift is part of the normalization.
+    /// The Hermite ramp `u^3 * (4 - 3 * u)` interpolates the half-life in Q20
+    /// milliseconds. A Padé `(1, 1)` quotient converts that half-life to Q14.
+    fn humanize_decay(&self) -> Q14 {
+        if self.dwell >= Q14::ONE {
+            return self.sustained_decay;
+        }
+        let u = i64::from(self.dwell.to_bits());
+        let s = (u * u * u * (65_536 - 3 * u)) >> 42;
+        let half_life = self.retune_half_life
+            + (((self.sustained_half_life - self.retune_half_life) * s) >> 14);
+        let raw = if half_life <= self.decay_half_step {
+            0
+        } else {
+            (((half_life - self.decay_half_step) << 14) / (half_life + self.decay_half_step)) as i32
+        };
+        Q14::from_bits(raw).clamp(self.correction_decay, self.sustained_decay)
+    }
+
+    /// Selects a target in the period domain and returns the Q14 target ratio
+    /// and Q14 decay coefficient.
     ///
-    /// If correction is disabled or the active table is empty, the ratio moves
-    /// toward 1.0. If the target selection starts again and the shifted
-    /// period is not positive, the ratio becomes 1.0 immediately.
-    fn update_correction(&mut self, period: Q6) {
+    /// The Q6 input period must be a usable result from the pitch tracker. The
+    /// search moves through the midpoints, also across octave limits, and
+    /// includes the global shift. On a sustained bin, `humanize` increases the
+    /// half-life toward `sustained_half_life`. In the outer `flex_tune` zone,
+    /// the pull toward the target decreases to zero at the midpoint boundary.
+    ///
+    /// If the shifted period is not positive, the function clears
+    /// `scale_initialized` and dwell, and returns `None`. If correction is
+    /// disabled or the active table is empty, the function returns unity ratio
+    /// and `correction_decay`.
+    fn select_target_ratio(&mut self, period: Q6) -> Option<(Q14, Q14)> {
         let mut target_ratio = Q14::ONE;
+        let mut decay = self.correction_decay;
         if self.config.correction.enabled && self.scale.count != 0 {
+            let was_initialized = self.scale_initialized;
             let count = self.scale.count;
             // The correction table holds periods normalized to one octave.
             // They use the same units as the shifted target period below.
             let table_period = |index: usize| Q6::from_bits(self.scale.midpoints[index]);
             let mut target: Q6;
             if !self.scale_initialized {
-                self.scale_initialized = true;
                 self.scale_index = 0;
                 self.octave = 0;
                 target = self.shift.mul(period);
                 if target <= Q6::ZERO {
-                    self.correction = Q14::ONE;
-                    return;
+                    self.reset_dwell();
+                    return None;
                 }
                 while table_period(1) > target {
                     self.octave += 1;
@@ -920,12 +1048,22 @@ impl Resynthesis {
                         break;
                     }
                 }
+                if target <= Q6::ZERO {
+                    self.reset_dwell();
+                    return None;
+                }
+                self.scale_initialized = true;
             }
             target = self.shift.mul(if self.octave >= 0 {
                 period << self.octave as u32
             } else {
                 period >> (-self.octave) as u32
             });
+            if target <= Q6::ZERO {
+                self.scale_initialized = false;
+                self.reset_dwell();
+                return None;
+            }
             while table_period(self.scale_index + 1) < target {
                 self.scale_index += 1;
                 if self.scale_index == count {
@@ -943,12 +1081,56 @@ impl Resynthesis {
                     self.scale_index -= 1;
                 }
             }
+            if !was_initialized
+                || self.scale_index != self.previous_scale_index
+                || self.octave != self.previous_octave
+            {
+                self.previous_scale_index = self.scale_index;
+                self.previous_octave = self.octave;
+                self.dwell = Q14::ZERO;
+            } else if self.dwell_step != Q14::ZERO {
+                self.dwell = (self.dwell + self.dwell_step).min(Q14::ONE);
+                decay = self.humanize_decay();
+            }
             let denominator = Q6::from_bits(self.scale.periods[self.scale_index]);
             if denominator != Q6::ZERO {
                 target_ratio = target.div(denominator);
+                if self.flex_tune != Q14::ZERO {
+                    let (distance, span) = if target >= denominator {
+                        let upper = Q6::from_bits(self.scale.midpoints[self.scale_index + 1]);
+                        (target - denominator, upper - denominator)
+                    } else {
+                        let lower = Q6::from_bits(self.scale.midpoints[self.scale_index]);
+                        (denominator - target, denominator - lower)
+                    };
+                    if span > Q6::ZERO {
+                        let distance = distance.min(span);
+                        let inner = span.mul::<14, 6>(Q14::ONE - self.flex_tune);
+                        if distance > inner {
+                            let outer = span - inner;
+                            let taper = Q14::ONE - (distance - inner).div::<6, 14>(outer);
+                            let pull = taper.mul::<14, 14>(taper);
+                            target_ratio = Q14::ONE + pull.mul(target_ratio - Q14::ONE);
+                        }
+                    }
+                }
             }
+        } else {
+            self.dwell = Q14::ZERO;
         }
-        self.correction = self.correction_decay.mul(self.correction - target_ratio) + target_ratio;
+        Some((target_ratio, decay))
+    }
+
+    /// Updates the Q14 correction ratio from `period`.
+    ///
+    /// If `select_target_ratio` finds a non-positive shifted period, the
+    /// correction ratio becomes 1.0 immediately.
+    fn update_correction(&mut self, period: Q6) {
+        let Some((target_ratio, decay)) = self.select_target_ratio(period) else {
+            self.correction = Q14::ONE;
+            return;
+        };
+        self.correction = decay.mul(self.correction - target_ratio) + target_ratio;
     }
 
     /// Selects the period and the correction.
@@ -1036,6 +1218,35 @@ impl Resynthesis {
         self.step_reader(voice, ratio, bounds, fade)
     }
 
+    /// Advances one secondary choir reader and returns its position and ratio.
+    ///
+    /// The function selects the delayed period, updates `current_output_period`
+    /// and moves the reader without a crossfade. `voice` must identify a
+    /// secondary choir slot, and `delayed` must be less than HISTORY.
+    fn move_choir_reader(&mut self, voice: usize, delayed: usize) -> (Q14, Q14) {
+        let offset = self.delays[voice];
+        let delay = ring(delayed as i32 - offset);
+        let (period, _) = self.period_for(delay, self.write);
+        self.current_output_period = period;
+        let ratio = self.drift_ratio[voice];
+        let position = self.move_reader(voice, ratio, period, offset, false);
+        (position, ratio)
+    }
+
+    /// Applies the glottal envelope to `sample` and updates `previous_output`
+    /// for `channel`.
+    ///
+    /// `channel` must be `0` or `1`.
+    #[inline]
+    fn apply_glottal(&mut self, channel: usize, sample: Q14) -> Q14 {
+        let output = Q14::from_bits(
+            self.formant
+                .model_glottal(sample.to_bits(), self.previous_output[channel].to_bits()),
+        );
+        self.previous_output[channel] = output;
+        output
+    }
+
     /// Renders the choir lead before a secondary voice reads its history.
     ///
     /// The function does these steps:
@@ -1073,11 +1284,7 @@ impl Resynthesis {
                 self.formant_position,
                 numeric,
             ));
-            value = Q14::from_bits(
-                self.formant
-                    .model_glottal(value.to_bits(), self.previous_output[0].to_bits()),
-            );
-            self.previous_output[0] = value;
+            value = self.apply_glottal(0, value);
         }
         self.lead[write] = value;
         (value, ratio)
@@ -1099,17 +1306,9 @@ impl Resynthesis {
     /// tracking was active before this frame.
     pub(crate) fn process_sample(&mut self, input: i16, numeric: &mut NumericContext) -> [Q14; 2] {
         let sample = Q14::from_bits(i32::from(input) >> 1);
-        self.write += 1;
-        if self.write == HISTORY {
-            self.write = 0;
-        }
-        if usize::from(self.written) < HISTORY {
-            self.written += 1;
-        }
-        self.raw[self.write] = sample;
+        let write = record_history(&mut self.raw, &mut self.write, &mut self.written, sample);
         let was_tracking = !self.pitch.is_detecting();
         let step = self.pitch.process_sample(sample.to_bits());
-        let write = self.write;
         // Readers have signed fractional coordinates. When the writer wraps,
         // move the origin of these coordinates with it. Do not apply a modulo
         // to each fractional position. This keeps the distances that the jump
@@ -1128,6 +1327,7 @@ impl Resynthesis {
         if step.restarted {
             self.correction = Q14::ONE;
             self.scale_initialized = false;
+            self.dwell = Q14::ZERO;
         }
         if step.acquired {
             self.formant.detection_mode_off();
@@ -1178,13 +1378,20 @@ impl Resynthesis {
         // of the source is OVERLAP_FRAMES in the two formant modes.
         let overlap_read = (self.overlap_index + ANALYSIS_FRAMES) % OVERLAP_FRAMES;
         let mut filtered = self.overlap[overlap_read];
-        for filter in &mut self.post {
-            filtered = filter.process_sample(filtered);
+        if self.config.pitch_ratio > 1.0 {
+            for filter in &mut self.post {
+                filtered = filter.process_sample(filtered);
+            }
+        } else {
+            for filter in &mut self.post {
+                filtered = filter.bypass_sample(filtered);
+            }
         }
         self.filtered[write] = filtered;
         let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
-        let dry = self.raw[delayed];
+        let dry = self.raw[ring(write as i32 - LATENCY_FRAMES as i32)];
         let mut mix = [Q14::ZERO; 2];
+        let mut mono = !self.config.stereo_output;
         let mut final_ratio = Q14::ONE;
         if self.config.mode == MultiVoiceMode::Choir {
             let voice_count = self.config.choir_voices as usize;
@@ -1193,13 +1400,12 @@ impl Resynthesis {
                 let (value, ratio) = self.render_lead(delayed, numeric);
                 final_ratio = ratio;
                 self.voice_ratios[0] = ratio;
-                for (channel, sum) in mix.iter_mut().enumerate() {
-                    *sum = *sum
-                        + if self.config.stereo_output {
-                            value.mul(self.pan[0][channel])
-                        } else {
-                            value
-                        };
+                if self.config.stereo_output {
+                    for (channel, sum) in mix.iter_mut().enumerate() {
+                        *sum = *sum + value.mul(self.pan[0][channel]);
+                    }
+                } else {
+                    mix[0] = mix[0] + value;
                 }
             }
             {
@@ -1209,32 +1415,21 @@ impl Resynthesis {
                     // After the lead update, set the reader positions in
                     // voice order.
                     for (lane, position) in positions.iter_mut().enumerate() {
-                        let current_voice = voice + lane;
-                        let delay = ring(delayed as i32 - self.delays[current_voice]);
-                        let (period, _) = self.period_for(delay, write);
-                        self.current_output_period = period;
-                        let ratio = self.drift_ratio[current_voice];
-                        final_ratio = ratio;
-                        *position = self.move_reader(
-                            current_voice,
-                            ratio,
-                            period,
-                            self.delays[current_voice],
-                            false,
-                        );
+                        (*position, final_ratio) = self.move_choir_reader(voice + lane, delayed);
                     }
                     let values =
                         positions.map(|position| history::interpolation(&self.lead, position).0);
                     // Keep the voice and channel order of each sum.
-                    for (lane, value) in values.into_iter().enumerate() {
-                        let current_voice = voice + lane;
-                        for (channel, sum) in mix.iter_mut().enumerate() {
-                            *sum = *sum
-                                + if self.config.stereo_output {
-                                    value.mul(self.pan[current_voice][channel])
-                                } else {
-                                    value
-                                };
+                    if self.config.stereo_output {
+                        for (lane, value) in values.into_iter().enumerate() {
+                            let current_voice = voice + lane;
+                            for (channel, sum) in mix.iter_mut().enumerate() {
+                                *sum = *sum + value.mul(self.pan[current_voice][channel]);
+                            }
+                        }
+                    } else {
+                        for value in values {
+                            mix[0] = mix[0] + value;
                         }
                     }
                     voice += 4;
@@ -1242,21 +1437,15 @@ impl Resynthesis {
                 // The zero to three secondary readers that are left use
                 // scalar code.
                 for voice in voice..voice_count {
-                    let delay = ring(delayed as i32 - self.delays[voice]);
-                    let (period, _) = self.period_for(delay, write);
-                    self.current_output_period = period;
-                    let ratio = self.drift_ratio[voice];
+                    let (position, ratio) = self.move_choir_reader(voice, delayed);
                     final_ratio = ratio;
-                    let position =
-                        self.move_reader(voice, ratio, period, self.delays[voice], false);
                     let (value, _) = history::interpolation(&self.lead, position);
-                    for (channel, sum) in mix.iter_mut().enumerate() {
-                        *sum = *sum
-                            + if self.config.stereo_output {
-                                value.mul(self.pan[voice][channel])
-                            } else {
-                                value
-                            };
+                    if self.config.stereo_output {
+                        for (channel, sum) in mix.iter_mut().enumerate() {
+                            *sum = *sum + value.mul(self.pan[voice][channel]);
+                        }
+                    } else {
+                        mix[0] = mix[0] + value;
                     }
                 }
             }
@@ -1310,28 +1499,48 @@ impl Resynthesis {
                         value = value.mul(self.harmony_gain);
                     }
                 }
-                for (channel, sum) in mix.iter_mut().enumerate() {
-                    *sum = *sum
-                        + if self.config.stereo_output && slot > 0 {
-                            value.mul(self.harmony_pan[slot - 1][channel])
-                        } else {
-                            value
-                        };
+                if self.config.stereo_output {
+                    for (channel, sum) in mix.iter_mut().enumerate() {
+                        *sum = *sum
+                            + if slot > 0 {
+                                value.mul(self.harmony_pan[slot - 1][channel])
+                            } else {
+                                value
+                            };
+                    }
+                } else {
+                    mix[0] = mix[0] + value;
                 }
             }
             if self.config.formant.enabled {
                 self.formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
-                mix = self
-                    .formant
-                    .forward_stereo(mix.map(Q14::to_bits), self.formant_position, numeric)
-                    .map(Q14::from_bits);
-                for (channel, value) in mix.iter_mut().enumerate() {
-                    *value =
-                        Q14::from_bits(self.formant.model_glottal(
-                            value.to_bits(),
-                            self.previous_output[channel].to_bits(),
-                        ));
-                    self.previous_output[channel] = *value;
+                // If Choir changed only channel zero before a switch to
+                // Harmony, synthesize the two channels until their histories
+                // are equal.
+                if mono
+                    && self.formant.histories_match()
+                    && self.previous_output[0] == self.previous_output[1]
+                {
+                    let value = Q14::from_bits(self.formant.forward_mono(
+                        mix[0].to_bits(),
+                        self.formant_position,
+                        numeric,
+                    ));
+                    let value = self.apply_glottal(0, value);
+                    self.previous_output[1] = value;
+                    mix[0] = value;
+                } else {
+                    if mono {
+                        mix[1] = mix[0];
+                    }
+                    mix = self
+                        .formant
+                        .forward_stereo(mix.map(Q14::to_bits), self.formant_position, numeric)
+                        .map(Q14::from_bits);
+                    for (channel, value) in mix.iter_mut().enumerate() {
+                        *value = self.apply_glottal(channel, *value);
+                    }
+                    mono = mono && mix[0] == mix[1];
                 }
             }
         }
@@ -1358,11 +1567,13 @@ impl Resynthesis {
             let left = self.cosine[(index + 127) % 128];
             let middle = self.cosine[index];
             let right = self.cosine[(index + 1) % 128];
-            let cosine = middle
-                + ((((left + right) >> 1) - middle).mul::<14, 14>(frac) + ((right - left) >> 1))
-                    .mul(frac);
-            for sum in &mut mix {
-                *sum = sum.mul(cosine);
+            let cosine = quadratic(left, middle, right, frac);
+            if mono {
+                mix[0] = mix[0].mul(cosine);
+            } else {
+                for sum in &mut mix {
+                    *sum = sum.mul(cosine);
+                }
             }
         }
         // The dry branch is the delayed raw input. It bypasses the shift
@@ -1372,9 +1583,14 @@ impl Resynthesis {
         let dry_mix = i64::from(self.dry_mix.to_bits());
         let wet = i64::from((Q8::ONE - self.dry_mix).to_bits());
         let dry = i64::from(dry.to_bits());
-        for sum in &mut mix {
-            let blended = (dry * dry_mix + i64::from(sum.to_bits()) * wet) >> 8;
-            *sum = Q14::from_bits(clamp_i32(blended));
+        if mono {
+            let blended = (dry * dry_mix + i64::from(mix[0].to_bits()) * wet) >> 8;
+            mix = [Q14::from_bits(clamp_i32(blended)); 2];
+        } else {
+            for sum in &mut mix {
+                let blended = (dry * dry_mix + i64::from(sum.to_bits()) * wet) >> 8;
+                *sum = Q14::from_bits(clamp_i32(blended));
+            }
         }
         mix
     }

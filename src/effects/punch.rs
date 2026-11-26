@@ -2,27 +2,37 @@
 //! ceiling.
 
 use crate::error::check_range;
-use crate::numeric::fixed::{Q14, Q8};
+use crate::numeric::fixed::{Fixed, Q14, Q22, Q24, Q28, Q30};
 use crate::numeric::{coefficient_to_exp_value, db_to_gain, envelope_decay, NumericContext};
 use crate::{Error, SampleRate};
 
-/// The update interval of the peak follower, in frames.
-const WINDOW_FRAMES: usize = 100;
-/// The base arctangent drive, approximately π/2 in Q8.
-const BASE_DRIVE: Q8 = Q8::from_bits(401);
+/// The duration of the input peak hold, in milliseconds.
+const HOLD_MS: usize = 6;
+/// The largest peak-hold length across supported sample rates (6 ms at 48 kHz).
+const MAX_HOLD_FRAMES: usize = 288;
+/// The release half-life of the second envelope follower, in milliseconds.
+const FAST_RELEASE_MS: f64 = 5000.0;
+/// The half-life of the per-sample drive filter, in milliseconds.
+const DRIVE_SMOOTH_MS: f64 = 1.0;
+/// The base arctangent drive, π/2 in Q24.
+const BASE_DRIVE: Q24 = Q24::from_bits(26_353_589);
+/// The maximum ratio between the two followers, 16.0 in Q24.
+const MAX_RATIO: Q24 = Q24::from_bits(16 << 24);
 /// The 2/π factor in Q14 that normalizes the arctangent output.
 const TWO_OVER_PI: Q14 = Q14::from_bits(10430);
+/// The clamp bound in Q14 above the last tangent table entry (3,129,084).
+const MAX_TANGENT_Q14: i64 = 4_000_000;
 
 /// The input gain and the transient enhancement with arctangent saturation.
 ///
-/// Punch comes before Warm and before pitch detection. It finds the peak of
-/// each window of 100 processed frames. Two envelope followers set the drive
-/// from these peaks. When Punch is disabled, it does not process audio, and
-/// its envelope and window state do not change.
+/// Punch comes before Warm and before pitch detection. A 6 ms peak hold feeds
+/// two per-sample envelope followers that set the drive. The stage scales the
+/// saturator input by the inverse ceiling gain so quiet signals stay near
+/// unity. When Punch is disabled, it does not process audio, and its hold and
+/// envelope state do not change.
 ///
-/// A gain change updates the cached drive at the next boundary of the peak
-/// window. A reset calculates that drive again immediately from the
-/// configured gain.
+/// Construction and reset initialize the drive from `gain_db`. On each
+/// processed frame, the drive moves smoothly toward the target value.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -35,8 +45,8 @@ pub struct PunchConfig {
     pub enabled: bool,
     /// The input gain in decibels, -96..=12.
     ///
-    /// The default is 0 dB. The saturation drive from this gain changes at the
-    /// next 100-frame peak boundary.
+    /// The default is 0 dB. Construction and reset set the initial drive from
+    /// this gain, and later changes update it smoothly on each frame.
     pub gain_db: f32,
     /// The transient emphasis without a unit, 0..=1.
     ///
@@ -46,13 +56,15 @@ pub struct PunchConfig {
     pub impact: f32,
     /// The output ceiling of the saturation in dBFS, -96..=0.
     ///
-    /// The default is -3 dBFS. Later stages and the final gain can make the
-    /// final output higher than this level.
+    /// The default is -3 dBFS. The stage normalizes the saturator input by this
+    /// ceiling, then scales the saturated output back to `ceiling_db`. Later
+    /// stages and the final gain can make the final output higher than this
+    /// level.
     pub ceiling_db: f32,
-    /// The attack half-life of the peak follower in milliseconds, 0.01..=5000.
+    /// The attack half-life of the peak followers in milliseconds, 0.01..=5000.
     ///
-    /// The default is 10 ms. The coefficients include the effect of the
-    /// 100-frame update interval.
+    /// The default is 10 ms. Each enabled frame updates both followers with
+    /// per-sample coefficients.
     pub attack_ms: f32,
 }
 impl Default for PunchConfig {
@@ -89,125 +101,170 @@ impl PunchConfig {
 /// inline.
 #[derive(Debug)]
 pub(crate) struct Punch {
-    /// The prepared rate, which converts the envelope times to sample windows.
+    /// The prepared rate, which converts the envelope times to sample counts.
     rate: SampleRate,
-    /// The adaptive Q14 peak envelope. The impact control sets its release.
-    slow: Q14,
-    /// The second Q14 peak envelope, with a fixed release half-life of 5
+    /// The number of frames in the 6 ms peak-hold window at `rate`.
+    hold_frames: usize,
+    /// The write offset into the leaf half of `hold_tree`.
+    hold_cursor: usize,
+    /// A complete binary max-tree over `hold_frames` Q28 input magnitudes.
+    hold_tree: [Q28; MAX_HOLD_FRAMES * 2],
+    /// The adaptive Q28 peak envelope. The impact control sets its release.
+    slow: Q28,
+    /// The second Q28 peak envelope, with a fixed release half-life of 5
     /// seconds.
-    fast: Q14,
-    /// The number of samples in the current 100-frame peak window.
-    counter: usize,
-    /// The largest absolute Q14 input in the current window.
-    peak: Q14,
-    /// The Q14 release coefficient of the adaptive follower.
-    slow_decay: Q14,
-    /// The Q14 release coefficient of the second follower.
-    fast_decay: Q14,
-    /// The shared Q14 coefficient when a follower moves up.
-    attack_decay: Q14,
-    /// The configured linear input gain in Q8.
-    gain: Q8,
-    /// The linear output ceiling in Q14. It applies to the saturator angle.
-    ceiling_gain: Q14,
-    /// The cached Q8 drive: base drive × envelope ratio × input gain.
-    drive: Q8,
+    fast: Q28,
+    /// The Q30 release coefficient of the adaptive follower.
+    slow_decay: Q30,
+    /// The Q30 release coefficient of the second follower.
+    fast_decay: Q30,
+    /// The shared Q30 coefficient when a follower moves up.
+    attack_decay: Q30,
+    /// The Q30 coefficient that smooths the drive on each frame.
+    drive_decay: Q30,
+    /// The configured linear input gain in Q28.
+    gain: Q28,
+    /// The linear output ceiling in Q28, nonzero across -96..=0 dBFS.
+    ceiling_gain: Q28,
+    /// The smoothed Q24 drive: base drive × envelope ratio × input gain.
+    drive: Q24,
 }
 impl Punch {
     /// Prepares the coefficients and resets both followers from validated
     /// settings.
     pub(crate) fn new(rate: SampleRate, config: PunchConfig) -> Self {
+        let hold_frames = (rate.as_u32() as usize * HOLD_MS).div_ceil(1000);
+        let drive_decay = Q30::from_f64(envelope_decay(DRIVE_SMOOTH_MS, rate.hz() as f64, 1));
         let mut result = Self {
             rate,
-            slow: Q14::default(),
-            fast: Q14::default(),
-            counter: 0,
-            peak: Q14::default(),
-            slow_decay: Q14::default(),
-            fast_decay: Q14::default(),
-            attack_decay: Q14::default(),
-            gain: Q8::ONE,
-            ceiling_gain: Q14::default(),
+            hold_frames,
+            hold_cursor: 0,
+            hold_tree: [Q28::ZERO; MAX_HOLD_FRAMES * 2],
+            slow: Q28::ZERO,
+            fast: Q28::ZERO,
+            slow_decay: Q30::ZERO,
+            fast_decay: Q30::ZERO,
+            attack_decay: Q30::ZERO,
+            drive_decay,
+            gain: Q28::ONE,
+            ceiling_gain: Q28::ONE,
             drive: BASE_DRIVE,
         };
         result.set_config(config);
         result.reset();
         result
     }
-    /// Returns the cached drive divided by the base drive, as f32.
+    /// Returns the effective linear gain of the stage, as f32.
     ///
-    /// The value is the envelope ratio times the configured input gain. The
-    /// stage state does not change.
-    pub(crate) fn drive_ratio(&self) -> f32 {
-        (self.drive.to_bits() as f64 / BASE_DRIVE.to_bits() as f64) as f32
+    /// The value reflects the smoothed drive and any saturation from the output
+    /// ceiling at the current envelope level. The stage state does not change.
+    pub(crate) fn effective_gain(&self) -> f32 {
+        let drive_ratio = self.drive.to_bits() as f64 / BASE_DRIVE.to_bits() as f64;
+        let level = self.hold_tree[1].max(self.slow);
+        if level <= Q28::ZERO {
+            return drive_ratio as f32;
+        }
+        let env = level.to_bits() as f64 / f64::from(1u32 << 28);
+        let ceiling = self.ceiling_gain.to_bits() as f64 / f64::from(1u32 << 28);
+        let drive = self.drive.to_bits() as f64 / f64::from(1u32 << 24);
+        let two_over_pi = TWO_OVER_PI.to_bits() as f64 / f64::from(1u32 << 14);
+        let out = ceiling * two_over_pi * (drive * env / ceiling).atan();
+        (out / env) as f32
     }
     /// Calculates the quantized controls again, and keeps the envelopes and
-    /// the cached drive.
+    /// the current drive.
     /// The processor controls the bypass. This stage never reads an enabled
     /// flag.
     pub(crate) fn set_config(&mut self, config: PunchConfig) {
         let impact = coefficient_to_exp_value(1.0, 250.0, 5000.0, 1.0 - config.impact);
         let decay = |milliseconds: f64| {
-            Q14::from_f64(envelope_decay(
-                milliseconds,
-                self.rate.hz() as f64,
-                WINDOW_FRAMES,
-            ))
+            Q30::from_f64(envelope_decay(milliseconds, self.rate.hz() as f64, 1))
         };
         self.slow_decay = decay(impact as f64);
-        self.fast_decay = decay(5000.0);
+        self.fast_decay = decay(FAST_RELEASE_MS);
         self.attack_decay = decay(config.attack_ms as f64);
-        self.gain = Q8::from_f64(db_to_gain(config.gain_db as f64));
-        self.ceiling_gain = Q14::from_f64(db_to_gain(config.ceiling_db as f64));
+        self.gain = Q28::from_f64(db_to_gain(config.gain_db as f64));
+        self.ceiling_gain =
+            Q28::from_f64(db_to_gain(config.ceiling_db as f64)).max(Q28::from_bits(1));
     }
-    /// Clears both envelopes and the current window, then calculates the drive
-    /// again from the base drive and the input gain.
+    /// Clears the peak hold and both envelopes, then sets the drive from the
+    /// base drive and the input gain.
     pub(crate) fn reset(&mut self) {
-        self.slow = Q14::default();
-        self.fast = Q14::default();
-        self.counter = 0;
-        self.peak = Q14::default();
+        self.hold_cursor = 0;
+        self.hold_tree.fill(Q28::ZERO);
+        self.slow = Q28::ZERO;
+        self.fast = Q28::ZERO;
         self.drive = BASE_DRIVE.mul(self.gain);
     }
 
     /// Moves `current` toward `target` with a one-pole filter.
     ///
-    /// The filter uses `attack` if `target` is higher than `current`.
+    /// If `target` is higher than `current`, the filter uses `attack`.
     /// Otherwise, it uses `release`.
-    fn follow(current: Q14, target: Q14, attack: Q14, release: Q14) -> Q14 {
-        let decay = if target > current { attack } else { release };
-        target + decay.mul(current - target)
+    fn follow<const F: u32>(
+        current: Fixed<F>,
+        target: Fixed<F>,
+        attack: Q30,
+        release: Q30,
+    ) -> Fixed<F> {
+        if target > current {
+            target - attack.mul(target - current)
+        } else {
+            target + release.mul(current - target)
+        }
     }
 
-    /// Tracks the current peak, updates the drive every 100 calls and
-    /// saturates one PCM sample.
-    /// The envelope ratio is approximately limited to 16 before it is
-    /// multiplied by the input gain. While the adaptive envelope is zero, the
-    /// ratio is 1. The Q8 drive goes into the cached arctangent lookup. The
-    /// final PCM value clips symmetrically.
-    pub(crate) fn process_sample(&mut self, input: i16, context: &mut NumericContext) -> i16 {
-        let sample = Q14::from_bits(i32::from(input) >> 1);
-        self.peak = self.peak.max(sample.abs());
-        self.counter += 1;
-        if self.counter == WINDOW_FRAMES {
-            self.counter = 0;
-            self.slow = Self::follow(self.slow, self.peak, self.attack_decay, self.slow_decay);
-            self.fast = Self::follow(self.fast, self.peak, self.attack_decay, self.fast_decay);
-            self.peak = Q14::default();
-            let smooth: Q8 = if self.slow > Q14::default() {
-                if self.fast >> 6 <= (self.slow >> 6) << 4 {
-                    self.fast.div(self.slow)
-                } else {
-                    Q8::from_bits(16 << 8)
-                }
-            } else {
-                Q8::ONE
-            };
-            self.drive = BASE_DRIVE.mul::<8, 8>(smooth).mul(self.gain);
+    /// Inserts `level` into the 6 ms peak hold and returns the held maximum.
+    fn push_hold(&mut self, level: Q28) -> Q28 {
+        let mut node = self.hold_frames + self.hold_cursor;
+        self.hold_tree[node] = level;
+        while node > 1 {
+            node >>= 1;
+            self.hold_tree[node] = self.hold_tree[node * 2].max(self.hold_tree[node * 2 + 1]);
         }
-        let driven: Q8 = sample.mul(self.drive);
-        let angle = Q14::from_bits(context.atan_q14.process(driven.to_bits(), 14 - 8));
-        let output: Q14 = TWO_OVER_PI.mul(self.ceiling_gain.mul::<14, 14>(angle));
-        output.to_bits().wrapping_shl(1).clamp(-32767, 32767) as i16
+        self.hold_cursor += 1;
+        if self.hold_cursor == self.hold_frames {
+            self.hold_cursor = 0;
+        }
+        self.hold_tree[1]
+    }
+
+    /// Updates the 6 ms peak hold, both followers and the smoothed drive, then
+    /// saturates one PCM sample against the normalized ceiling.
+    ///
+    /// While the adaptive envelope is zero, the envelope ratio is 1. The stage
+    /// limits this ratio to 16, then multiplies it by the input gain. Next, it
+    /// divides the driven sample by the ceiling gain and clamps the quotient in
+    /// `i64` before the arctangent lookup. Finally, the PCM output clips
+    /// symmetrically.
+    pub(crate) fn process_sample(&mut self, input: i16, context: &mut NumericContext) -> i16 {
+        let sample: Q28 = Fixed::<15>::from_bits(i32::from(input)).rescale();
+        let held = self.push_hold(sample.abs());
+        self.slow = Self::follow(self.slow, held, self.attack_decay, self.slow_decay);
+        self.fast = Self::follow(self.fast, held, self.attack_decay, self.fast_decay);
+        let smooth: Q24 = if self.slow > Q28::ZERO {
+            if i64::from(self.fast.to_bits()) < i64::from(self.slow.to_bits()) << 4 {
+                self.fast.div::<28, 24>(self.slow).min(MAX_RATIO)
+            } else {
+                MAX_RATIO
+            }
+        } else {
+            Q24::ONE
+        };
+        let target_drive: Q24 = BASE_DRIVE.mul::<24, 24>(smooth).mul(self.gain);
+        self.drive = Self::follow(self.drive, target_drive, self.drive_decay, self.drive_decay);
+        let driven: Q22 = sample.mul(self.drive);
+        let normalized = ((i64::from(driven.to_bits()) << 20)
+            / i64::from(self.ceiling_gain.to_bits()))
+        .clamp(-MAX_TANGENT_Q14, MAX_TANGENT_Q14) as i32;
+        let angle = Q14::from_bits(context.atan_q14.process(normalized));
+        let shaped: Q28 = TWO_OVER_PI.mul(angle);
+        let scaled_bits = i64::from(self.ceiling_gain.mul::<28, 28>(shaped).to_bits());
+        let pcm = if scaled_bits >= 0 {
+            (scaled_bits + 4096) >> 13
+        } else {
+            -((-scaled_bits + 4096) >> 13)
+        };
+        pcm.clamp(-32767, 32767) as i16
     }
 }

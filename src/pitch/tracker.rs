@@ -16,7 +16,8 @@
 use super::search::{tracking_minimum, TRACKING_LAGS};
 use crate::filter::{Biquad, Design};
 use crate::numeric::fixed::{Q14, Q6};
-use crate::numeric::{mul14, ring, HISTORY, ONE};
+use crate::numeric::{mul14, mul14_bounded, ring, HISTORY, ONE};
+use crate::resynthesis::history::{clear_dirty_ring, prepare_history, record_history};
 use crate::{PitchConfig, SampleRate};
 
 /// The result of one full-rate input sample.
@@ -115,10 +116,7 @@ impl PitchTracker {
         pre[1].set_design(Design::low_pass(rate.hz(), cutoff * 1.5, 0.707));
         Self {
             pre,
-            raw: vec![0; HISTORY]
-                .into_boxed_slice()
-                .try_into()
-                .expect("prepared pitch history length"),
+            raw: prepare_history(0),
             write: 0,
             detecting: true,
             first: true,
@@ -151,12 +149,7 @@ impl PitchTracker {
     /// The acquisition tables clear at the next decimated call. The previous
     /// usable period stays until another tracking update replaces it.
     pub(crate) fn reset(&mut self) {
-        let written = usize::from(self.written);
-        if written == HISTORY {
-            self.raw.fill(0);
-        } else {
-            self.raw[1..written + 1].fill(0);
-        }
+        clear_dirty_ring(self.raw.as_mut_slice(), usize::from(self.written), 0);
         self.written = 0;
         self.write = 0;
         self.restart();
@@ -240,23 +233,27 @@ impl PitchTracker {
                 .try_into()
                 .expect("four acquisition cross lanes");
 
-            let delta_cross = mul14(sample, current[3]).wrapping_sub(mul14(current[3], delayed[6]));
-            let delta_energy = square.wrapping_sub(mul14(delayed[6], delayed[6]));
+            let delta_cross = mul14_bounded(sample, current[3])
+                .wrapping_sub(mul14_bounded(current[3], delayed[6]));
+            let delta_energy = square.wrapping_sub(mul14_bounded(delayed[6], delayed[6]));
             cross[0] = cross[0].wrapping_add(delta_cross);
             energy[0] = energy[0].wrapping_add(delta_energy);
 
-            let delta_cross = mul14(sample, current[2]).wrapping_sub(mul14(current[2], delayed[4]));
-            let delta_energy = square.wrapping_sub(mul14(delayed[4], delayed[4]));
+            let delta_cross = mul14_bounded(sample, current[2])
+                .wrapping_sub(mul14_bounded(current[2], delayed[4]));
+            let delta_energy = square.wrapping_sub(mul14_bounded(delayed[4], delayed[4]));
             cross[1] = cross[1].wrapping_add(delta_cross);
             energy[1] = energy[1].wrapping_add(delta_energy);
 
-            let delta_cross = mul14(sample, current[1]).wrapping_sub(mul14(current[1], delayed[2]));
-            let delta_energy = square.wrapping_sub(mul14(delayed[2], delayed[2]));
+            let delta_cross = mul14_bounded(sample, current[1])
+                .wrapping_sub(mul14_bounded(current[1], delayed[2]));
+            let delta_energy = square.wrapping_sub(mul14_bounded(delayed[2], delayed[2]));
             cross[2] = cross[2].wrapping_add(delta_cross);
             energy[2] = energy[2].wrapping_add(delta_energy);
 
-            let delta_cross = mul14(sample, current[0]).wrapping_sub(mul14(current[0], delayed[0]));
-            let delta_energy = square.wrapping_sub(mul14(delayed[0], delayed[0]));
+            let delta_cross = mul14_bounded(sample, current[0])
+                .wrapping_sub(mul14_bounded(current[0], delayed[0]));
+            let delta_energy = square.wrapping_sub(mul14_bounded(delayed[0], delayed[0]));
             cross[3] = cross[3].wrapping_add(delta_cross);
             energy[3] = energy[3].wrapping_add(delta_energy);
             lane += 4;
@@ -266,8 +263,9 @@ impl PitchTracker {
         while lane < count {
             let current = current[count - 1 - lane];
             let delayed = delayed[(count - 1 - lane) * 2];
-            let delta_cross = mul14(sample, current).wrapping_sub(mul14(current, delayed));
-            let delta_energy = square.wrapping_sub(mul14(delayed, delayed));
+            let delta_cross =
+                mul14_bounded(sample, current).wrapping_sub(mul14_bounded(current, delayed));
+            let delta_energy = square.wrapping_sub(mul14_bounded(delayed, delayed));
             cross[lane] = cross[lane].wrapping_add(delta_cross);
             energy[lane] = energy[lane].wrapping_add(delta_energy);
             lane += 1;
@@ -303,7 +301,7 @@ impl PitchTracker {
             self.detection_index = 0;
         }
         self.detection[index1] = sample;
-        let square = mul14(sample, sample);
+        let square = mul14_bounded(sample, sample);
         let mut lag = 0;
         while lag < ACQUISITION_LAGS {
             // Neither input window wraps in this run. For all lanes, the two
@@ -346,7 +344,7 @@ impl PitchTracker {
             let mut energy = self.energy[lag];
             let mut cross = self.cross[lag];
             if energy > ONE {
-                let sh0 = 31 - ((energy as u32) >> 14).leading_zeros();
+                let sh0 = ((energy as u32) >> 14).ilog2();
                 let sh = sh0 + u32::from((energy >> sh0) > ONE);
                 energy >>= sh;
                 cross >>= sh;
@@ -460,10 +458,12 @@ impl PitchTracker {
         index = ring(self.write as i32 - period * 2);
         for lag in 1..TRACKING_LAGS {
             let first = self.raw[index];
-            index = if index == 0 { HISTORY - 1 } else { index - 1 };
+            index = previous_history(index);
             let second = self.raw[index];
-            index = if index == 0 { HISTORY - 1 } else { index - 1 };
-            energy = energy.wrapping_add(mul14(first, first).wrapping_add(mul14(second, second)));
+            index = previous_history(index);
+            energy = energy.wrapping_add(
+                mul14_bounded(first, first).wrapping_add(mul14_bounded(second, second)),
+            );
             self.tracking_energy[lag] = energy;
         }
         for lag in 0..TRACKING_LAGS {
@@ -477,7 +477,7 @@ impl PitchTracker {
     #[inline]
     fn energy_slice(samples: &[i32]) -> i32 {
         samples.iter().fold(0_i32, |sum, &sample| {
-            sum.wrapping_add(mul14(sample, sample))
+            sum.wrapping_add(mul14_bounded(sample, sample))
         })
     }
 
@@ -488,7 +488,7 @@ impl PitchTracker {
         debug_assert_eq!(left.len(), right.len());
         left.iter()
             .zip(right)
-            .fold(0_i32, |sum, (&a, &b)| sum.wrapping_add(mul14(a, b)))
+            .fold(0_i32, |sum, (&a, &b)| sum.wrapping_add(mul14_bounded(a, b)))
     }
 
     /// Calculates the wrapping Q14 cross sum of two adjacent periods of raw
@@ -531,6 +531,12 @@ impl PitchTracker {
         cross
     }
 
+    /// Returns the cycle difference with 32-bit wrap at a lag slot.
+    #[inline]
+    fn tracking_difference(&self, lag: usize) -> i32 {
+        (self.tracking_energy[lag] >> 1).wrapping_sub(self.tracking_cross[lag])
+    }
+
     /// Increments the full-rate energy and cross windows when all reads are
     /// contiguous.
     /// The fixed array lengths encode 40 lag samples and 79 samples with a
@@ -544,14 +550,15 @@ impl PitchTracker {
         energy: &mut [i32; TRACKING_LAGS],
         cross: &mut [i32; TRACKING_LAGS],
     ) {
-        let current_sq = mul14(current, current);
+        let current_sq = mul14_bounded(current, current);
         for lag in 0..TRACKING_LAGS {
             let middle = middle[TRACKING_LAGS - 1 - lag];
             let delayed = delayed[2 * (TRACKING_LAGS - 1) - lag * 2];
             energy[lag] =
-                energy[lag].wrapping_add(current_sq.wrapping_sub(mul14(delayed, delayed)));
-            cross[lag] = cross[lag]
-                .wrapping_add(mul14(current, middle).wrapping_sub(mul14(middle, delayed)));
+                energy[lag].wrapping_add(current_sq.wrapping_sub(mul14_bounded(delayed, delayed)));
+            cross[lag] = cross[lag].wrapping_add(
+                mul14_bounded(current, middle).wrapping_sub(mul14_bounded(middle, delayed)),
+            );
         }
     }
 
@@ -567,14 +574,7 @@ impl PitchTracker {
     /// curvature is zero, acquisition starts again. The last usable period is
     /// not discarded.
     pub(crate) fn process_sample(&mut self, sample: i32) -> PitchStep {
-        self.write += 1;
-        if self.write == HISTORY {
-            self.write = 0;
-        }
-        if usize::from(self.written) < HISTORY {
-            self.written += 1;
-        }
-        self.raw[self.write] = sample;
+        record_history(&mut self.raw, &mut self.write, &mut self.written, sample);
         let mut filtered = Q14::from_bits(sample);
         for pre in &mut self.pre {
             filtered = pre.process_sample(filtered);
@@ -582,7 +582,7 @@ impl PitchTracker {
         let filtered = filtered.to_bits();
         let mut step = PitchStep::default();
         if self.detecting {
-            if self.write & 7 == 0 {
+            if self.write.is_multiple_of(8) {
                 let lag = self.detection_lag(filtered);
                 if lag > 0 {
                     self.initialize_tracking(lag);
@@ -608,10 +608,10 @@ impl PitchTracker {
                     &mut self.tracking_cross,
                 );
             } else {
-                let current_sq = mul14(current, current);
+                let current_sq = mul14_bounded(current, current);
                 for lag in 0..TRACKING_LAGS {
                     let middle = self.raw[first];
-                    first = if first == 0 { HISTORY - 1 } else { first - 1 };
+                    first = previous_history(first);
                     let delayed = self.raw[second];
                     second = if second < 2 {
                         second + HISTORY - 2
@@ -619,17 +619,16 @@ impl PitchTracker {
                         second - 2
                     };
                     self.tracking_energy[lag] = self.tracking_energy[lag]
-                        .wrapping_add(current_sq.wrapping_sub(mul14(delayed, delayed)));
-                    self.tracking_cross[lag] = self.tracking_cross[lag]
-                        .wrapping_add(mul14(current, middle).wrapping_sub(mul14(middle, delayed)));
+                        .wrapping_add(current_sq.wrapping_sub(mul14_bounded(delayed, delayed)));
+                    self.tracking_cross[lag] = self.tracking_cross[lag].wrapping_add(
+                        mul14_bounded(current, middle).wrapping_sub(mul14_bounded(middle, delayed)),
+                    );
                 }
             }
             self.tracking_counter += 1;
             if self.tracking_counter == 5 {
                 self.tracking_counter = 0;
-                let mut best = tracking_minimum(|lag| {
-                    (self.tracking_energy[lag] >> 1).wrapping_sub(self.tracking_cross[lag])
-                });
+                let mut best = tracking_minimum(|lag| self.tracking_difference(lag));
                 if best == TRACKING_LAGS - 1 || best == 0 || self.base + best as i32 <= 19 {
                     self.restart();
                     step.restarted = true;
@@ -641,8 +640,9 @@ impl PitchTracker {
                         self.tracking_cross.copy_within(0..TRACKING_LAGS - 1, 1);
                         let first = self.raw[ring(self.write as i32 - self.base * 2)];
                         let second = self.raw[ring(self.write as i32 - self.base * 2 - 1)];
-                        self.tracking_energy[0] = self.tracking_energy[1]
-                            .wrapping_sub(mul14(first, first).wrapping_add(mul14(second, second)));
+                        self.tracking_energy[0] = self.tracking_energy[1].wrapping_sub(
+                            mul14_bounded(first, first).wrapping_add(mul14_bounded(second, second)),
+                        );
                         self.tracking_cross[0] = self.cross_at(self.base);
                     } else if best > 21 {
                         let next_base = self.base + 1;
@@ -659,23 +659,21 @@ impl PitchTracker {
                             let second = self.raw[ring(self.write as i32 - total * 2 + 1)];
                             self.tracking_energy[TRACKING_LAGS - 1] =
                                 self.tracking_energy[TRACKING_LAGS - 2].wrapping_add(
-                                    mul14(second, second).wrapping_add(mul14(first, first)),
+                                    mul14_bounded(second, second)
+                                        .wrapping_add(mul14_bounded(first, first)),
                                 );
                             self.tracking_cross[TRACKING_LAGS - 1] = self.cross_at(total);
                         }
                     }
                     if !self.detecting {
-                        let y0 = (self.tracking_energy[best - 1] >> 1)
-                            .wrapping_sub(self.tracking_cross[best - 1]);
-                        let y1 = (self.tracking_energy[best] >> 1)
-                            .wrapping_sub(self.tracking_cross[best]);
-                        let y2 = (self.tracking_energy[best + 1] >> 1)
-                            .wrapping_sub(self.tracking_cross[best + 1]);
+                        let y0 = self.tracking_difference(best - 1);
+                        let y1 = self.tracking_difference(best);
+                        let y2 = self.tracking_difference(best + 1);
                         let mut numerator = y0.wrapping_sub(y2) >> 1;
                         let mut denominator = y1.wrapping_mul(-2).wrapping_add(y0).wrapping_add(y2);
                         let abs = numerator.wrapping_abs();
                         if abs > ONE {
-                            let sh0 = 31 - ((abs as u32) >> 14).leading_zeros();
+                            let sh0 = ((abs as u32) >> 14).ilog2();
                             let sh = sh0 + u32::from((numerator >> sh0).wrapping_abs() > ONE);
                             numerator >>= sh;
                             denominator >>= sh;
@@ -701,5 +699,15 @@ impl PitchTracker {
         step.period = self.period;
         step.previous_period = self.previous_period;
         step
+    }
+}
+
+/// Returns the previous frame index in the `HISTORY` ring.
+#[inline]
+fn previous_history(index: usize) -> usize {
+    if index == 0 {
+        HISTORY - 1
+    } else {
+        index - 1
     }
 }
