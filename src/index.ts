@@ -3,9 +3,10 @@
  *
  * Call `loadTunelet()` or `initSync()` before you construct processors or read
  * the default configuration. Both environments use the same generated bindings
- * and the same Wasm binary. This module wraps `Tunelet`, `defaultConfig` and
- * `initSync` with lifecycle checks, and re-exports the configuration,
- * control-activity, event, feedback and telemetry types.
+ * and the same Wasm binary. This module exports `TuneletAudioViews`, wraps
+ * `Tunelet`, `defaultConfig` and `initSync` with lifecycle checks, and
+ * re-exports the configuration, control-activity, event, feedback and
+ * telemetry types.
  */
 import init, {
   Tunelet as WasmTunelet,
@@ -24,6 +25,122 @@ import type {
 } from "../pkg/tunelet.js";
 
 export * from "../pkg/tunelet.js";
+
+/**
+ * Cached `Float32Array` views over the in-place `Tunelet` buffers in Wasm
+ * linear memory.
+ *
+ * Each access to `input`, `left` or `right` checks `memory.buffer`. If Wasm
+ * memory grew and detached the previous `ArrayBuffer`, the helper binds the
+ * three fixed pointers of `processor` to the new buffer. If `memory.buffer` did
+ * not change, the helper returns the cached views with no allocation.
+ *
+ * Read `input` before you write input samples. If an in-place call passes
+ * `events`, read `left` and `right` (or `input` for mono) after that call.
+ * When you call `processor.free()`, also call `dispose()`. Do not use the views
+ * after `processor.free()`.
+ */
+export class TuneletAudioViews {
+  private readonly memory: InitOutput["memory"];
+  private processor: Tunelet | null;
+  /** The fixed frame capacity of `input`, `left` and `right`. */
+  readonly maxBlockFrames: number;
+  private cachedBuffer: ArrayBuffer | null = null;
+  private inputView: Float32Array | null = null;
+  private leftView: Float32Array | null = null;
+  private rightView: Float32Array | null = null;
+
+  /**
+   * Binds `Float32Array` views for `processor` over `memory`.
+   *
+   * @param memory The Wasm memory from `InitOutput["memory"]`.
+   * @param processor The live `Tunelet` instance that owns the buffers.
+   */
+  constructor(memory: InitOutput["memory"], processor: Tunelet) {
+    this.memory = memory;
+    this.processor = processor;
+    this.maxBlockFrames = processor.maxBlockFrames;
+    this.refresh();
+  }
+
+  /** Returns `true` after `dispose()` clears the cached views. */
+  get disposed(): boolean {
+    return this.processor === null;
+  }
+
+  /**
+   * Returns the `Float32Array` view for mono input and in-place mono output.
+   *
+   * If `memory.buffer` changed, this getter refreshes all three views first.
+   */
+  get input(): Float32Array {
+    this.refresh();
+    return this.inputView!;
+  }
+
+  /**
+   * Returns the `Float32Array` view for the left stereo output channel.
+   *
+   * If `memory.buffer` changed, this getter refreshes all three views first.
+   */
+  get left(): Float32Array {
+    this.refresh();
+    return this.leftView!;
+  }
+
+  /**
+   * Returns the `Float32Array` view for the right stereo output channel.
+   *
+   * If `memory.buffer` changed, this getter refreshes all three views first.
+   */
+  get right(): Float32Array {
+    this.refresh();
+    return this.rightView!;
+  }
+
+  /**
+   * If Wasm memory grew, this method refreshes the three `Float32Array` views
+   * from `memory.buffer`.
+   */
+  refresh(): void {
+    const processor = this.processor;
+    if (processor === null) {
+      throw new Error("TuneletAudioViews is disposed");
+    }
+    const buffer = this.memory.buffer;
+    if (this.cachedBuffer !== buffer) {
+      const frames = this.maxBlockFrames;
+      const inputPtr = processor.inputF32Ptr;
+      const leftPtr = processor.leftF32Ptr;
+      const rightPtr = processor.rightF32Ptr;
+      const input = new Float32Array(buffer, inputPtr, frames);
+      const left = new Float32Array(buffer, leftPtr, frames);
+      const right = new Float32Array(buffer, rightPtr, frames);
+      this.inputView = input;
+      this.leftView = left;
+      this.rightView = right;
+      this.cachedBuffer = buffer;
+    }
+  }
+
+  /** Clears the cached `ArrayBuffer`, `Float32Array` views and processor link. */
+  dispose(): void {
+    this.processor = null;
+    this.cachedBuffer = null;
+    this.inputView = null;
+    this.leftView = null;
+    this.rightView = null;
+  }
+}
+
+export interface TuneletAudioViews {
+  [Symbol.dispose](): void;
+}
+
+if (Symbol.dispose) {
+  TuneletAudioViews.prototype[Symbol.dispose] =
+    TuneletAudioViews.prototype.dispose;
+}
 
 /** The shared initialization promise, which a failure clears. */
 let initialization: Promise<InitOutput> | undefined;
@@ -188,7 +305,8 @@ export interface Tunelet {
 }
 
 /**
- * A stateful PCM processor for signed 16-bit mono input.
+ * A stateful vocal processor for mono `Int16Array` PCM and `Float32Array`
+ * audio.
  *
  * Call `loadTunelet()` or `initSync()` before you construct an instance. If
  * you do not need the instance any more, call `free()`. Duplicate `free()`
@@ -220,6 +338,29 @@ export class Tunelet {
     }
     instances.delete(this);
     inner.free();
+  }
+
+  /**
+   * The byte offset in Wasm memory of the `maxBlockFrames` `f32` input buffer.
+   */
+  get inputF32Ptr(): number {
+    return active(this).inputF32Ptr;
+  }
+
+  /**
+   * The byte offset in Wasm memory of the `maxBlockFrames` left `f32` output
+   * buffer.
+   */
+  get leftF32Ptr(): number {
+    return active(this).leftF32Ptr;
+  }
+
+  /**
+   * The byte offset in Wasm memory of the `maxBlockFrames` right `f32` output
+   * buffer.
+   */
+  get rightF32Ptr(): number {
+    return active(this).rightF32Ptr;
   }
 
   /** The sample rate of the input and the output in hertz. */
@@ -262,6 +403,39 @@ export class Tunelet {
     active(this).processMono(audio, events);
   }
 
+  /**
+   * Processes mono `Float32Array` input into left and right `Float32Array`
+   * buffers.
+   */
+  processF32(
+    input: Float32Array,
+    left: Float32Array,
+    right: Float32Array,
+    events?: BlockEvents | null,
+  ): void {
+    active(this).processF32(input, left, right, events);
+  }
+
+  /** Replaces the audio in a mono `Float32Array` with the stereo downmix. */
+  processMonoF32(audio: Float32Array, events?: BlockEvents | null): void {
+    active(this).processMonoF32(audio, events);
+  }
+
+  /**
+   * Processes `frames` samples from `inputF32Ptr` into `leftF32Ptr` and
+   * `rightF32Ptr`.
+   */
+  processF32InPlace(frames: number, events?: BlockEvents | null): void {
+    active(this).processF32InPlace(frames, events);
+  }
+
+  /**
+   * Replaces `frames` samples at `inputF32Ptr` with the mono `f32` downmix.
+   */
+  processMonoF32InPlace(frames: number, events?: BlockEvents | null): void {
+    active(this).processMonoF32InPlace(frames, events);
+  }
+
   /** Starts a finite tail budget and returns its frame count. */
   beginDrain(): number {
     return active(this).beginDrain();
@@ -280,6 +454,36 @@ export class Tunelet {
   /** Renders a mono tail block and returns its frame count. */
   drainMono(audio: Int16Array): number {
     return active(this).drainMono(audio);
+  }
+
+  /**
+   * Renders stereo tail frames into `Float32Array` buffers of equal length.
+   */
+  drainF32(left: Float32Array, right: Float32Array): number {
+    return active(this).drainF32(left, right);
+  }
+
+  /**
+   * Renders a mono `Float32Array` tail block and returns its frame count.
+   */
+  drainMonoF32(audio: Float32Array): number {
+    return active(this).drainMonoF32(audio);
+  }
+
+  /**
+   * Renders up to `frames` stereo tail frames into `leftF32Ptr` and
+   * `rightF32Ptr`.
+   */
+  drainF32InPlace(frames: number): number {
+    return active(this).drainF32InPlace(frames);
+  }
+
+  /**
+   * Renders up to `frames` mono tail frames into `inputF32Ptr` and returns
+   * their count.
+   */
+  drainMonoF32InPlace(frames: number): number {
+    return active(this).drainMonoF32InPlace(frames);
   }
 
   /** Returns a new feedback object and does not clear the peak window. */
