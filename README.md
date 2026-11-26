@@ -617,10 +617,10 @@ To build the crate and check the format, the lints, the documentation and
 the archive, run these commands:
 
 ```sh
-cargo build --locked --release
+cargo rustc --locked --lib --release -- -D warnings
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
-cargo doc --locked --no-deps
+cargo rustdoc --locked --lib -- -D warnings
 cargo package --locked
 ```
 
@@ -630,7 +630,7 @@ these commands:
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo clippy --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
-cargo doc --locked --release --no-deps --target wasm32-unknown-unknown --features wasm
+cargo rustdoc --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
 ```
 
 Native Rust builds and these Wasm checks use Cargo and do not need Node.js
