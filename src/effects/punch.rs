@@ -364,7 +364,7 @@ impl Punch {
         let normalized = ((i64::from(driven.to_bits()) << 20)
             / i64::from(self.ceiling_gain.to_bits()))
         .clamp(-MAX_TANGENT_Q14, MAX_TANGENT_Q14) as i32;
-        let angle = Q14::from_bits(context.atan_q14.process(normalized, 0));
+        let angle = Q14::from_bits(context.atan_q14.process(normalized));
         let shaped: Q28 = TWO_OVER_PI.mul(angle);
         let scaled_bits = i64::from(self.ceiling_gain.mul::<28, 28>(shaped).to_bits());
         let pcm = if scaled_bits >= 0 {
