@@ -176,6 +176,11 @@ The internal Q14 stages use `i64` products and saturate at the `i32`
 limits. Decrease `output_gain` to prevent `-32767..=32767` clipping on
 multi-voice mixes.
 
+`resynthesis.correction.humanize` sets the relaxation on sustained notes, in
+`0..=1`. The default is 0. `resynthesis.correction.flex_tune` sets the outer
+fraction of each half-bin where pull toward the target decreases, in `0..=1`.
+The default is 0, which applies full pull across the whole bin.
+
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
 dry path starts after Warm and has a delay of 1,593 frames. All six reverb
 modes keep the stereo dry signal.
@@ -526,8 +531,10 @@ and show enums as string literals. To change the configuration, do these steps:
 3. Call `setConfig()`.
 
 If a required field is absent or a value is not valid, the call throws a
-JavaScript `Error`. The optional `resynthesis.harmony.voices` field defaults
-to 4 if it is absent or `undefined`. The conversion ignores extra object
+JavaScript `Error`. If an optional field is absent or `undefined`, it gets its
+default. `resynthesis.correction.humanize` and
+`resynthesis.correction.flexTune` default to 0, and
+`resynthesis.harmony.voices` defaults to 4. The conversion ignores extra object
 properties. The generated declarations contain the parameter documentation from
 the Rust types.
 
