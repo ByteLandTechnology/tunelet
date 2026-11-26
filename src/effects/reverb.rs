@@ -113,11 +113,31 @@ impl ReverbConfig {
     /// Returns the first [`Error::InvalidConfig`] with its dotted field path
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("reverb.mix", self.mix, 0.0, 1.0)?;
-        check_range("reverb.diffusion", self.diffusion, 0.0, 1.0)?;
-        check_range("reverb.decay", self.decay, 0.0, 1.0)?;
-        check_range("reverb.brightness_hz", self.brightness_hz, 80.0, 20000.0)
+        validate_mix(self.mix)?;
+        validate_diffusion(self.diffusion)?;
+        validate_decay(self.decay)?;
+        validate_brightness_hz(self.brightness_hz)
     }
+}
+
+/// Checks the range of the wet mix of the reverb.
+pub(crate) fn validate_mix(mix: f32) -> Result<(), Error> {
+    check_range("reverb.mix", mix, 0.0, 1.0)
+}
+
+/// Checks the range of the diffusion control of the reverb.
+pub(crate) fn validate_diffusion(diffusion: f32) -> Result<(), Error> {
+    check_range("reverb.diffusion", diffusion, 0.0, 1.0)
+}
+
+/// Checks the range of the decay control of the reverb.
+pub(crate) fn validate_decay(decay: f32) -> Result<(), Error> {
+    check_range("reverb.decay", decay, 0.0, 1.0)
+}
+
+/// Checks the range of the low-pass cutoff of the reverb.
+pub(crate) fn validate_brightness_hz(brightness_hz: f32) -> Result<(), Error> {
+    check_range("reverb.brightness_hz", brightness_hz, 80.0, 20000.0)
 }
 
 /// The shared Q14 delay network with two low-pass damping filters that keep
@@ -229,26 +249,71 @@ impl Reverb {
             wet_peak: 0,
             dirty: false,
         };
-        result.apply_active_config(config);
+        result.configure_all();
         result
     }
-    /// Quantizes the active controls and updates the damping filter designs.
-    ///
-    /// The f32 multiplication by 100 occurs before the f64 division and the
-    /// quantization. If you combine these expressions, the quantized
-    /// coefficients can change.
-    fn apply_active_config(&mut self, config: ReverbConfig) {
-        self.active_config = config;
-        self.mix = quantize_mix(config.mix);
-        self.diffuse = Q14::from_f64((config.diffusion * 100.0) as f64 / 100.0);
-        self.decay = Q14::from_f64((config.decay * 100.0) as f64 / 105.0);
+    /// Quantizes the wet contribution of `active_config` unconditionally.
+    fn configure_mix(&mut self) {
+        self.mix = quantize_mix(self.active_config.mix);
+    }
+    /// Quantizes the diffusion control and the hall allpass coefficients
+    /// unconditionally.
+    fn configure_diffusion(&mut self) {
+        self.diffuse = Q14::from_f64((self.active_config.diffusion * 100.0) as f64 / 100.0);
         self.hall_diffuse = [0.4, 0.5, 0.6, 0.8, 0.9, 0.95].map(|g| mul(self.diffuse, q14(g)));
-        let brightness = config
+    }
+    /// Quantizes the feedback control unconditionally.
+    fn configure_decay(&mut self) {
+        self.decay = Q14::from_f64((self.active_config.decay * 100.0) as f64 / 105.0);
+    }
+    /// Updates the two low-pass filters unconditionally.
+    fn configure_brightness_hz(&mut self) {
+        let brightness = self
+            .active_config
             .brightness_hz
             .min((self.rate.hz() as f64 * 0.49) as f32);
         let design = Design::low_pass_one_pole(self.rate.hz(), brightness);
         self.lpf1.set_design(design);
         self.lpf2.set_design(design);
+    }
+    /// Initializes all coefficients and filter designs unconditionally.
+    fn configure_all(&mut self) {
+        self.configure_mix();
+        self.configure_diffusion();
+        self.configure_decay();
+        self.configure_brightness_hz();
+    }
+    /// Updates `active_config` and quantizes only the controls that changed.
+    ///
+    /// The f32 multiplication by 100 occurs before the f64 division and the
+    /// quantization. If you combine these expressions, the quantized
+    /// coefficients can change.
+    fn apply_active_config(&mut self, config: ReverbConfig) {
+        let old = self.active_config;
+        self.active_config = config;
+        if old.mix != config.mix {
+            self.configure_mix();
+        }
+        if old.diffusion != config.diffusion {
+            self.configure_diffusion();
+        }
+        if old.decay != config.decay {
+            self.configure_decay();
+        }
+        if old.brightness_hz != config.brightness_hz {
+            self.configure_brightness_hz();
+        }
+    }
+    /// Returns `true` while the reverb network or a transition fade is active.
+    fn is_running(&self) -> bool {
+        self.config.enabled
+            || self.bypass_remaining > 0
+            || self.fading_out_mode
+            || self.enable_fade > Q14::ZERO
+    }
+    /// Returns `true` if scalar updates apply immediately to `active_config`.
+    fn can_update_active(&self) -> bool {
+        !self.fading_out_mode && (self.config.enabled || !self.is_running())
     }
     /// Clears the delay buffer and both damping filters after a transition.
     fn clear_all(&mut self) {
@@ -261,11 +326,13 @@ impl Reverb {
     /// Applies validated controls and starts mode fades or bypass tails when
     /// necessary.
     pub(crate) fn set_config(&mut self, config: ReverbConfig) {
-        let was_running =
-            self.config.enabled || self.bypass_remaining > 0 || self.enable_fade > Q14::ZERO;
+        let was_running = self.is_running();
         let prev_enabled = self.config.enabled;
+        let old_mix = self.config.mix;
         self.config = config;
-        self.target_mix = quantize_mix(config.mix);
+        if old_mix != config.mix {
+            self.target_mix = quantize_mix(config.mix);
+        }
         if !was_running {
             self.apply_active_config(config);
             self.fading_out_mode = false;
@@ -294,7 +361,45 @@ impl Reverb {
             self.bypass_quiet_frames = 0;
             if self.bypass_remaining == 0 {
                 self.clear_all();
+                self.apply_active_config(config);
             }
+        }
+    }
+    /// Stores the wet contribution. If the value changed, quantizes it again.
+    pub(crate) fn set_mix(&mut self, mix: f32) {
+        let changed = self.config.mix != mix;
+        self.config.mix = mix;
+        if changed {
+            self.target_mix = quantize_mix(mix);
+        }
+        if self.can_update_active() && self.active_config.mix != mix {
+            self.active_config.mix = mix;
+            self.configure_mix();
+        }
+    }
+    /// Stores the diffusion control. If the value changed, quantizes it again.
+    pub(crate) fn set_diffusion(&mut self, diffusion: f32) {
+        self.config.diffusion = diffusion;
+        if self.can_update_active() && self.active_config.diffusion != diffusion {
+            self.active_config.diffusion = diffusion;
+            self.configure_diffusion();
+        }
+    }
+    /// Stores the feedback control. If the value changed, quantizes it again.
+    pub(crate) fn set_decay(&mut self, decay: f32) {
+        self.config.decay = decay;
+        if self.can_update_active() && self.active_config.decay != decay {
+            self.active_config.decay = decay;
+            self.configure_decay();
+        }
+    }
+    /// Stores the low-pass cutoff. If the value changed, updates the filter
+    /// designs.
+    pub(crate) fn set_brightness_hz(&mut self, brightness_hz: f32) {
+        self.config.brightness_hz = brightness_hz;
+        if self.can_update_active() && self.active_config.brightness_hz != brightness_hz {
+            self.active_config.brightness_hz = brightness_hz;
+            self.configure_brightness_hz();
         }
     }
     /// Clears the delay contents and transition state, while it keeps the
@@ -571,6 +676,7 @@ impl Reverb {
             if self.bypass_remaining == 0 || self.bypass_quiet_frames >= CAPACITY {
                 self.bypass_remaining = 0;
                 self.clear_all();
+                self.apply_active_config(self.config);
             }
         }
         result
