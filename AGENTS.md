@@ -40,10 +40,10 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 
 - Make the smallest possible change. Do not rename, move or format
   code that is not part of the task.
-- The public API is all items that `src/lib.rs` exports, `src/wasm.rs`
-  and `src/index.ts`. Do not add, change or remove public items if the
-  task does not tell you to. Keep the Rust, Wasm and TypeScript APIs
-  equivalent.
+- The public API is all items that `src/lib.rs` exports, `src/wasm.rs`,
+  `src/index.ts`, `src/browser.ts`, `src/node.ts` and `src/shared.ts`.
+  Do not add, change or remove public items if the task does not tell
+  you to. Keep the Rust, Wasm and TypeScript APIs equivalent.
 - Keep the crate lints in `src/lib.rs`: `#![forbid(unsafe_code)]`,
   `#![deny(missing_docs)]`, `#![deny(rustdoc::broken_intra_doc_links)]`
   and `#![warn(unreachable_pub)]`. Each public item must have rustdoc
@@ -85,7 +85,8 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 - `src/numeric.rs`, `src/numeric/`: the fixed-point functions, the
   random number generator and the lookup tables.
 - `src/wasm.rs`: the wasm-bindgen and tsify bindings (`wasm` feature).
-- `src/index.ts`: the `loadTunelet` entry point. See also `package.json`
+- `src/index.ts`, `src/browser.ts`, `src/node.ts`, `src/shared.ts`: the
+  `loadTunelet` entries and `TuneletAudioViews`. See also `package.json`
   and `tsconfig.json`.
 
 ## Build and verify
@@ -93,7 +94,7 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 Run these Cargo checks in a POSIX shell (`sh`, `bash` or `zsh`):
 
 ```sh
-cargo build --locked --release
+cargo rustc --locked --lib --release -- -D warnings
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
@@ -105,13 +106,12 @@ RUSTDOCFLAGS="-D warnings" cargo doc --locked --release --no-deps --target wasm3
 
 If you run `cargo package --locked` before a commit, add `--allow-dirty`.
 
-In PowerShell on Windows, set `RUSTDOCFLAGS` in the environment before `cargo doc` and `npm run check:wasm`:
+In PowerShell on Windows, set `RUSTDOCFLAGS` in the environment before `cargo doc`:
 
 ```powershell
 $env:RUSTDOCFLAGS = "-D warnings"
 cargo doc --locked --no-deps
 cargo doc --locked --release --no-deps --target wasm32-unknown-unknown --features wasm
-npm run check:wasm
 Remove-Item Env:RUSTDOCFLAGS
 ```
 
@@ -119,13 +119,14 @@ In `cmd.exe` on Windows, use `set "RUSTDOCFLAGS=-D warnings"` before the doc com
 
 If you change the Wasm or TypeScript code, also run these commands.
 `npm run check:wasm` runs Clippy and rustdoc in release mode for
-`wasm32-unknown-unknown`. `npm run build` compiles `src/wasm.rs` and
-`src/index.ts`. `npm run verify:pack` runs `npm run build` one time and
-checks the `tunelet` and `@bytelandtechnology/tunelet` archives:
+`wasm32-unknown-unknown`. `npm run build` compiles `src/wasm.rs`,
+`src/index.ts`, `src/browser.ts`, `src/node.ts` and `src/shared.ts`.
+`npm run verify:pack` runs `npm run build` one time and checks the
+`tunelet` and `@bytelandtechnology/tunelet` archives:
 
 ```sh
 npm ci
-RUSTDOCFLAGS="-D warnings" npm run check:wasm
+npm run check:wasm
 npm run verify:pack
 ```
 
