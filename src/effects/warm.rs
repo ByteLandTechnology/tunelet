@@ -109,6 +109,8 @@ impl WarmConfigPatch {
 /// filter.
 #[derive(Debug)]
 pub(crate) struct Warm {
+    /// The validated controls that set the saturation drive.
+    config: WarmConfig,
     /// The 50 Hz one-pole high-pass output filter.
     filter: Biquad,
     /// The Q28 peak envelope of the input.
@@ -135,6 +137,7 @@ impl Warm {
         let mut filter = Biquad::new();
         filter.set_design(Design::high_pass_one_pole(rate.hz(), 50.0));
         let mut result = Self {
+            config,
             filter,
             peak: Q28::ZERO,
             compression: Q22::ONE,
@@ -144,7 +147,7 @@ impl Warm {
             input_threshold: Q28::from_f64(db_to_gain(-30.0)),
             output_headroom: Q22::from_f64(db_to_gain(30.0)),
         };
-        result.set_config(config);
+        result.configure_drive_db();
         result
     }
     /// Returns the Q22 normalization gain as f32. The stage state does not
@@ -152,11 +155,28 @@ impl Warm {
     pub(crate) fn normalization_gain(&self) -> f32 {
         (self.compression.to_bits() as f64 / f64::from(1u32 << 22)) as f32
     }
-    /// Updates the drive and the output compensation, and keeps the envelope
-    /// and filter state.
+    /// Quantizes the drive and its output compensation unconditionally.
+    fn configure_drive_db(&mut self) {
+        self.drive = Q24::from_f64(db_to_gain(self.config.drive_db as f64));
+        self.output_gain = Q28::from_f64(db_to_gain(-(self.config.drive_db as f64) * 0.35));
+    }
+    /// Stores the configuration. If the drive changed, updates the drive and
+    /// the output compensation, and keeps the envelope and filter state.
     pub(crate) fn set_config(&mut self, config: WarmConfig) {
-        self.drive = Q24::from_f64(db_to_gain(config.drive_db as f64));
-        self.output_gain = Q28::from_f64(db_to_gain(-(config.drive_db as f64) * 0.35));
+        let old = self.config;
+        self.config = config;
+        if old.drive_db != config.drive_db {
+            self.configure_drive_db();
+        }
+    }
+    /// Stores the drive. If the value changed, updates the quantized drive and
+    /// its output compensation.
+    pub(crate) fn set_drive_db(&mut self, drive_db: f32) {
+        let changed = self.config.drive_db != drive_db;
+        self.config.drive_db = drive_db;
+        if changed {
+            self.configure_drive_db();
+        }
     }
     /// Clears the filter memories, the peak envelope and the normalization,
     /// and keeps the coefficients.

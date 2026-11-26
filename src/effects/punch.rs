@@ -210,6 +210,8 @@ impl PunchConfigPatch {
 pub(crate) struct Punch {
     /// The prepared rate, which converts the envelope times to sample counts.
     rate: SampleRate,
+    /// The validated controls that set the quantized coefficients.
+    config: PunchConfig,
     /// The number of frames in the 6 ms peak-hold window at `rate`.
     hold_frames: usize,
     /// The write offset into the leaf half of `hold_tree`.
@@ -241,23 +243,25 @@ impl Punch {
     /// settings.
     pub(crate) fn new(rate: SampleRate, config: PunchConfig) -> Self {
         let hold_frames = (rate.as_u32() as usize * HOLD_MS).div_ceil(1000);
+        let fast_decay = Q30::from_f64(envelope_decay(FAST_RELEASE_MS, rate.hz() as f64, 1));
         let drive_decay = Q30::from_f64(envelope_decay(DRIVE_SMOOTH_MS, rate.hz() as f64, 1));
         let mut result = Self {
             rate,
+            config,
             hold_frames,
             hold_cursor: 0,
             hold_tree: [Q28::ZERO; MAX_HOLD_FRAMES * 2],
             slow: Q28::ZERO,
             fast: Q28::ZERO,
             slow_decay: Q30::ZERO,
-            fast_decay: Q30::ZERO,
+            fast_decay,
             attack_decay: Q30::ZERO,
             drive_decay,
             gain: Q28::ONE,
             ceiling_gain: Q28::ONE,
             drive: BASE_DRIVE,
         };
-        result.set_config(config);
+        result.configure_all();
         result.reset();
         result
     }
@@ -278,21 +282,89 @@ impl Punch {
         let out = ceiling * two_over_pi * (drive * env / ceiling).atan();
         (out / env) as f32
     }
-    /// Calculates the quantized controls again, and keeps the envelopes and
-    /// the current drive.
+    /// Quantizes a per-sample decay half-life in milliseconds.
+    fn decay(&self, milliseconds: f64) -> Q30 {
+        Q30::from_f64(envelope_decay(milliseconds, self.rate.hz() as f64, 1))
+    }
+    /// Updates the release coefficient of the adaptive follower.
+    fn configure_impact(&mut self) {
+        let impact = coefficient_to_exp_value(1.0, 250.0, 5000.0, 1.0 - self.config.impact);
+        self.slow_decay = self.decay(impact as f64);
+    }
+    /// Updates the shared attack coefficient of the two followers.
+    fn configure_attack_ms(&mut self) {
+        self.attack_decay = self.decay(self.config.attack_ms as f64);
+    }
+    /// Updates the quantized input gain.
+    fn configure_gain_db(&mut self) {
+        self.gain = Q28::from_f64(db_to_gain(self.config.gain_db as f64));
+    }
+    /// Updates the quantized output ceiling.
+    fn configure_ceiling_db(&mut self) {
+        self.ceiling_gain =
+            Q28::from_f64(db_to_gain(self.config.ceiling_db as f64)).max(Q28::from_bits(1));
+    }
+    /// Initializes all configurable coefficients unconditionally.
+    fn configure_all(&mut self) {
+        self.configure_impact();
+        self.configure_attack_ms();
+        self.configure_gain_db();
+        self.configure_ceiling_db();
+    }
+    /// Calculates the changed quantized controls again, and keeps the
+    /// envelopes and the current drive.
+    ///
     /// The processor controls the bypass. This stage never reads an enabled
     /// flag.
     pub(crate) fn set_config(&mut self, config: PunchConfig) {
-        let impact = coefficient_to_exp_value(1.0, 250.0, 5000.0, 1.0 - config.impact);
-        let decay = |milliseconds: f64| {
-            Q30::from_f64(envelope_decay(milliseconds, self.rate.hz() as f64, 1))
-        };
-        self.slow_decay = decay(impact as f64);
-        self.fast_decay = decay(FAST_RELEASE_MS);
-        self.attack_decay = decay(config.attack_ms as f64);
-        self.gain = Q28::from_f64(db_to_gain(config.gain_db as f64));
-        self.ceiling_gain =
-            Q28::from_f64(db_to_gain(config.ceiling_db as f64)).max(Q28::from_bits(1));
+        let old = self.config;
+        self.config = config;
+        if old.impact != config.impact {
+            self.configure_impact();
+        }
+        if old.attack_ms != config.attack_ms {
+            self.configure_attack_ms();
+        }
+        if old.gain_db != config.gain_db {
+            self.configure_gain_db();
+        }
+        if old.ceiling_db != config.ceiling_db {
+            self.configure_ceiling_db();
+        }
+    }
+    /// Stores the input gain. If the value changed, quantizes it again.
+    pub(crate) fn set_gain_db(&mut self, gain_db: f32) {
+        let changed = self.config.gain_db != gain_db;
+        self.config.gain_db = gain_db;
+        if changed {
+            self.configure_gain_db();
+        }
+    }
+    /// Stores the transient emphasis. If the value changed, updates the
+    /// release coefficient.
+    pub(crate) fn set_impact(&mut self, impact: f32) {
+        let changed = self.config.impact != impact;
+        self.config.impact = impact;
+        if changed {
+            self.configure_impact();
+        }
+    }
+    /// Stores the output ceiling. If the value changed, quantizes it again.
+    pub(crate) fn set_ceiling_db(&mut self, ceiling_db: f32) {
+        let changed = self.config.ceiling_db != ceiling_db;
+        self.config.ceiling_db = ceiling_db;
+        if changed {
+            self.configure_ceiling_db();
+        }
+    }
+    /// Stores the attack half-life. If the value changed, updates the attack
+    /// coefficient.
+    pub(crate) fn set_attack_ms(&mut self, attack_ms: f32) {
+        let changed = self.config.attack_ms != attack_ms;
+        self.config.attack_ms = attack_ms;
+        if changed {
+            self.configure_attack_ms();
+        }
     }
     /// Clears the peak hold and both envelopes, then sets the drive from the
     /// base drive and the input gain.

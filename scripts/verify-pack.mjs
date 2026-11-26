@@ -322,6 +322,12 @@ function verifyRuntimeImport(consumerDir, packageName) {
       "  assert.equal(processor.config().resynthesis.correction.flexTune, 0);",
       "  assert.equal(processor.config().resynthesis.harmony.voices, 4);",
       "  assert.equal(typeof processor.controlActivity().choirVoices, \"boolean\");",
+      "  const initialTelemetry = processor.telemetry();",
+      "  assert.ok(initialTelemetry.voiceRatios instanceof Float32Array);",
+      "  assert.ok(initialTelemetry.voiceGains instanceof Float32Array);",
+      "  assert.equal(initialTelemetry.voiceRatios.length, initialTelemetry.voiceCount);",
+      "  assert.equal(initialTelemetry.voiced, false);",
+      "  assert.equal(initialTelemetry.targetMidiNote, undefined);",
       "",
       "  const twoVoiceConfig = processor.config();",
       "  twoVoiceConfig.resynthesis.harmony.voices = 2;",
@@ -417,6 +423,14 @@ function verifyRuntimeImport(consumerDir, packageName) {
       "  assert.equal(Math.fround(processor.config().outputGain), Math.fround(0.9));",
       "  assert.equal(Math.fround(processor.config().resynthesis.dryMix), Math.fround(0.2));",
       "  assert.equal(processor.config().resynthesis.randomSeed, 7n);",
+      '  processor.process(input, left, right, [',
+      '    { offset: 0, event: { type: "parameter", value: { type: "dryMix", value: 0.25 } } },',
+      '    { offset: 0, event: { type: "parameter", value: { type: "humanize", value: 0.5 } } },',
+      '    { offset: 0, event: { type: "parameter", value: { type: "flexTune", value: 0.25 } } },',
+      "  ]);",
+      "  assert.equal(processor.config().resynthesis.dryMix, 0.25);",
+      "  assert.equal(processor.config().resynthesis.correction.humanize, 0.5);",
+      "  assert.equal(processor.config().resynthesis.correction.flexTune, 0.25);",
       "} finally {",
       "  processor.free();",
       "}",
@@ -778,6 +792,7 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "  type CorrectionConfigPatch,",
     "  type FormantConfigPatch,",
     "  type HarmonyConfigPatch,",
+    "  type ParameterControl,",
     "  type PitchConfigPatch,",
     "  type ProcessorConfig,",
     "  type ProcessorConfigPatch,",
@@ -786,12 +801,14 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "  type ResynthesisConfigPatch,",
     "  type ReverbConfigPatch,",
     "  type SyncInitInput as RootSyncInitInput,",
+    "  type Telemetry,",
     "  type WarmConfigPatch,",
     `} from ${pkgLiteral};`,
     "import init, {",
     "  initSync as wasmInitSync,",
     "  type InitInput,",
     "  type InitOutput,",
+    "  type ParameterControl as WasmParameterControl,",
     "  type ProcessorConfigPatch as WasmProcessorConfigPatch,",
     "  type SyncInitInput,",
     `} from ${wasmLiteral};`,
@@ -942,6 +959,11 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "  processor.patchConfig(patch);",
     "  processor.patchConfig(emptyUndefinedPatch);",
     "  const activity: ControlActivity = processor.controlActivity();",
+    "  const telemetry: Telemetry = processor.telemetry();",
+    "  const voiceSlices: [Float32Array, Float32Array] = [",
+    "    telemetry.voiceRatios,",
+    "    telemetry.voiceGains,",
+    "  ];",
     "  const views = new TuneletAudioViews(exportsFromRoot.memory, processor);",
     "  const ptrs: [number, number, number] = [",
     "    processor.inputF32Ptr,",
@@ -974,8 +996,15 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "  processor.processMono(input, [",
     '    { offset: 0, event: { type: "resynthesis", value: resynthesisUpdate } },',
     "  ]);",
+    '  const dryMixParameter: ParameterControl & WasmParameterControl = { type: "dryMix", value: 0.25 };',
+    '  const humanizeParameter: ParameterControl & WasmParameterControl = { type: "humanize", value: 0.5 };',
+    '  const flexTuneParameter: ParameterControl & WasmParameterControl = { type: "flexTune", value: 0.25 };',
+    '  const parameterEvent: ControlEvent = { type: "parameter", value: dryMixParameter };',
     "  processor.process(input, left, right, [",
     "    { offset: 0, event: patchEvent },",
+    "    { offset: 0, event: parameterEvent },",
+    '    { offset: 0, event: { type: "parameter", value: humanizeParameter } },',
+    '    { offset: 0, event: { type: "parameter", value: flexTuneParameter } },',
     "  ]);",
     "  processor.beginDrain();",
     "  const drained: number = processor.drain(left, right);",
@@ -986,6 +1015,7 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "  processor.processF32(inputF32, leftF32, rightF32);",
     "  processor.processF32(inputF32, leftF32, rightF32, [",
     '    { offset: 0, event: { type: "outputGain", value: 1 } },',
+    "    { offset: 0, event: parameterEvent },",
     "    { offset: 64, event: patchEvent },",
     "  ]);",
     "  processor.processMonoF32(inputF32);",
@@ -995,6 +1025,7 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "  views.dispose();",
     "  processor.free();",
     "  void activity;",
+    "  void voiceSlices;",
     "  void ptrs;",
     "  void stereoOut;",
     "  void stereoTail;",
@@ -1350,6 +1381,25 @@ function verifyNormalizedJsDoc(consumerDir, packageName) {
   assert.ok(
     controlActivityInterfaceMatch[2].includes("`ReverbConfig.brightnessHz`"),
   );
+
+  const telemetryInterfaceMatch =
+    /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+export interface Telemetry \{([\s\S]*?)\n\}/.exec(
+      dts,
+    );
+  assert.ok(telemetryInterfaceMatch, "Expected Telemetry interface");
+  const telemetryDoc = extractJsDocBlocks(
+    telemetryInterfaceMatch[1],
+  )[0].replace(/\s+/g, " ");
+  assert.ok(telemetryDoc.includes("`Tunelet.telemetry`"));
+  assert.ok(telemetryDoc.includes("`Tunelet.takeTelemetry`"));
+  assert.ok(!telemetryDoc.includes("`Default`"));
+  assert.ok(telemetryInterfaceMatch[2].includes("`Feedback.resampleRatio`"));
+  assert.ok(telemetryInterfaceMatch[2].includes("`Feedback.periodSamples`"));
+  assert.ok(telemetryInterfaceMatch[2].includes("`Feedback.frequencyHz`"));
+  assert.ok(telemetryInterfaceMatch[2].includes("`Feedback.targetMidiNote`"));
+  assert.ok(telemetryInterfaceMatch[2].includes("`periodSamples`"));
+  assert.ok(telemetryInterfaceMatch[2].includes("voiceRatios: Float32Array;"));
+  assert.ok(telemetryInterfaceMatch[2].includes("voiceGains: Float32Array;"));
 
   const latencyDoc = extractMemberJsDoc(
     dts,

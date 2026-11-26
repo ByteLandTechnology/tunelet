@@ -749,9 +749,48 @@ impl HarmonyState {
         if old.portamento_ms != config.portamento_ms {
             self.prepare_portamento();
         }
-        if old != config {
+        if old.source != config.source
+            || old.key != config.key
+            || old.scale != config.scale
+            || old.chord != config.chord
+            || old.degree != config.degree
+            || old.inversion != config.inversion
+            || old.register_percent != config.register_percent
+            || old.voicing_spread_percent != config.voicing_spread_percent
+        {
             self.setup_chord();
         }
+    }
+    /// Stores the chord register. If the value changed, prepares the chord
+    /// again.
+    pub(crate) fn set_register_percent(&mut self, register_percent: f32) {
+        let changed = self.config.register_percent != register_percent;
+        self.config.register_percent = register_percent;
+        if changed {
+            self.setup_chord();
+        }
+    }
+    /// Stores the chord spread. If the value changed, prepares the chord
+    /// again.
+    pub(crate) fn set_voicing_spread_percent(&mut self, voicing_spread_percent: f32) {
+        let changed = self.config.voicing_spread_percent != voicing_spread_percent;
+        self.config.voicing_spread_percent = voicing_spread_percent;
+        if changed {
+            self.setup_chord();
+        }
+    }
+    /// Stores the portamento half-life. If the value changed, prepares the
+    /// portamento coefficient again.
+    pub(crate) fn set_portamento_ms(&mut self, portamento_ms: f32) {
+        let changed = self.config.portamento_ms != portamento_ms;
+        self.config.portamento_ms = portamento_ms;
+        if changed {
+            self.prepare_portamento();
+        }
+    }
+    /// Stores the count of interval voices.
+    pub(crate) fn set_voices(&mut self, voices: u8) {
+        self.config.voices = voices;
     }
     /// Releases all MIDI notes and starts the MIDI assignment order again.
     ///
