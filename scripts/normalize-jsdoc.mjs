@@ -86,6 +86,11 @@ const EXACT_REPLACEMENTS = [
   ["[`HarmonyScale`]", "`HarmonyScale`"],
   ["[`Feedback`]", "`Feedback`"],
   ["[`HarmonyConfig`]", "`HarmonyConfig`"],
+  [
+    "[`ControlEvent::Parameter`]",
+    '`{ type: "parameter", value }` in `ControlEvent`',
+  ],
+  ["[`Self::Parameter`]", '`{ type: "parameter", value }`'],
   ["[`Self::I`]", '`"i"`'],
   ["[`Self::Echo`]", '`"echo"`'],
   ["[`ReverbMode::Echo`]", '`"echo"`'],

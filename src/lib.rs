@@ -140,7 +140,7 @@ pub use effects::punch::PunchConfig;
 pub use effects::reverb::{ReverbConfig, ReverbMode};
 pub use effects::warm::WarmConfig;
 pub use error::{ConfigProblem, Error, EventProblem};
-pub use events::{ControlEvent, TimedEvent};
+pub use events::{ControlEvent, ParameterControl, TimedEvent};
 pub use formant::FormantConfig;
 pub use harmony::{
     ChordDegree, ChordName, HarmonyConfig, HarmonyScale, HarmonySource, Inversion, HARMONY_VOICES,

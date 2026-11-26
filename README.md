@@ -259,22 +259,67 @@ These rules apply to the offsets:
 - An offset must not be less than the offset before it.
 
 Events with equal offsets execute in slice order. An empty block accepts no
-events. A stage event replaces all settings of that stage. To change one
-field, start from `processor.config()`.
+events. A stage event replaces all settings of that stage. To change one scalar
+field without a stage copy, use `ControlEvent::Parameter` with a
+`ParameterControl` variant. For fields that are not scalar parameters, start
+from `processor.config()`.
 
 Harmony MIDI uses `ControlEvent::Midi`. MIDI for the correction keyboard uses
-`ControlEvent::CorrectionMidi`. For example, this event starts a harmony note
-at frame 256:
+`ControlEvent::CorrectionMidi`. For example, these events change the resynthesis
+dry mix at frame 0 and start a harmony note at frame 256:
 
 ```rust
-use tunelet::{ControlEvent, MidiEvent, TimedEvent};
+use tunelet::{ControlEvent, MidiEvent, ParameterControl, TimedEvent};
 
-let events = [TimedEvent {
-    offset: 256,
-    event: ControlEvent::Midi(MidiEvent::NoteOn { channel: 0, note: 64, velocity: 100 }),
-}];
+let events = [
+    TimedEvent {
+        offset: 0,
+        event: ControlEvent::Parameter(ParameterControl::DryMix(0.25)),
+    },
+    TimedEvent {
+        offset: 256,
+        event: ControlEvent::Midi(MidiEvent::NoteOn { channel: 0, note: 64, velocity: 100 }),
+    },
+];
 processor.process(&input, &mut output, &events)?;
 ```
+
+### Scalar parameters
+
+`ControlEvent::Parameter` accepts these `ParameterControl` variants. All ranges
+are inclusive, and `f32` values must be finite.
+
+| Variant                       | TypeScript `type`               | Configuration field                     | Range             |
+| ----------------------------- | ------------------------------- | --------------------------------------- | ----------------- |
+| `PunchGainDb`                 | `"punchGainDb"`                 | `punch.gain_db`                         | `-96..=12` dB     |
+| `PunchImpact`                 | `"punchImpact"`                 | `punch.impact`                          | `0..=1`           |
+| `PunchCeilingDb`              | `"punchCeilingDb"`              | `punch.ceiling_db`                      | `-96..=0` dBFS    |
+| `PunchAttackMs`               | `"punchAttackMs"`               | `punch.attack_ms`                       | `0.01..=5000` ms  |
+| `WarmDriveDb`                 | `"warmDriveDb"`                 | `warm.drive_db`                         | `0..=6` dB        |
+| `PitchThreshold`              | `"pitchThreshold"`              | `resynthesis.pitch.threshold`           | `0.002..=0.2`     |
+| `RetuneMs`                    | `"retuneMs"`                    | `resynthesis.correction.retune_ms`      | `0..=400` ms      |
+| `Humanize`                    | `"humanize"`                    | `resynthesis.correction.humanize`       | `0..=1`           |
+| `FlexTune`                    | `"flexTune"`                    | `resynthesis.correction.flex_tune`      | `0..=1`           |
+| `PitchRatio`                  | `"pitchRatio"`                  | `resynthesis.pitch_ratio`               | `0.25..=4`        |
+| `FormantWidth`                | `"formantWidth"`                | `resynthesis.formant.width`             | `0.5..=2`         |
+| `FormantStretch`              | `"formantStretch"`              | `resynthesis.formant.stretch`           | `0.5..=2`         |
+| `FormantAspirationMix`        | `"formantAspirationMix"`        | `resynthesis.formant.aspiration_mix`    | `0..=1`           |
+| `FormantAspirationCutoffHz`   | `"formantAspirationCutoffHz"`   | `resynthesis.formant.aspiration_cutoff_hz` | `500..=10000` Hz |
+| `ChoirVoices`                 | `"choirVoices"`                 | `resynthesis.choir_voices`              | `1..=16`          |
+| `ChoirDetune`                 | `"choirDetune"`                 | `resynthesis.choir_detune`              | `10..=100`        |
+| `ChoirDelay`                  | `"choirDelay"`                  | `resynthesis.choir_delay`               | `20..=200`        |
+| `ChoirSpreadPercent`          | `"choirSpreadPercent"`          | `resynthesis.choir_spread_percent`      | `0..=100`%        |
+| `HarmonyRegisterPercent`      | `"harmonyRegisterPercent"`      | `resynthesis.harmony.register_percent`  | `0..=100`%        |
+| `HarmonyVoicingSpreadPercent` | `"harmonyVoicingSpreadPercent"` | `resynthesis.harmony.voicing_spread_percent` | `0..=100`%   |
+| `HarmonyPortamentoMs`         | `"harmonyPortamentoMs"`         | `resynthesis.harmony.portamento_ms`     | `0..=10000` ms    |
+| `HarmonyVoices`               | `"harmonyVoices"`               | `resynthesis.harmony.voices`            | `0..=4`           |
+| `HarmonyGain`                 | `"harmonyGain"`                 | `resynthesis.harmony_gain`              | `0..=1`           |
+| `HarmonicModulation`          | `"harmonicModulation"`          | `resynthesis.harmonic_modulation`       | `0..=24`          |
+| `DryMix`                      | `"dryMix"`                      | `resynthesis.dry_mix`                   | `0..=1`           |
+| `ReverbMix`                   | `"reverbMix"`                   | `reverb.mix`                            | `0..=1`           |
+| `ReverbDiffusion`             | `"reverbDiffusion"`             | `reverb.diffusion`                      | `0..=1`           |
+| `ReverbDecay`                 | `"reverbDecay"`                 | `reverb.decay`                          | `0..=1`           |
+| `ReverbBrightnessHz`          | `"reverbBrightnessHz"`          | `reverb.brightness_hz`                  | `80..=20000` Hz   |
 
 ## Lifecycle
 
@@ -552,6 +597,12 @@ example, this event changes the final gain before the first frame:
 
 ```ts
 { offset: 0, event: { type: "outputGain", value: 0.5 } }
+```
+
+A scalar parameter event nests a `ParameterControl` object:
+
+```ts
+{ offset: 0, event: { type: "parameter", value: { type: "dryMix", value: 0.25 } } }
 ```
 
 A harmony Note On event has this form:

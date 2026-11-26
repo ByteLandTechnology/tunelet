@@ -25,10 +25,11 @@
 //! - The optional harmony `voices` field defaults to 4.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
-//! `{ type, value }`, and the reset control has no `value`. MIDI messages use
-//! `{ type, channel, note, velocity }`, with the fields that apply to the
-//! selected variant. The TypeScript declarations come from the same Rust types
-//! that validation uses.
+//! `{ type, value }`, and the reset control has no `value`. Scalar parameter
+//! events nest `{ type, value }` inside `{ type: "parameter", value }`. MIDI
+//! messages use `{ type, channel, note, velocity }`, with the fields that
+//! apply to the selected variant. The TypeScript declarations come from the
+//! same Rust types that validation uses.
 //!
 //! The class allocates the PCM storage at construction and uses it again for
 //! each block. It also keeps an event buffer and uses that capacity again
@@ -51,8 +52,8 @@
 use crate::events::ValidatedEvents;
 use crate::processor::EnvelopeKey;
 use crate::{
-    ControlActivity, ControlEvent, Error, Feedback, MidiEvent, PrepareConfig, Processor,
-    ProcessorConfig, SampleRate, Telemetry, TimedEvent,
+    ControlActivity, ControlEvent, Error, Feedback, MidiEvent, ParameterControl, PrepareConfig,
+    Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
 };
 use js_sys::{Array, Float32Array, Int16Array, Object, Reflect};
 use serde::{Deserialize, Serialize};
@@ -323,7 +324,9 @@ impl WasmProcessor {
         Error::check_length(frames, right.length() as usize)?;
         self.processor.check_block(frames)?;
         let events = match events {
-            Some(events) => decode_events(&mut self.events, events, frames)?,
+            Some(events) => {
+                decode_events(&mut self.events, events, frames, self.processor.config())?
+            }
             None => &[],
         };
         input.copy_to(&mut self.input[..frames]);
@@ -357,7 +360,9 @@ impl WasmProcessor {
         let frames = audio.length() as usize;
         self.processor.check_block(frames)?;
         let events = match events {
-            Some(events) => decode_events(&mut self.events, events, frames)?,
+            Some(events) => {
+                decode_events(&mut self.events, events, frames, self.processor.config())?
+            }
             None => &[],
         };
         audio.copy_to(&mut self.input[..frames]);
@@ -396,7 +401,9 @@ impl WasmProcessor {
         Error::check_length(frames, right.length() as usize)?;
         self.processor.check_block(frames)?;
         let events = match events {
-            Some(events) => decode_events(&mut self.events, events, frames)?,
+            Some(events) => {
+                decode_events(&mut self.events, events, frames, self.processor.config())?
+            }
             None => &[],
         };
         input.copy_to(&mut self.input_f32[..frames]);
@@ -431,7 +438,9 @@ impl WasmProcessor {
         let frames = audio.length() as usize;
         self.processor.check_block(frames)?;
         let events = match events {
-            Some(events) => decode_events(&mut self.events, events, frames)?,
+            Some(events) => {
+                decode_events(&mut self.events, events, frames, self.processor.config())?
+            }
             None => &[],
         };
         audio.copy_to(&mut self.input_f32[..frames]);
@@ -462,7 +471,9 @@ impl WasmProcessor {
     ) -> Result<(), JsError> {
         let frames = self.check_frames(frames)?;
         let events = match events {
-            Some(events) => decode_events(&mut self.events, events, frames)?,
+            Some(events) => {
+                decode_events(&mut self.events, events, frames, self.processor.config())?
+            }
             None => &[],
         };
         self.processor.process_planar_f32(
@@ -494,7 +505,9 @@ impl WasmProcessor {
     ) -> Result<(), JsError> {
         let frames = self.check_frames(frames)?;
         let events = match events {
-            Some(events) => decode_events(&mut self.events, events, frames)?,
+            Some(events) => {
+                decode_events(&mut self.events, events, frames, self.processor.config())?
+            }
             None => &[],
         };
         self.processor
@@ -815,6 +828,24 @@ impl WasmProcessor {
     }
 }
 
+/// One cached `ParameterControl` discriminant and its constructor.
+struct ParameterKey<T> {
+    name: JsValue,
+    field: &'static str,
+    make: fn(T) -> ParameterControl,
+}
+
+impl<T> ParameterKey<T> {
+    /// Allocates one cached discriminant key and stores its constructor.
+    fn new(name: &'static str, field: &'static str, make: fn(T) -> ParameterControl) -> Self {
+        Self {
+            name: JsValue::from_str(name),
+            field,
+            make,
+        }
+    }
+}
+
 /// The cached property keys and variant names for JavaScript events.
 struct EventKeys {
     offset: JsValue,
@@ -827,6 +858,7 @@ struct EventKeys {
     midi: JsValue,
     correction_midi: JsValue,
     output_gain: JsValue,
+    parameter: JsValue,
     reset: JsValue,
     configure: JsValue,
     resynthesis: JsValue,
@@ -837,6 +869,8 @@ struct EventKeys {
     note_on: JsValue,
     note_off: JsValue,
     all_notes_off: JsValue,
+    f32_parameters: [ParameterKey<f32>; 27],
+    u8_parameters: [ParameterKey<u8>; 2],
 }
 
 impl EventKeys {
@@ -853,6 +887,7 @@ impl EventKeys {
             midi: JsValue::from_str("midi"),
             correction_midi: JsValue::from_str("correctionMidi"),
             output_gain: JsValue::from_str("outputGain"),
+            parameter: JsValue::from_str("parameter"),
             reset: JsValue::from_str("reset"),
             configure: JsValue::from_str("configure"),
             resynthesis: JsValue::from_str("resynthesis"),
@@ -863,6 +898,135 @@ impl EventKeys {
             note_on: JsValue::from_str("noteOn"),
             note_off: JsValue::from_str("noteOff"),
             all_notes_off: JsValue::from_str("allNotesOff"),
+            f32_parameters: [
+                ParameterKey::new(
+                    "punchGainDb",
+                    "punchGainDb value",
+                    ParameterControl::PunchGainDb,
+                ),
+                ParameterKey::new(
+                    "punchImpact",
+                    "punchImpact value",
+                    ParameterControl::PunchImpact,
+                ),
+                ParameterKey::new(
+                    "punchCeilingDb",
+                    "punchCeilingDb value",
+                    ParameterControl::PunchCeilingDb,
+                ),
+                ParameterKey::new(
+                    "punchAttackMs",
+                    "punchAttackMs value",
+                    ParameterControl::PunchAttackMs,
+                ),
+                ParameterKey::new(
+                    "warmDriveDb",
+                    "warmDriveDb value",
+                    ParameterControl::WarmDriveDb,
+                ),
+                ParameterKey::new(
+                    "pitchThreshold",
+                    "pitchThreshold value",
+                    ParameterControl::PitchThreshold,
+                ),
+                ParameterKey::new("retuneMs", "retuneMs value", ParameterControl::RetuneMs),
+                ParameterKey::new("humanize", "humanize value", ParameterControl::Humanize),
+                ParameterKey::new("flexTune", "flexTune value", ParameterControl::FlexTune),
+                ParameterKey::new(
+                    "pitchRatio",
+                    "pitchRatio value",
+                    ParameterControl::PitchRatio,
+                ),
+                ParameterKey::new(
+                    "formantWidth",
+                    "formantWidth value",
+                    ParameterControl::FormantWidth,
+                ),
+                ParameterKey::new(
+                    "formantStretch",
+                    "formantStretch value",
+                    ParameterControl::FormantStretch,
+                ),
+                ParameterKey::new(
+                    "formantAspirationMix",
+                    "formantAspirationMix value",
+                    ParameterControl::FormantAspirationMix,
+                ),
+                ParameterKey::new(
+                    "formantAspirationCutoffHz",
+                    "formantAspirationCutoffHz value",
+                    ParameterControl::FormantAspirationCutoffHz,
+                ),
+                ParameterKey::new(
+                    "choirDetune",
+                    "choirDetune value",
+                    ParameterControl::ChoirDetune,
+                ),
+                ParameterKey::new(
+                    "choirDelay",
+                    "choirDelay value",
+                    ParameterControl::ChoirDelay,
+                ),
+                ParameterKey::new(
+                    "choirSpreadPercent",
+                    "choirSpreadPercent value",
+                    ParameterControl::ChoirSpreadPercent,
+                ),
+                ParameterKey::new(
+                    "harmonyRegisterPercent",
+                    "harmonyRegisterPercent value",
+                    ParameterControl::HarmonyRegisterPercent,
+                ),
+                ParameterKey::new(
+                    "harmonyVoicingSpreadPercent",
+                    "harmonyVoicingSpreadPercent value",
+                    ParameterControl::HarmonyVoicingSpreadPercent,
+                ),
+                ParameterKey::new(
+                    "harmonyPortamentoMs",
+                    "harmonyPortamentoMs value",
+                    ParameterControl::HarmonyPortamentoMs,
+                ),
+                ParameterKey::new(
+                    "harmonyGain",
+                    "harmonyGain value",
+                    ParameterControl::HarmonyGain,
+                ),
+                ParameterKey::new(
+                    "harmonicModulation",
+                    "harmonicModulation value",
+                    ParameterControl::HarmonicModulation,
+                ),
+                ParameterKey::new("dryMix", "dryMix value", ParameterControl::DryMix),
+                ParameterKey::new("reverbMix", "reverbMix value", ParameterControl::ReverbMix),
+                ParameterKey::new(
+                    "reverbDiffusion",
+                    "reverbDiffusion value",
+                    ParameterControl::ReverbDiffusion,
+                ),
+                ParameterKey::new(
+                    "reverbDecay",
+                    "reverbDecay value",
+                    ParameterControl::ReverbDecay,
+                ),
+                ParameterKey::new(
+                    "reverbBrightnessHz",
+                    "reverbBrightnessHz value",
+                    ParameterControl::ReverbBrightnessHz,
+                ),
+            ],
+            u8_parameters: [
+                ParameterKey::new(
+                    "choirVoices",
+                    "choirVoices value",
+                    ParameterControl::ChoirVoices,
+                ),
+                ParameterKey::new(
+                    "harmonyVoices",
+                    "harmonyVoices value",
+                    ParameterControl::HarmonyVoices,
+                ),
+            ],
         }
     }
 }
@@ -880,6 +1044,7 @@ fn decode_events(
     buffer: &mut Vec<TimedEvent>,
     events: Ts<BlockEvents>,
     frames: usize,
+    config: ProcessorConfig,
 ) -> Result<&[TimedEvent], JsError> {
     let value = JsValue::from(events);
     let Some(array) = value.dyn_ref::<Array>() else {
@@ -896,7 +1061,7 @@ fn decode_events(
             Ok(())
         })?;
     }
-    ValidatedEvents::new(buffer, frames)?;
+    ValidatedEvents::new(buffer, frames, config)?;
     Ok(buffer)
 }
 
@@ -920,10 +1085,15 @@ fn decode_control_event(event: &JsValue, keys: &EventKeys) -> Result<ControlEven
         )?))
     } else if kind == keys.output_gain {
         let value = get_property(event, &keys.value)?;
-        let Some(gain) = value.as_f64() else {
-            return Err(JsError::new("outputGain value must be a number"));
-        };
-        Ok(ControlEvent::OutputGain(gain as f32))
+        Ok(ControlEvent::OutputGain(decode_f32(
+            &value,
+            "outputGain value",
+        )?))
+    } else if kind == keys.parameter {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Parameter(decode_parameter_control(
+            &value, keys,
+        )?))
     } else if kind == keys.reset {
         let value = get_property(event, &keys.value)?;
         if !value.is_undefined() && !value.is_null() {
@@ -980,6 +1150,27 @@ fn decode_midi_event(value: &JsValue, keys: &EventKeys) -> Result<MidiEvent, JsE
     }
 }
 
+/// Decodes one `ParameterControl` object from its cached discriminant.
+fn decode_parameter_control(
+    value: &JsValue,
+    keys: &EventKeys,
+) -> Result<ParameterControl, JsError> {
+    let kind = get_property(value, &keys.kind)?;
+    for entry in &keys.f32_parameters {
+        if kind == entry.name {
+            let raw = get_property(value, &keys.value)?;
+            return Ok((entry.make)(decode_f32(&raw, entry.field)?));
+        }
+    }
+    for entry in &keys.u8_parameters {
+        if kind == entry.name {
+            let raw = get_property(value, &keys.value)?;
+            return Ok((entry.make)(decode_u8(&raw, entry.field)?));
+        }
+    }
+    Err(JsError::new("parameter event type is absent or unknown"))
+}
+
 /// Reads a property from a JavaScript object and converts any exception.
 fn get_property(target: &JsValue, key: &JsValue) -> Result<JsValue, JsError> {
     Reflect::get(target, key).map_err(|err| match err.dyn_ref::<js_sys::Error>() {
@@ -1001,6 +1192,14 @@ fn decode_offset(value: &JsValue) -> Result<usize, JsError> {
         ));
     }
     Ok(number as usize)
+}
+
+/// Converts a JavaScript number into an `f32` scalar.
+fn decode_f32(value: &JsValue, field: &str) -> Result<f32, JsError> {
+    let Some(number) = value.as_f64() else {
+        return Err(JsError::new(&format!("{field} must be a number")));
+    };
+    Ok(number as f32)
 }
 
 /// Converts a JavaScript number into a `u8` integer.
