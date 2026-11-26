@@ -9,16 +9,19 @@
 //! wasm-pack can do the two steps in one command. The npm entry point uses
 //! `loadTunelet()` to initialize these bindings in browsers and in Node.js.
 //!
-//! The exported `Tunelet` class owns a native [`Processor`] and three reusable
-//! PCM buffers. JavaScript gives the `Int16Array` input and output buffers. The
-//! PCM API does not give buffer pointers or long-lived memory views to
-//! JavaScript. The class copies the input before it writes the output.
+//! The exported `Tunelet` class owns a native [`Processor`], three reusable
+//! `i16` PCM buffers and three fixed-capacity `f32` buffers. JavaScript can
+//! pass `Int16Array` or `Float32Array` buffers, which the class copies in and
+//! out on each call. JavaScript can also read `inputF32Ptr`, `leftF32Ptr` and
+//! `rightF32Ptr` to process `Float32Array` views over Wasm linear memory in
+//! place.
 //!
 //! Configuration objects obey these rules:
 //!
 //! - Field names use camelCase.
 //! - Enum values are strings.
 //! - Each object must contain all required fields.
+//! - The optional correction `humanize` and `flexTune` fields default to 0.
 //! - The optional harmony `voices` field defaults to 4.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
@@ -38,10 +41,12 @@
 //! - The buffers of the formant envelopes.
 //! - Errors.
 //!
-//! The JavaScript glue can also make temporary views when it copies data. This
-//! generic binding does not guarantee an AudioWorklet callback that is free of
-//! allocation. If you do not need a processor any more, call the generated
-//! `free()` method.
+//! When the JavaScript glue copies `Int16Array` or `Float32Array` arguments,
+//! it makes temporary views. By contrast, in-place `Float32` calls without
+//! events do not allocate or call JavaScript imports. If Wasm memory grows,
+//! previous `ArrayBuffer` views detach, so recheck `memory.buffer` before you
+//! read or write views. If you do not need a processor any more, call `free()`
+//! and do not touch its views again.
 
 use crate::events::ValidatedEvents;
 use crate::processor::EnvelopeKey;
@@ -74,26 +79,36 @@ pub struct BlockEvents(Vec<TimedEvent>);
 ///
 /// # Errors
 ///
-/// If the conversion to a JavaScript object fails, this function returns a
+/// If the conversion to a JavaScript object fails, this function throws a
 /// JavaScript `Error`.
 #[wasm_bindgen(js_name = defaultConfig)]
 pub fn default_config() -> Result<Ts<ProcessorConfig>, JsError> {
     Ok(ProcessorConfig::default().into_ts()?)
 }
 
-/// A stateful PCM processor that JavaScript uses as the `Tunelet` class.
+/// A stateful vocal processor that JavaScript uses as the `Tunelet` class.
 ///
-/// The input is signed 16-bit mono PCM. The output is planar stereo or an
-/// in-place mono downmix. The quantization, latency and configuration behavior
-/// are the same as in the native processor. Buffer lengths count frames, not
-/// bytes.
+/// The input is mono `Int16Array` PCM or mono `Float32Array` audio. The output
+/// is planar stereo or an in-place mono downmix. The quantization, the output
+/// scale, the latency and the configuration behavior match [`Processor`].
+/// Buffer lengths and frame arguments count frames, not bytes.
 ///
-/// These rules apply to the buffers:
+/// These rules apply to `Int16Array` and `Float32Array` buffer arguments:
 ///
 /// - Separate stereo output arrays must not overlap.
 /// - The input can overlap an output, because the class copies the input
 ///   first.
 /// - All buffers must stay attached until each call is complete.
+///
+/// These rules apply to in-place `Float32` calls:
+///
+/// - `inputF32Ptr`, `leftF32Ptr` and `rightF32Ptr` are fixed byte offsets for
+///   `maxBlockFrames` `f32` samples until `free()`.
+/// - `Float32Array` buffer calls and in-place `Float32` calls share those
+///   three `f32` buffers.
+/// - Check `memory.buffer` before input writes and after calls that pass
+///   `events`, because Wasm memory growth detaches old views.
+/// - Do not read or write the views of an instance after `free()`.
 ///
 /// If a call that processes audio fails, it throws a JavaScript `Error` before
 /// the audio state or the output changes. The class rejects malformed
@@ -114,6 +129,12 @@ pub struct WasmProcessor {
     /// The reusable PCM buffer for the right channel, which the class copies to
     /// the caller only after a successful call.
     right: Vec<i16>,
+    /// The fixed-capacity `f32` buffer for mono input and in-place mono output.
+    input_f32: Vec<f32>,
+    /// The fixed-capacity `f32` buffer for the left stereo output channel.
+    left_f32: Vec<f32>,
+    /// The fixed-capacity `f32` buffer for the right stereo output channel.
+    right_f32: Vec<f32>,
     /// The reusable buffers for the two formant envelopes. They become longer
     /// when a call needs more points, and they do not become shorter.
     envelope_input: Vec<f32>,
@@ -181,11 +202,42 @@ impl WasmProcessor {
             input: pcm_buffer(max_block_frames)?,
             left: pcm_buffer(max_block_frames)?,
             right: pcm_buffer(max_block_frames)?,
+            input_f32: f32_buffer(max_block_frames)?,
+            left_f32: f32_buffer(max_block_frames)?,
+            right_f32: f32_buffer(max_block_frames)?,
             envelope_input: Vec::new(),
             envelope_output: Vec::new(),
             envelope_cache: None,
             events: Vec::new(),
         })
+    }
+
+    /// The byte offset in Wasm memory of the `maxBlockFrames` `f32` input
+    /// buffer.
+    ///
+    /// Mono in-place calls also write their output to this buffer. This offset
+    /// stays constant until `free()`.
+    #[wasm_bindgen(getter, js_name = inputF32Ptr)]
+    pub fn input_f32_ptr(&self) -> usize {
+        self.input_f32.as_ptr() as usize
+    }
+
+    /// The byte offset in Wasm memory of the `maxBlockFrames` left `f32`
+    /// output buffer.
+    ///
+    /// This offset stays constant until `free()`.
+    #[wasm_bindgen(getter, js_name = leftF32Ptr)]
+    pub fn left_f32_ptr(&self) -> usize {
+        self.left_f32.as_ptr() as usize
+    }
+
+    /// The byte offset in Wasm memory of the `maxBlockFrames` right `f32`
+    /// output buffer.
+    ///
+    /// This offset stays constant until `free()`.
+    #[wasm_bindgen(getter, js_name = rightF32Ptr)]
+    pub fn right_f32_ptr(&self) -> usize {
+        self.right_f32.as_ptr() as usize
     }
 
     /// The sample rate of the input and the output in hertz.
@@ -314,11 +366,147 @@ impl WasmProcessor {
         Ok(())
     }
 
+    /// Processes mono `Float32Array` input into left and right `Float32Array`
+    /// buffers of equal length.
+    ///
+    /// For each input sample, `NaN` becomes `0`, and other values clamp to
+    /// `-1..=1`, multiply by `32767` and round to `-32767..=32767`. Each
+    /// clipped stereo sample divides by `32768`, so each output value is in
+    /// `-32767 / 32768..=32767 / 32768`. Events, empty blocks, drain
+    /// cancellation and buffer reuse obey the same rules as in `process`.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if the channel lengths are not equal. It also throws
+    /// if the block is larger than `maxBlockFrames` or an event is not valid.
+    /// The call checks the lengths and the block size before it decodes and
+    /// validates the events. If an error occurs, the output buffers and the DSP
+    /// state do not change.
+    #[wasm_bindgen(js_name = processF32)]
+    pub fn process_f32(
+        &mut self,
+        input: &Float32Array,
+        left: &Float32Array,
+        right: &Float32Array,
+        events: Option<Ts<BlockEvents>>,
+    ) -> Result<(), JsError> {
+        let frames = input.length() as usize;
+        Error::check_length(frames, left.length() as usize)?;
+        Error::check_length(frames, right.length() as usize)?;
+        self.processor.check_block(frames)?;
+        let events = match events {
+            Some(events) => decode_events(&mut self.events, events, frames)?,
+            None => &[],
+        };
+        input.copy_to(&mut self.input_f32[..frames]);
+        self.processor.process_planar_f32(
+            &self.input_f32[..frames],
+            &mut self.left_f32[..frames],
+            &mut self.right_f32[..frames],
+            events,
+        )?;
+        left.copy_from(&self.left_f32[..frames]);
+        right.copy_from(&self.right_f32[..frames]);
+        Ok(())
+    }
+
+    /// Replaces the audio in a mono `Float32Array` with the stereo downmix.
+    ///
+    /// Input quantization, `1 / 32768` output division, events and drain
+    /// cancellation are the same as for `processF32`. Peak feedback and
+    /// telemetry measure the mono signal after the downmix, as in the native
+    /// processor.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if the block is too large or an event is not valid.
+    /// It throws before the audio of the caller or the DSP state changes.
+    #[wasm_bindgen(js_name = processMonoF32)]
+    pub fn process_mono_f32(
+        &mut self,
+        audio: &Float32Array,
+        events: Option<Ts<BlockEvents>>,
+    ) -> Result<(), JsError> {
+        let frames = audio.length() as usize;
+        self.processor.check_block(frames)?;
+        let events = match events {
+            Some(events) => decode_events(&mut self.events, events, frames)?,
+            None => &[],
+        };
+        audio.copy_to(&mut self.input_f32[..frames]);
+        self.processor
+            .process_mono_in_place_f32(&mut self.input_f32[..frames], events)?;
+        audio.copy_from(&self.input_f32[..frames]);
+        Ok(())
+    }
+
+    /// Processes `frames` samples from `inputF32Ptr` into `leftF32Ptr` and
+    /// `rightF32Ptr`.
+    ///
+    /// `frames` must be an integer in `0..=maxBlockFrames`. Input quantization,
+    /// the output scale, timed events and drain cancellation match
+    /// [`Processor::process_planar_f32`]. If you pass `events`, recheck
+    /// `memory.buffer` before you read the output views.
+    ///
+    /// # Errors
+    ///
+    /// If `frames` is not an integer in `0..=maxBlockFrames`, or if an event is
+    /// not valid, this method throws. All checks finish before the buffers or
+    /// the DSP state change.
+    #[wasm_bindgen(js_name = processF32InPlace)]
+    pub fn process_f32_in_place(
+        &mut self,
+        frames: f64,
+        events: Option<Ts<BlockEvents>>,
+    ) -> Result<(), JsError> {
+        let frames = self.check_frames(frames)?;
+        let events = match events {
+            Some(events) => decode_events(&mut self.events, events, frames)?,
+            None => &[],
+        };
+        self.processor.process_planar_f32(
+            &self.input_f32[..frames],
+            &mut self.left_f32[..frames],
+            &mut self.right_f32[..frames],
+            events,
+        )?;
+        Ok(())
+    }
+
+    /// Replaces `frames` samples at `inputF32Ptr` with the mono `f32` downmix.
+    ///
+    /// `frames` must be an integer in `0..=maxBlockFrames`. Input quantization,
+    /// the output scale, peak measurements, events and drain cancellation match
+    /// [`Processor::process_mono_in_place_f32`]. If you pass `events`, recheck
+    /// `memory.buffer` before you read the output view.
+    ///
+    /// # Errors
+    ///
+    /// If `frames` is not an integer in `0..=maxBlockFrames`, or if an event is
+    /// not valid, this method throws. All checks finish before the buffer or
+    /// the DSP state changes.
+    #[wasm_bindgen(js_name = processMonoF32InPlace)]
+    pub fn process_mono_f32_in_place(
+        &mut self,
+        frames: f64,
+        events: Option<Ts<BlockEvents>>,
+    ) -> Result<(), JsError> {
+        let frames = self.check_frames(frames)?;
+        let events = match events {
+            Some(events) => decode_events(&mut self.events, events, frames)?,
+            None => &[],
+        };
+        self.processor
+            .process_mono_in_place_f32(&mut self.input_f32[..frames], events)?;
+        Ok(())
+    }
+
     /// Starts a finite tail budget and returns its frame count as a number.
     ///
-    /// Call this method one time after the final input block. Another call
-    /// starts the full budget again, but it does not clear the histories. Refer
-    /// to `drain` for completion.
+    /// Call this method one time after the final input block. Then call `drain`
+    /// or `drainMono` until the call returns zero. Completion resets the audio
+    /// histories and the feedback in the final drain call. Another call starts
+    /// the full budget again, and it does not clear the histories.
     #[wasm_bindgen(js_name = beginDrain)]
     pub fn begin_drain(&mut self) -> usize {
         self.processor.begin_drain()
@@ -359,11 +547,14 @@ impl WasmProcessor {
         Ok(count)
     }
 
-    /// Renders a mono tail block and returns its frame count.
+    /// Renders a mono tail block in `audio` and returns its frame count.
     ///
-    /// The method fills the unused output with zeros. The downmix and the peak
-    /// measurements are the same as for `processMono`. The return values, empty
-    /// arrays and completion are the same as for `drain`.
+    /// The method mixes each stereo tail frame to mono and fills the unused
+    /// output with zeros. Peak feedback and telemetry measure the mono signal
+    /// after the mono downmix. If the drain is not active or is complete, the
+    /// method returns zero. Empty arrays do not use the budget. Completion
+    /// resets the histories and the feedback in the final drain call, also when
+    /// that call returns audio.
     ///
     /// # Errors
     ///
@@ -376,6 +567,94 @@ impl WasmProcessor {
         let count = self.processor.drain_mono(&mut self.input[..frames])?;
         audio.copy_from(&self.input[..frames]);
         Ok(count)
+    }
+
+    /// Renders stereo tail frames into `Float32Array` buffers of equal length.
+    ///
+    /// Each rendered sample is in `-32767 / 32768..=32767 / 32768`, and unused
+    /// output frames get `0`. The return values, empty arrays and completion
+    /// are the same as for `drain`.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if the channel lengths are not equal or if a block is
+    /// larger than `maxBlockFrames`. After an error, both output arrays and the
+    /// drain state do not change.
+    #[wasm_bindgen(js_name = drainF32)]
+    pub fn drain_f32(
+        &mut self,
+        left: &Float32Array,
+        right: &Float32Array,
+    ) -> Result<usize, JsError> {
+        let frames = left.length() as usize;
+        Error::check_length(frames, right.length() as usize)?;
+        self.processor.check_block(frames)?;
+        let count = self
+            .processor
+            .drain_planar_f32(&mut self.left_f32[..frames], &mut self.right_f32[..frames])?;
+        left.copy_from(&self.left_f32[..frames]);
+        right.copy_from(&self.right_f32[..frames]);
+        Ok(count)
+    }
+
+    /// Renders a mono `Float32Array` tail block and returns its frame count.
+    ///
+    /// The method fills the unused output with `0`. The downmix, the `1 / 32768`
+    /// output division and the peak measurements are the same as for
+    /// `processMonoF32`. The return values, empty arrays and completion are the
+    /// same as for `drain`.
+    ///
+    /// # Errors
+    ///
+    /// If the block is larger than `maxBlockFrames`, this method throws before
+    /// the output or the state changes.
+    #[wasm_bindgen(js_name = drainMonoF32)]
+    pub fn drain_mono_f32(&mut self, audio: &Float32Array) -> Result<usize, JsError> {
+        let frames = audio.length() as usize;
+        self.processor.check_block(frames)?;
+        let count = self
+            .processor
+            .drain_mono_f32(&mut self.input_f32[..frames])?;
+        audio.copy_from(&self.input_f32[..frames]);
+        Ok(count)
+    }
+
+    /// Renders up to `frames` stereo tail frames into `leftF32Ptr` and
+    /// `rightF32Ptr`.
+    ///
+    /// `frames` must be an integer in `0..=maxBlockFrames`. The method returns
+    /// the rendered frame count and fills unused frames up to `frames` with
+    /// `0.0`. Empty blocks and drain completion match `drain`.
+    ///
+    /// # Errors
+    ///
+    /// If `frames` is not an integer in `0..=maxBlockFrames`, this method
+    /// throws. On error, the output buffers and the drain state do not change.
+    #[wasm_bindgen(js_name = drainF32InPlace)]
+    pub fn drain_f32_in_place(&mut self, frames: f64) -> Result<usize, JsError> {
+        let frames = self.check_frames(frames)?;
+        Ok(self
+            .processor
+            .drain_planar_f32(&mut self.left_f32[..frames], &mut self.right_f32[..frames])?)
+    }
+
+    /// Renders up to `frames` mono tail frames into `inputF32Ptr` and returns
+    /// their count.
+    ///
+    /// `frames` must be an integer in `0..=maxBlockFrames`. The method fills
+    /// unused samples up to `frames` with `0.0`. The downmix, the output scale,
+    /// empty blocks and drain completion match `drainMono`.
+    ///
+    /// # Errors
+    ///
+    /// If `frames` is not an integer in `0..=maxBlockFrames`, this method
+    /// throws. On error, the output buffer and the drain state do not change.
+    #[wasm_bindgen(js_name = drainMonoF32InPlace)]
+    pub fn drain_mono_f32_in_place(&mut self, frames: f64) -> Result<usize, JsError> {
+        let frames = self.check_frames(frames)?;
+        Ok(self
+            .processor
+            .drain_mono_f32(&mut self.input_f32[..frames])?)
     }
 
     /// Returns a new feedback object and does not clear the peak window.
@@ -522,6 +801,17 @@ impl WasmProcessor {
     /// new instance, construct a new `Tunelet`.
     pub fn reset(&mut self) {
         self.processor.reset();
+    }
+
+    /// Validates a JavaScript frame count before buffer slices or DSP state
+    /// change.
+    fn check_frames(&self, frames: f64) -> Result<usize, JsError> {
+        if !(0.0..=f64::from(u32::MAX)).contains(&frames) || frames.fract() != 0.0 {
+            return Err(JsError::new("frames must be an integer in 0..=4294967295"));
+        }
+        let frames = frames as usize;
+        self.processor.check_block(frames)?;
+        Ok(frames)
     }
 }
 
@@ -749,6 +1039,17 @@ fn pcm_buffer(frames: usize) -> Result<Vec<i16>, JsError> {
     let mut buffer = Vec::new();
     buffer.try_reserve_exact(frames)?;
     buffer.resize(frames, 0);
+    Ok(buffer)
+}
+
+/// Allocates `f32` audio storage that contains zeros.
+///
+/// If the capacity overflows or the allocation fails, this function returns a
+/// JavaScript error. It does not panic.
+fn f32_buffer(frames: usize) -> Result<Vec<f32>, JsError> {
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(frames)?;
+    buffer.resize(frames, 0.0);
     Ok(buffer)
 }
 
