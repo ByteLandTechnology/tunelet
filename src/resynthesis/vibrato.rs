@@ -91,7 +91,7 @@ impl PeriodFilter {
     /// Calculates the Q24 coefficients for the five-frame update rate.
     ///
     /// The filter state does not change.
-    pub(super) fn configure(&mut self, rate: SampleRate) {
+    fn configure(&mut self, rate: SampleRate) {
         let update_hz = f64::from(rate.as_u32()) / 5.0;
         let q = BAND_CENTER_HZ / BAND_WIDTH_HZ;
         let w0 = 2.0 * std::f64::consts::PI * BAND_CENTER_HZ / update_hz;
