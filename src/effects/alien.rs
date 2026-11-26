@@ -24,10 +24,12 @@ fn boundary_fade_frames(loop_frames: usize) -> usize {
 /// Alien comes after resynthesis. When you enable Alien, it captures one loop
 /// of fresh input while it holds the dry signal. Then it ramps the wet mix to
 /// full level over 200 frames. When you disable Alien, it ramps the wet mix to
-/// zero over 200 frames. A change of the loop length keeps the captured history
-/// and clamps the current phase into the new loop. The boundary fade length is
-/// zero at a loop length of one frame, and `min(200, loop_frames / 2)` at
-/// longer loop lengths.
+/// zero over 200 frames.
+///
+/// If the loop length changes during wet playback, Alien ramps the active loop
+/// to zero over 200 frames. Then it resets the phase and captures any extra
+/// frames that the new loop needs. The boundary fade length is zero at a loop
+/// length of one frame, and `min(200, loop_frames / 2)` at longer loop lengths.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -80,19 +82,21 @@ pub(crate) struct Alien {
     /// The current write position. The position of the reverse reader comes
     /// from this cursor.
     read: usize,
-    /// The current frame in the loop. It is always less than `loop_len`.
+    /// The current frame in the loop. It is always less than
+    /// `active_loop_len`.
     phase: usize,
-    /// The validated loop length. It is not more than half of the history
-    /// capacity.
-    loop_len: usize,
+    /// The active loop length. It stays constant until `wet_frames` is zero.
+    active_loop_len: usize,
     /// The number of frames in `buffer` since construction or the last reset.
     written: usize,
     /// The number of frames that Alien captured since it became active.
     captured: usize,
     /// The current frame in the 200-frame wet mix ramp, in 0..=200.
     wet_frames: usize,
-    /// If `true`, the wet mix ramps to zero before a new capture starts.
-    restart_pending: bool,
+    /// If `true`, the wet mix ramps to zero before the next loop state starts.
+    fading_out: bool,
+    /// If `true`, `captured` resets to zero when `wet_frames` reaches zero.
+    reset_capture: bool,
 }
 impl Alien {
     /// Allocates a silent stereo ring from validated loop settings.
@@ -107,50 +111,57 @@ impl Alien {
             buffer: vec![[Q14::default(); 2]; HISTORY_FRAMES],
             read: 0,
             phase: 0,
-            loop_len: config.loop_frames as usize,
+            active_loop_len: config.loop_frames as usize,
             written: 0,
             captured,
             wet_frames,
-            restart_pending: false,
+            fading_out: false,
+            reset_capture: false,
         }
     }
     /// Applies a validated configuration and does not clear the buffer.
     ///
-    /// If you enable Alien, this method resets the loop phase and the captured
-    /// frame count. It also clamps the phase into the new loop, which is not
-    /// empty.
+    /// While `wet_frames` is above zero, `active_loop_len` stays unchanged
+    /// until the wet ramp reaches zero.
     pub(crate) fn set_config(&mut self, config: AlienConfig) {
         let was_enabled = self.config.enabled;
         self.config = config;
-        self.loop_len = config.loop_frames as usize;
-        self.phase = self.phase.min(self.loop_len - 1);
-        if !was_enabled && config.enabled {
+        if !config.enabled || !was_enabled {
             if self.wet_frames == 0 {
+                self.active_loop_len = config.loop_frames as usize;
                 self.phase = 0;
                 self.captured = 0;
-                self.restart_pending = false;
+                self.fading_out = false;
+                self.reset_capture = false;
             } else {
-                self.restart_pending = true;
+                self.fading_out = true;
+                self.reset_capture = true;
             }
-        } else if was_enabled && config.enabled {
-            if self.captured < self.loop_len && self.wet_frames > 0 {
-                self.restart_pending = true;
-            }
-        } else if !config.enabled {
-            self.restart_pending = false;
+        } else if self.wet_frames == 0 {
+            self.active_loop_len = config.loop_frames as usize;
+            self.phase = 0;
+            self.fading_out = false;
+        } else {
+            self.fading_out =
+                self.reset_capture || config.loop_frames as usize != self.active_loop_len;
         }
     }
-    /// Returns the loop length and the current frame in the loop.
+    /// Returns the active loop length and the current frame in the loop.
     ///
     /// The frame is always less than the length. The stage state does not
     /// change.
     pub(crate) fn loop_state(&self) -> (usize, usize) {
-        (self.loop_len, self.phase)
+        (self.active_loop_len, self.phase)
     }
     /// Returns the finite tail budget for the active state or an active ramp.
     pub(crate) fn tail_frames(&self) -> usize {
         if self.config.enabled {
-            2 * self.config.loop_frames as usize + FADE_FRAMES
+            let base = 2 * self.config.loop_frames as usize + FADE_FRAMES;
+            if self.fading_out {
+                base.saturating_add(self.wet_frames)
+            } else {
+                base
+            }
         } else {
             self.wet_frames
         }
@@ -162,6 +173,7 @@ impl Alien {
         self.written = 0;
         self.read = 0;
         self.phase = 0;
+        self.active_loop_len = self.config.loop_frames as usize;
         if self.config.enabled {
             self.captured = HISTORY_FRAMES;
             self.wet_frames = FADE_FRAMES;
@@ -169,7 +181,8 @@ impl Alien {
             self.captured = 0;
             self.wet_frames = 0;
         }
-        self.restart_pending = false;
+        self.fading_out = false;
+        self.reset_capture = false;
     }
     /// Reads the current reverse frame and applies the loop boundary fade.
     #[inline]
@@ -180,8 +193,8 @@ impl Alien {
         } else {
             read
         };
-        let distance = self.phase.min(self.loop_len - self.phase);
-        let fade_frames = boundary_fade_frames(self.loop_len);
+        let distance = self.phase.min(self.active_loop_len - self.phase);
+        let fade_frames = boundary_fade_frames(self.active_loop_len);
         let mut result = self.buffer[read];
         if distance < fade_frames {
             let gain: Q14 = Fixed::<0>::from_bits(distance as i32)
@@ -215,16 +228,16 @@ impl Alien {
             self.read = 0;
         }
     }
-    /// Advances the loop phase by one frame and wraps at `loop_len`.
+    /// Advances the loop phase by one frame and wraps at `active_loop_len`.
     #[inline]
     fn advance_phase(&mut self) {
         self.phase += 1;
-        if self.phase == self.loop_len {
+        if self.phase == self.active_loop_len {
             self.phase = 0;
         }
     }
     /// Captures input, holds the dry signal until the loop fills, and ramps
-    /// the Q14 wet mix over 200 frames on each toggle.
+    /// the Q14 wet mix over 200 frames on each transition.
     pub(crate) fn process_sample(&mut self, input: [Q14; 2]) -> [Q14; 2] {
         if !self.config.enabled && self.wet_frames == 0 {
             return input;
@@ -233,44 +246,37 @@ impl Alien {
         if self.written < HISTORY_FRAMES {
             self.written += 1;
         }
-        if self.restart_pending {
+        if self.config.enabled && !self.reset_capture {
+            self.captured = (self.captured + 1).min(HISTORY_FRAMES);
+        }
+        if self.fading_out || !self.config.enabled {
             let reverse = self.reverse_sample();
             self.wet_frames -= 1;
             let result = self.mix_wet(input, reverse);
             self.advance_read();
             self.advance_phase();
             if self.wet_frames == 0 {
+                self.active_loop_len = self.config.loop_frames as usize;
                 self.phase = 0;
-                self.captured = 0;
-                self.restart_pending = false;
+                self.fading_out = false;
+                if self.reset_capture || !self.config.enabled {
+                    self.captured = 0;
+                    self.reset_capture = false;
+                }
             }
             return result;
         }
-        if self.config.enabled {
-            self.captured = (self.captured + 1).min(HISTORY_FRAMES);
-            if self.captured < self.loop_len {
-                self.advance_read();
-                return input;
-            }
-            let reverse = self.reverse_sample();
-            if self.wet_frames < FADE_FRAMES {
-                self.wet_frames += 1;
-            }
-            let result = self.mix_wet(input, reverse);
+        if self.captured < self.active_loop_len {
             self.advance_read();
-            self.advance_phase();
-            result
-        } else {
-            let reverse = self.reverse_sample();
-            self.wet_frames -= 1;
-            let result = self.mix_wet(input, reverse);
-            self.advance_read();
-            self.advance_phase();
-            if self.wet_frames == 0 {
-                self.phase = 0;
-                self.captured = 0;
-            }
-            result
+            return input;
         }
+        let reverse = self.reverse_sample();
+        if self.wet_frames < FADE_FRAMES {
+            self.wet_frames += 1;
+        }
+        let result = self.mix_wet(input, reverse);
+        self.advance_read();
+        self.advance_phase();
+        result
     }
 }

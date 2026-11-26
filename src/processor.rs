@@ -1286,8 +1286,10 @@ pub struct Telemetry {
     /// it during release and updates it on each enabled frame. The value is 1
     /// while Warm is disabled.
     pub warm_gain: f32,
-    /// The length of the Alien loop in frames, as
-    /// [`crate::AlienConfig::loop_frames`] gives.
+    /// The active length of the Alien loop in frames.
+    ///
+    /// It equals [`crate::AlienConfig::loop_frames`] after any active wet fade
+    /// to zero finishes.
     pub alien_loop_frames: u32,
     /// The current frame in the Alien loop. It is less than
     /// [`alien_loop_frames`](Self::alien_loop_frames).
