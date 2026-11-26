@@ -79,7 +79,7 @@ impl PitchConfig {
     /// [`ConfigProblem::Unordered`]. The `other` value of that problem is
     /// `resynthesis.pitch.max_frequency_hz`.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("resynthesis.pitch.threshold", self.threshold, 0.002, 0.2)?;
+        validate_threshold(self.threshold)?;
         let (min, max) = (
             "resynthesis.pitch.min_frequency_hz",
             "resynthesis.pitch.max_frequency_hz",
@@ -91,6 +91,11 @@ impl PitchConfig {
         }
         Ok(())
     }
+}
+
+/// Checks the range of the pitch acquisition threshold.
+pub(crate) fn validate_threshold(threshold: f32) -> Result<(), Error> {
+    check_range("resynthesis.pitch.threshold", threshold, 0.002, 0.2)
 }
 
 /// A pitch estimate as a period in samples and a frequency in hertz.
