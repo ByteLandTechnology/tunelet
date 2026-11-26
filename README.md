@@ -259,22 +259,67 @@ These rules apply to the offsets:
 - An offset must not be less than the offset before it.
 
 Events with equal offsets execute in slice order. An empty block accepts no
-events. A stage event replaces all settings of that stage. To change one
-field, start from `processor.config()`.
+events. A stage event replaces all settings of that stage. To change one scalar
+field without a stage copy, use `ControlEvent::Parameter` with a
+`ParameterControl` variant. For fields that are not scalar parameters, start
+from `processor.config()`.
 
 Harmony MIDI uses `ControlEvent::Midi`. MIDI for the correction keyboard uses
-`ControlEvent::CorrectionMidi`. For example, this event starts a harmony note
-at frame 256:
+`ControlEvent::CorrectionMidi`. For example, these events change the resynthesis
+dry mix at frame 0 and start a harmony note at frame 256:
 
 ```rust
-use tunelet::{ControlEvent, MidiEvent, TimedEvent};
+use tunelet::{ControlEvent, MidiEvent, ParameterControl, TimedEvent};
 
-let events = [TimedEvent {
-    offset: 256,
-    event: ControlEvent::Midi(MidiEvent::NoteOn { channel: 0, note: 64, velocity: 100 }),
-}];
+let events = [
+    TimedEvent {
+        offset: 0,
+        event: ControlEvent::Parameter(ParameterControl::DryMix(0.25)),
+    },
+    TimedEvent {
+        offset: 256,
+        event: ControlEvent::Midi(MidiEvent::NoteOn { channel: 0, note: 64, velocity: 100 }),
+    },
+];
 processor.process(&input, &mut output, &events)?;
 ```
+
+### Scalar parameters
+
+`ControlEvent::Parameter` accepts these `ParameterControl` variants. All ranges
+are inclusive, and `f32` values must be finite.
+
+| Variant                       | TypeScript `type`               | Configuration field                     | Range             |
+| ----------------------------- | ------------------------------- | --------------------------------------- | ----------------- |
+| `PunchGainDb`                 | `"punchGainDb"`                 | `punch.gain_db`                         | `-96..=12` dB     |
+| `PunchImpact`                 | `"punchImpact"`                 | `punch.impact`                          | `0..=1`           |
+| `PunchCeilingDb`              | `"punchCeilingDb"`              | `punch.ceiling_db`                      | `-96..=0` dBFS    |
+| `PunchAttackMs`               | `"punchAttackMs"`               | `punch.attack_ms`                       | `0.01..=5000` ms  |
+| `WarmDriveDb`                 | `"warmDriveDb"`                 | `warm.drive_db`                         | `0..=6` dB        |
+| `PitchThreshold`              | `"pitchThreshold"`              | `resynthesis.pitch.threshold`           | `0.002..=0.2`     |
+| `RetuneMs`                    | `"retuneMs"`                    | `resynthesis.correction.retune_ms`      | `0..=400` ms      |
+| `Humanize`                    | `"humanize"`                    | `resynthesis.correction.humanize`       | `0..=1`           |
+| `FlexTune`                    | `"flexTune"`                    | `resynthesis.correction.flex_tune`      | `0..=1`           |
+| `PitchRatio`                  | `"pitchRatio"`                  | `resynthesis.pitch_ratio`               | `0.25..=4`        |
+| `FormantWidth`                | `"formantWidth"`                | `resynthesis.formant.width`             | `0.5..=2`         |
+| `FormantStretch`              | `"formantStretch"`              | `resynthesis.formant.stretch`           | `0.5..=2`         |
+| `FormantAspirationMix`        | `"formantAspirationMix"`        | `resynthesis.formant.aspiration_mix`    | `0..=1`           |
+| `FormantAspirationCutoffHz`   | `"formantAspirationCutoffHz"`   | `resynthesis.formant.aspiration_cutoff_hz` | `500..=10000` Hz |
+| `ChoirVoices`                 | `"choirVoices"`                 | `resynthesis.choir_voices`              | `1..=16`          |
+| `ChoirDetune`                 | `"choirDetune"`                 | `resynthesis.choir_detune`              | `10..=100`        |
+| `ChoirDelay`                  | `"choirDelay"`                  | `resynthesis.choir_delay`               | `20..=200`        |
+| `ChoirSpreadPercent`          | `"choirSpreadPercent"`          | `resynthesis.choir_spread_percent`      | `0..=100`%        |
+| `HarmonyRegisterPercent`      | `"harmonyRegisterPercent"`      | `resynthesis.harmony.register_percent`  | `0..=100`%        |
+| `HarmonyVoicingSpreadPercent` | `"harmonyVoicingSpreadPercent"` | `resynthesis.harmony.voicing_spread_percent` | `0..=100`%   |
+| `HarmonyPortamentoMs`         | `"harmonyPortamentoMs"`         | `resynthesis.harmony.portamento_ms`     | `0..=10000` ms    |
+| `HarmonyVoices`               | `"harmonyVoices"`               | `resynthesis.harmony.voices`            | `0..=4`           |
+| `HarmonyGain`                 | `"harmonyGain"`                 | `resynthesis.harmony_gain`              | `0..=1`           |
+| `HarmonicModulation`          | `"harmonicModulation"`          | `resynthesis.harmonic_modulation`       | `0..=24`          |
+| `DryMix`                      | `"dryMix"`                      | `resynthesis.dry_mix`                   | `0..=1`           |
+| `ReverbMix`                   | `"reverbMix"`                   | `reverb.mix`                            | `0..=1`           |
+| `ReverbDiffusion`             | `"reverbDiffusion"`             | `reverb.diffusion`                      | `0..=1`           |
+| `ReverbDecay`                 | `"reverbDecay"`                 | `reverb.decay`                          | `0..=1`           |
+| `ReverbBrightnessHz`          | `"reverbBrightnessHz"`          | `reverb.brightness_hz`                  | `80..=20000` Hz   |
 
 ## Lifecycle
 
@@ -325,14 +370,16 @@ reverb network.
 
 The telemetry includes these items:
 
-- The pitch ratio and the gain of each voice.
+- The pitch, the correction ratio and the frame count from the feedback.
+- The pitch ratio and the gain of each active voice.
 - The peaks of the input, of the two output channels and of the reverb wet
   signal.
 - The pitch clarity, which is a confidence score from 0 to 1.
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
-The peak windows of the telemetry are independent of the peak window of the
-feedback. In mono calls, the output and reverb wet peaks measure the audio
+`active_voice_ratios()` and `active_voice_gains()` return slices for the active
+voices. The peak windows of the telemetry are independent of the peak window of
+the feedback. In mono calls, the output and reverb wet peaks measure the audio
 after the downmix. The dry path has the 1,593-frame delay. Resampled voices,
 choir delays and effects use different delays.
 
@@ -552,6 +599,12 @@ example, this event changes the final gain before the first frame:
 { offset: 0, event: { type: "outputGain", value: 0.5 } }
 ```
 
+A scalar parameter event nests a `ParameterControl` object:
+
+```ts
+{ offset: 0, event: { type: "parameter", value: { type: "dryMix", value: 0.25 } } }
+```
+
 A harmony Note On event has this form:
 
 ```ts
@@ -566,10 +619,11 @@ bindings.
 
 `controlActivity()` returns a `ControlActivity` object with camelCase boolean
 flags for the choir, harmony and reverb controls. `telemetry()` and
-`takeTelemetry()` return a `Telemetry` object.
+`takeTelemetry()` return a `Telemetry` object. In `Telemetry`, `voiceRatios`
+and `voiceGains` are `Float32Array` values of length `voiceCount`.
 
-In feedback, `targetMidiNote` is `undefined` in these cases, which are also
-the cases where `voiced` is `false`:
+In feedback and telemetry, `targetMidiNote` is `undefined` in these cases,
+which are also the cases where `voiced` is `false`:
 
 - The kept pitch estimate is unvoiced. This includes the time before the
   first detection and after a reset or a drain completion.
@@ -617,10 +671,10 @@ To build the crate and check the format, the lints, the documentation and
 the archive, run these commands:
 
 ```sh
-cargo build --locked --release
+cargo rustc --locked --lib --release -- -D warnings
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
-cargo doc --locked --no-deps
+cargo rustdoc --locked --lib -- -D warnings
 cargo package --locked
 ```
 
@@ -630,7 +684,7 @@ these commands:
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo clippy --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
-cargo doc --locked --release --no-deps --target wasm32-unknown-unknown --features wasm
+cargo rustdoc --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings
 ```
 
 Native Rust builds and these Wasm checks use Cargo and do not need Node.js
