@@ -714,8 +714,8 @@ impl WasmProcessor {
     /// the active configuration.
     ///
     /// A `false` flag means that the related control makes no sample change in
-    /// the active voice mode, harmony source or reverb network. The audio
-    /// state does not change.
+    /// the active voice, stereo, harmony, formant or reverb settings. The
+    /// audio state does not change.
     ///
     /// # Errors
     ///
@@ -757,14 +757,18 @@ impl WasmProcessor {
         Ok(telemetry)
     }
 
-    /// Writes the formant envelopes of the current model into two
-    /// `Float32Array` buffers of equal length.
+    /// Writes the formant envelopes of the current lead vocal-tract model into
+    /// two `Float32Array` buffers of equal length.
     ///
     /// `input` gets the vocal-tract envelope that the LPC analysis found.
-    /// `output` gets the envelope after the width and stretch controls. Point
-    /// `k` of `n` is at the frequency `maxFrequencyHz * k / (n - 1)`. The
-    /// values are linear magnitudes with no absolute level. Scale them for a
-    /// display.
+    /// `output` gets the lead (slot 0) synthesis envelope after
+    /// [`crate::FormantConfig::width`] and [`crate::FormantConfig::stretch`].
+    /// It does not include [`crate::HarmonyConfig::voice_formant_width`] or
+    /// [`crate::HarmonyConfig::voice_formant_stretch`].
+    ///
+    /// Point `k` of `n` is at the frequency `maxFrequencyHz * k / (n - 1)`.
+    /// The values are linear magnitudes with no absolute level. Scale them for
+    /// a display.
     ///
     /// `maxFrequencyHz` must be finite, more than zero and not more than half
     /// of the sample rate.

@@ -49,6 +49,7 @@ const EXACT_REPLACEMENTS = [
     "`ResynthesisConfig.choirSpreadPercent`",
   ],
   ["[`crate::ResynthesisConfig::lead_gain`]", "`ResynthesisConfig.leadGain`"],
+  ["[`ResynthesisConfig::lead_gain`]", "`ResynthesisConfig.leadGain`"],
   [
     "[`crate::ResynthesisConfig::harmony_gain`]",
     "`ResynthesisConfig.harmonyGain`",
@@ -87,7 +88,16 @@ const EXACT_REPLACEMENTS = [
   ["[`crate::HarmonyConfig::voices`]", "`HarmonyConfig.voices`"],
   ["[`crate::HarmonyConfig::voice_gains`]", "`HarmonyConfig.voiceGains`"],
   ["[`HarmonyConfig::voice_gains`]", "`HarmonyConfig.voiceGains`"],
+  ["[`crate::HarmonyConfig::voice_pans`]", "`HarmonyConfig.voicePans`"],
   ["[`crate::HarmonyConfig::voice_mutes`]", "`HarmonyConfig.voiceMutes`"],
+  [
+    "[`crate::HarmonyConfig::voice_formant_stretch`]",
+    "`HarmonyConfig.voiceFormantStretch`",
+  ],
+  [
+    "[`crate::HarmonyConfig::voice_formant_width`]",
+    "`HarmonyConfig.voiceFormantWidth`",
+  ],
   ["[`ReverbConfig::mode`]", "`ReverbConfig.mode`"],
   ["[`ReverbConfig::mix`]", "`ReverbConfig.mix`"],
   ["[`ReverbConfig::diffusion`]", "`ReverbConfig.diffusion`"],
