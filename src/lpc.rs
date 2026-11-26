@@ -137,31 +137,24 @@ pub(crate) fn areas_to_parcor(areas: &[i32], parcor: &mut [i32], scale: u32) -> 
     }
     true
 }
-/// Converts reflection coefficients into the coefficients of a
+/// Converts Q14 reflection coefficients into the Q14 coefficients of a
 /// prediction-error filter.
 ///
 /// `coefficients` and `scratch` must each hold at least `parcor.len()`
-/// entries. `scale` gives the number of fractional bits of the reflection
-/// coefficients and must be less than 32. Formant synthesis uses 14. The
-/// recurrence keeps more fractional bits internally. At the end, it shifts
-/// the full output one time. This function does not do a stability check.
-/// The caller must supply reflection coefficients with a magnitude less
-/// than 1.0.
-pub(crate) fn parcor_to_pef(
-    parcor: &[i32],
-    coefficients: &mut [i32],
-    scratch: &mut [i32],
-    scale: u32,
-) {
+/// entries. The recurrence keeps Q28 values internally. At the end, it shifts
+/// the full output right by 14 one time. This function does not do a
+/// stability check. The caller must supply reflection coefficients with a
+/// magnitude less than 1.0.
+pub(crate) fn parcor_to_pef(parcor: &[i32], coefficients: &mut [i32], scratch: &mut [i32]) {
     for (i, &k) in parcor.iter().enumerate() {
-        scratch[i] = k.wrapping_shl(scale);
+        scratch[i] = k.wrapping_shl(14);
         for j in 0..i {
             scratch[j] = coefficients[j]
-                .wrapping_sub(k.wrapping_mul(coefficients[i - j - 1].wrapping_shr(scale)));
+                .wrapping_sub(k.wrapping_mul(coefficients[i - j - 1].wrapping_shr(14)));
         }
         coefficients[..=i].copy_from_slice(&scratch[..=i]);
     }
     for coefficient in &mut coefficients[..parcor.len()] {
-        *coefficient = coefficient.wrapping_shr(scale);
+        *coefficient = coefficient.wrapping_shr(14);
     }
 }
