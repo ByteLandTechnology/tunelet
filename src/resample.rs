@@ -221,7 +221,10 @@ impl Resampler {
         let core_total = (core_latency + self.output_filter.half) as u64;
         let scaled = (core_total * u64::from(self.host_hz) + u64::from(self.core_hz / 2))
             / u64::from(self.core_hz);
-        self.input_filter.half.saturating_add(scaled as usize)
+        self.input_filter
+            .half
+            .saturating_sub(1)
+            .saturating_add(scaled as usize)
     }
 
     /// Converts a core tail budget into a host frame budget that also flushes
