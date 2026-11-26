@@ -1,8 +1,8 @@
 /**
  * This script builds the package one time and packs `tunelet` and
  * `@bytelandtechnology/tunelet`. For each archive, it checks the eight files,
- * `loadTunelet()`, the HTTP Wasm loaders and the `NodeNext` TypeScript
- * declarations.
+ * `loadTunelet()`, the HTTP Wasm loaders, the `NodeNext` TypeScript
+ * declarations and the JSDoc comments.
  *
  * If you give `--ignore-scripts`, the script checks the pre-built `pkg/` and
  * `dist/` files without a build. If you give `--out-dir <dir>`, the script
@@ -18,6 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { normalizeJsDoc } from "./normalize-jsdoc.mjs";
 
 const UNSCOPED_PACKAGE_NAME = "tunelet";
 const SCOPED_PACKAGE_NAME = "@bytelandtechnology/tunelet";
@@ -787,6 +788,171 @@ async function verifyPackedArchive(workDir, relativeArchivePath, packageName) {
   verifyRuntimeImport(consumerDir, packageName);
   await verifyHttpLoaders(consumerDir, packageName);
   verifyTypeDeclarations(consumerDir, packageName);
+  verifyNormalizedJsDoc(consumerDir, packageName);
+}
+
+/** Extract JSDoc comment blocks from a file and strip their comment markers. */
+function extractJsDocBlocks(source) {
+  const normalizedSource = source.replace(/\r\n/g, "\n");
+  return [...normalizedSource.matchAll(/\/\*\*[\s\S]*?\*\//g)].map((match) => {
+    const block = match[0];
+    if (!block.includes("\n")) {
+      return block.slice(3, -2).trim();
+    }
+    return block
+      .split("\n")
+      .slice(1, -1)
+      .map((line) => line.replace(/^[ \t]*\*(?: |$)/, ""))
+      .join("\n");
+  });
+}
+
+/** Extract the JSDoc block immediately before a named member or export. */
+function extractMemberJsDoc(source, pattern, label) {
+  const match = pattern.exec(source);
+  assert.ok(match, `Expected JSDoc block for ${label}`);
+  return extractJsDocBlocks(match[1])[0];
+}
+
+/** Check that packed JSDoc comments contain clean TypeScript documentation. */
+function verifyNormalizedJsDoc(consumerDir, packageName) {
+  const installedDir = path.join(
+    consumerDir,
+    "node_modules",
+    ...packageName.split("/"),
+  );
+  const filesToCheck = [
+    path.join(installedDir, "dist", "index.d.ts"),
+    path.join(installedDir, "dist", "index.js"),
+    path.join(installedDir, "pkg", "tunelet.d.ts"),
+    path.join(installedDir, "pkg", "tunelet.js"),
+  ];
+
+  for (const filePath of filesToCheck) {
+    const content = fs.readFileSync(filePath, "utf8");
+    const blocks = extractJsDocBlocks(content);
+    assert.ok(blocks.length > 0, `Expected JSDoc blocks in ${filePath}`);
+    for (const text of blocks) {
+      assert.doesNotMatch(
+        text,
+        /(?:^|\n)#+\s/,
+        `Unexpected Markdown heading in ${filePath}`,
+      );
+      assert.ok(
+        !text.includes("::"),
+        `Unexpected Rust path separator in ${filePath}`,
+      );
+      assert.ok(
+        !text.includes("..="),
+        `Unexpected Rust inclusive range in ${filePath}`,
+      );
+      assert.doesNotMatch(
+        text,
+        /\b(?:None|NONE)\b/,
+        `Unexpected Rust None literal in ${filePath}`,
+      );
+      assert.doesNotMatch(
+        text,
+        /\[`[^`]+`\]/,
+        `Unexpected Rust intra-doc link in ${filePath}`,
+      );
+      assert.ok(
+        !text.includes("`Default`"),
+        `Unexpected Rust Default trait reference in ${filePath}`,
+      );
+      assert.doesNotMatch(
+        text,
+        /`(?:max_frequency_hz|min_frequency_hz|stereo_output|retune_ms|attack_ms|gain_db|ceiling_db)`/,
+        `Unexpected snake_case config field in ${filePath}`,
+      );
+    }
+  }
+
+  const dtsPath = path.join(installedDir, "pkg", "tunelet.d.ts");
+  const jsPath = path.join(installedDir, "pkg", "tunelet.js");
+  const dts = fs.readFileSync(dtsPath, "utf8");
+  const js = fs.readFileSync(jsPath, "utf8");
+  const disposableDirective = '/// <reference lib="esnext.disposable" />\n';
+  assert.ok(
+    dts.startsWith(disposableDirective),
+    `Expected leading esnext.disposable directive in ${dtsPath}`,
+  );
+  assert.equal(normalizeJsDoc(dts, dtsPath), dts);
+  assert.equal(normalizeJsDoc(js, jsPath), js);
+
+  const throwsCount = [...dts.matchAll(/\* @throws /g)].length;
+  assert.ok(
+    throwsCount >= 14,
+    `Expected at least 14 @throws tags, found ${throwsCount}`,
+  );
+
+  const fallibleSignatures = [
+    ["config", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+config\(\): ProcessorConfig;/],
+    ["controlActivity", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+controlActivity\(\): ControlActivity;/],
+    ["drainMono", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+drainMono\(audio: Int16Array\): number;/],
+    ["drain", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+drain\(left: Int16Array, right: Int16Array\): number;/],
+    ["feedback", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+feedback\(\): Feedback;/],
+    ["formantEnvelope", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+formantEnvelope\([^)]*\): boolean;/],
+    ["constructor", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+constructor\([^)]*\);/],
+    ["processMono", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+processMono\([^)]*\): void;/],
+    ["process", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+process\([^)]*\): void;/],
+    ["setConfig", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+setConfig\(config: ProcessorConfig\): void;/],
+    ["takeFeedback", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+takeFeedback\(\): Feedback;/],
+    ["takeTelemetry", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+takeTelemetry\(\): Telemetry;/],
+    ["telemetry", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+telemetry\(\): Telemetry;/],
+    ["defaultConfig", /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+export function defaultConfig\(\): ProcessorConfig;/],
+  ];
+  for (const [label, pattern] of fallibleSignatures) {
+    const doc = extractMemberJsDoc(dts, pattern, label);
+    assert.match(doc, /(?:^|\n)@throws /, `Expected @throws tag on ${label}`);
+  }
+
+  const controlActivityInterfaceMatch =
+    /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+export interface ControlActivity \{([\s\S]*?)\n\}/.exec(
+      dts,
+    );
+  assert.ok(controlActivityInterfaceMatch, "Expected ControlActivity interface");
+  const controlActivityDoc = extractJsDocBlocks(
+    controlActivityInterfaceMatch[1],
+  )[0].replace(/\s+/g, " ");
+  assert.ok(controlActivityDoc.includes("`ProcessorConfig`"));
+  assert.ok(controlActivityDoc.includes("`Tunelet.controlActivity`"));
+  assert.ok(
+    controlActivityInterfaceMatch[2].includes("`ResynthesisConfig.choirVoices`"),
+  );
+  assert.ok(
+    controlActivityInterfaceMatch[2].includes("`HarmonyConfig.source`"),
+  );
+  assert.ok(
+    controlActivityInterfaceMatch[2].includes("`ReverbConfig.brightnessHz`"),
+  );
+
+  const latencyDoc = extractMemberJsDoc(
+    dts,
+    /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+readonly latencyFrames: number;/,
+    "latencyFrames",
+  ).replace(/\s+/g, " ");
+  assert.ok(!latencyDoc.includes("latencyFrames"));
+  assert.ok(latencyDoc.includes("dry path"));
+  assert.ok(latencyDoc.includes("1,593 frames"));
+
+  const beginDrainDoc = extractMemberJsDoc(
+    dts,
+    /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+beginDrain\(\): number;/,
+    "beginDrain",
+  ).replace(/\s+/g, " ");
+  assert.ok(!beginDrainDoc.includes("beginDrain"));
+  assert.ok(beginDrainDoc.includes("returns zero"));
+  assert.ok(beginDrainDoc.includes("Completion resets"));
+
+  const drainMonoDoc = extractMemberJsDoc(
+    dts,
+    /(\/\*\*(?:(?!\*\/)[\s\S])*\*\/)\s+drainMono\(audio: Int16Array\): number;/,
+    "drainMono",
+  ).replace(/\s+/g, " ");
+  assert.ok(!drainMonoDoc.includes("drainMono"));
+  assert.ok(drainMonoDoc.includes("after the mono downmix"));
+  assert.ok(drainMonoDoc.includes("Completion resets"));
 }
 
 /** Run one isolated Node.js child process while the HTTP server is active. */

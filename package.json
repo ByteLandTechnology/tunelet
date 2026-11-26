@@ -31,7 +31,7 @@
   "sideEffects": false,
   "scripts": {
     "build": "npm run build:wasm && npm run build:ts",
-    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node scripts/postbuild-wasm.mjs",
+    "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node scripts/postbuild-wasm.mjs && node scripts/normalize-jsdoc.mjs",
     "build:ts": "tsc",
     "check:wasm": "cargo clippy --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings && cargo doc --locked --release --no-deps --target wasm32-unknown-unknown --features wasm",
     "prepack": "npm run build",
