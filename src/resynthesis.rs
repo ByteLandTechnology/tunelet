@@ -1038,6 +1038,35 @@ impl Resynthesis {
         self.step_reader(voice, ratio, bounds, fade)
     }
 
+    /// Advances one secondary choir reader and returns its position and ratio.
+    ///
+    /// The function selects the delayed period, updates `current_output_period`
+    /// and moves the reader without a crossfade. `voice` must identify a
+    /// secondary choir slot, and `delayed` must be less than HISTORY.
+    fn move_choir_reader(&mut self, voice: usize, delayed: usize) -> (Q14, Q14) {
+        let offset = self.delays[voice];
+        let delay = ring(delayed as i32 - offset);
+        let (period, _) = self.period_for(delay, self.write);
+        self.current_output_period = period;
+        let ratio = self.drift_ratio[voice];
+        let position = self.move_reader(voice, ratio, period, offset, false);
+        (position, ratio)
+    }
+
+    /// Applies the glottal envelope to `sample` and updates `previous_output`
+    /// for `channel`.
+    ///
+    /// `channel` must be `0` or `1`.
+    #[inline]
+    fn apply_glottal(&mut self, channel: usize, sample: Q14) -> Q14 {
+        let output = Q14::from_bits(
+            self.formant
+                .model_glottal(sample.to_bits(), self.previous_output[channel].to_bits()),
+        );
+        self.previous_output[channel] = output;
+        output
+    }
+
     /// Renders the choir lead before a secondary voice reads its history.
     ///
     /// The function does these steps:
@@ -1075,11 +1104,7 @@ impl Resynthesis {
                 self.formant_position,
                 numeric,
             ));
-            value = Q14::from_bits(
-                self.formant
-                    .model_glottal(value.to_bits(), self.previous_output[0].to_bits()),
-            );
-            self.previous_output[0] = value;
+            value = self.apply_glottal(0, value);
         }
         self.lead[write] = value;
         (value, ratio)
@@ -1209,19 +1234,7 @@ impl Resynthesis {
                     // After the lead update, set the reader positions in
                     // voice order.
                     for (lane, position) in positions.iter_mut().enumerate() {
-                        let current_voice = voice + lane;
-                        let delay = ring(delayed as i32 - self.delays[current_voice]);
-                        let (period, _) = self.period_for(delay, write);
-                        self.current_output_period = period;
-                        let ratio = self.drift_ratio[current_voice];
-                        final_ratio = ratio;
-                        *position = self.move_reader(
-                            current_voice,
-                            ratio,
-                            period,
-                            self.delays[current_voice],
-                            false,
-                        );
+                        (*position, final_ratio) = self.move_choir_reader(voice + lane, delayed);
                     }
                     let values =
                         positions.map(|position| history::interpolation(&self.lead, position).0);
@@ -1243,13 +1256,8 @@ impl Resynthesis {
                 // The zero to three secondary readers that are left use
                 // scalar code.
                 for voice in voice..voice_count {
-                    let delay = ring(delayed as i32 - self.delays[voice]);
-                    let (period, _) = self.period_for(delay, write);
-                    self.current_output_period = period;
-                    let ratio = self.drift_ratio[voice];
+                    let (position, ratio) = self.move_choir_reader(voice, delayed);
                     final_ratio = ratio;
-                    let position =
-                        self.move_reader(voice, ratio, period, self.delays[voice], false);
                     let (value, _) = history::interpolation(&self.lead, position);
                     if self.config.stereo_output {
                         for (channel, sum) in mix.iter_mut().enumerate() {
@@ -1337,11 +1345,8 @@ impl Resynthesis {
                         self.formant_position,
                         numeric,
                     ));
-                    let value = Q14::from_bits(
-                        self.formant
-                            .model_glottal(value.to_bits(), self.previous_output[0].to_bits()),
-                    );
-                    self.previous_output = [value; 2];
+                    let value = self.apply_glottal(0, value);
+                    self.previous_output[1] = value;
                     mix[0] = value;
                 } else {
                     if mono {
@@ -1352,11 +1357,7 @@ impl Resynthesis {
                         .forward_stereo(mix.map(Q14::to_bits), self.formant_position, numeric)
                         .map(Q14::from_bits);
                     for (channel, value) in mix.iter_mut().enumerate() {
-                        *value = Q14::from_bits(self.formant.model_glottal(
-                            value.to_bits(),
-                            self.previous_output[channel].to_bits(),
-                        ));
-                        self.previous_output[channel] = *value;
+                        *value = self.apply_glottal(channel, *value);
                     }
                     mono = mono && mix[0] == mix[1];
                 }
