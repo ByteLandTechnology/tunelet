@@ -206,35 +206,35 @@ pub struct CorrectionConfigPatch {
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "boolean | undefined")
     )]
     pub enabled: Option<bool>,
     /// The configured target pitch classes (`NoteMask`).
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "NoteMask | undefined")
     )]
     pub notes: Option<NoteMask>,
     /// The half-life of the ratio in milliseconds, 0..=400.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub retune_ms: Option<f32>,
     /// The relaxation on sustained notes without a unit, 0..=1.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub humanize: Option<f32>,
     /// The outer soft-zone width of each target bin without a unit, 0..=1.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub flex_tune: Option<f32>,
 }
@@ -507,105 +507,105 @@ pub struct ResynthesisConfigPatch {
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "PitchConfigPatch | undefined")
     )]
     pub pitch: Option<PitchConfigPatch>,
     /// Optional changes to [`CorrectionConfig`].
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "CorrectionConfigPatch | undefined")
     )]
     pub correction: Option<CorrectionConfigPatch>,
     /// The pitch multiplier, 0.25..=4.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub pitch_ratio: Option<f32>,
     /// Optional changes to [`FormantConfig`].
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "FormantConfigPatch | undefined")
     )]
     pub formant: Option<FormantConfigPatch>,
     /// The voice arrangement (`MultiVoiceMode`).
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "MultiVoiceMode | undefined")
     )]
     pub mode: Option<MultiVoiceMode>,
     /// The total number of choir voices, with the lead voice, 1..=16.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub choir_voices: Option<u8>,
     /// The drift control for secondary voices, 10..=100, without a unit.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub choir_detune: Option<f32>,
     /// The scale of the choir delay table, 20..=200, without a unit.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub choir_delay: Option<f32>,
     /// The stereo width of the choir, 0..=100%.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub choir_spread_percent: Option<f32>,
     /// Enables a stereo pan for each voice (`true` or `false`).
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "boolean | undefined")
     )]
     pub stereo_output: Option<bool>,
     /// Optional changes to [`HarmonyConfig`].
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "HarmonyConfigPatch | undefined")
     )]
     pub harmony: Option<HarmonyConfigPatch>,
     /// The linear gain of the four harmony voices, 0..=1.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub harmony_gain: Option<f32>,
     /// The modulation depth, 0..=24, without a unit.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub harmonic_modulation: Option<f32>,
     /// The dry fraction at the resynthesis stage, 0..=1.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub dry_mix: Option<f32>,
     /// The seed for choir drift and aspiration (`0..=u64::MAX`).
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "bigint | undefined")
     )]
     pub random_seed: Option<u64>,
 }

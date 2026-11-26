@@ -344,42 +344,42 @@ pub struct ProcessorConfigPatch {
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "PunchConfigPatch | undefined")
     )]
     pub punch: Option<PunchConfigPatch>,
     /// Optional changes to [`WarmConfig`].
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "WarmConfigPatch | undefined")
     )]
     pub warm: Option<WarmConfigPatch>,
     /// Optional changes to [`ResynthesisConfig`].
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "ResynthesisConfigPatch | undefined")
     )]
     pub resynthesis: Option<ResynthesisConfigPatch>,
     /// Optional changes to [`AlienConfig`].
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "AlienConfigPatch | undefined")
     )]
     pub alien: Option<AlienConfigPatch>,
     /// Optional changes to [`ReverbConfig`].
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "ReverbConfigPatch | undefined")
     )]
     pub reverb: Option<ReverbConfigPatch>,
     /// The linear gain after all effects, 0..=64.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub output_gain: Option<f32>,
 }

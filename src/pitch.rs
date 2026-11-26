@@ -132,7 +132,7 @@ pub struct PitchConfigPatch {
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub threshold: Option<f32>,
     /// The lower bound of the feedback in hertz (inclusive), 40..=2000.
@@ -141,7 +141,7 @@ pub struct PitchConfigPatch {
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub min_frequency_hz: Option<f32>,
     /// The upper bound of the feedback in hertz (inclusive), 40..=2000.
@@ -150,7 +150,7 @@ pub struct PitchConfigPatch {
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub max_frequency_hz: Option<f32>,
 }

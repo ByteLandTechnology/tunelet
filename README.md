@@ -540,10 +540,10 @@ the Rust types.
 
 To change selected fields without a full configuration copy, give a
 `ProcessorConfigPatch` object to `patchConfig(patch)`. All fields in
-`ProcessorConfigPatch` and the stage patches are optional. Omitted fields keep
-their active values on the processor. `patchConfig()` validates the supplied
-fields and the pitch bounds before any state changes. Each successful call
-cancels an active drain, also for an empty `{}` patch.
+`ProcessorConfigPatch` and the stage patches are optional. Absent or `undefined`
+fields keep their active values on the processor. `patchConfig()` validates the
+supplied fields and the pitch bounds before any state changes. Each successful
+call cancels an active drain, also for an empty `{}` patch.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use

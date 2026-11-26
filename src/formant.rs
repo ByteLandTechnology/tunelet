@@ -148,35 +148,35 @@ pub struct FormantConfigPatch {
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "boolean | undefined")
     )]
     pub enabled: Option<bool>,
     /// The vocal-tract width factor, 0.5..=2.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub width: Option<f32>,
     /// The vocal-tract length factor, 0.5..=2.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub stretch: Option<f32>,
     /// The aspiration level, 0..=1, without a unit.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub aspiration_mix: Option<f32>,
     /// The high-pass cutoff for aspiration in hertz, 500..=10000.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub aspiration_cutoff_hz: Option<f32>,
 }

@@ -131,35 +131,35 @@ pub struct PunchConfigPatch {
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "boolean | undefined")
     )]
     pub enabled: Option<bool>,
     /// The input gain in decibels, -96..=12.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub gain_db: Option<f32>,
     /// The transient emphasis without a unit, 0..=1.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub impact: Option<f32>,
     /// The output ceiling of the saturation in dBFS, -96..=0.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub ceiling_db: Option<f32>,
     /// The attack half-life of the peak followers in milliseconds, 0.01..=5000.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub attack_ms: Option<f32>,
 }

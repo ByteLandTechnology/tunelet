@@ -71,14 +71,14 @@ pub struct WarmConfigPatch {
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "boolean | undefined")
     )]
     pub enabled: Option<bool>,
     /// The drive in decibels, 0..=6.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub drive_db: Option<f32>,
 }

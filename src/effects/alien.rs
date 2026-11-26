@@ -77,14 +77,14 @@ pub struct AlienConfigPatch {
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "boolean | undefined")
     )]
     pub enabled: Option<bool>,
     /// The loop length in frames, 1..=96000.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub loop_frames: Option<u32>,
 }

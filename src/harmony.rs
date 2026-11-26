@@ -462,42 +462,42 @@ pub struct HarmonyConfigPatch {
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "HarmonySource | undefined")
     )]
     pub source: Option<HarmonySource>,
     /// The pitch class of the tonic (`PitchClass`).
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "PitchClass | undefined")
     )]
     pub key: Option<PitchClass>,
     /// The scale for smart intervals and degree chords (`HarmonyScale`).
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "HarmonyScale | undefined")
     )]
     pub scale: Option<HarmonyScale>,
     /// Four fixed semitone offsets, each in -24..=24.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional, type = "[number, number, number, number]")
+        tsify(optional, type = "[number, number, number, number] | undefined")
     )]
     pub chromatic_intervals: Option<[i8; HARMONY_VOICES]>,
     /// Four offsets in scale steps, each in -14..=14.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional, type = "[number, number, number, number]")
+        tsify(optional, type = "[number, number, number, number] | undefined")
     )]
     pub diatonic_intervals: Option<[i8; HARMONY_VOICES]>,
     /// The named chord for [`HarmonySource::ChordByName`] (`ChordName`).
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "ChordName | undefined")
     )]
     pub chord: Option<ChordName>,
     /// The chord on a scale degree for [`HarmonySource::ChordByDegree`]
@@ -505,42 +505,42 @@ pub struct HarmonyConfigPatch {
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "ChordDegree | undefined")
     )]
     pub degree: Option<ChordDegree>,
     /// The inversion for named chords and degree chords (`Inversion`).
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "Inversion | undefined")
     )]
     pub inversion: Option<Inversion>,
     /// The chord register from low to high, 0..=100%.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub register_percent: Option<f32>,
     /// The chord spread from close to open, 0..=100%.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub voicing_spread_percent: Option<f32>,
     /// The half-life of the target period in milliseconds, 0..=10000.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub portamento_ms: Option<f32>,
     /// The number of voices that sound in the interval sources, 0..=4.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(skip_serializing_if = "Option::is_none"),
-        tsify(optional)
+        tsify(optional, type = "number | undefined")
     )]
     pub voices: Option<u8>,
 }
