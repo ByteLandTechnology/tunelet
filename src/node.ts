@@ -2,17 +2,19 @@
  * The ESM entry point for Node.js.
  *
  * Call `loadTunelet()` before you construct processors or read the default
- * configuration. This module re-exports all named exports of the module that
- * wasm-bindgen generates, which include `Tunelet`, `defaultConfig`, `initSync`
- * and the configuration, control-activity, event and feedback types.
+ * configuration. This module exports `TuneletAudioViews` and re-exports all
+ * named exports of the module that wasm-bindgen generates. Those exports
+ * include `Tunelet`, `defaultConfig`, `initSync` and the configuration,
+ * control-activity, event and feedback types.
  */
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
-import { init, isUrlLike, loadOnce } from "./shared.js";
+import { init, isUrlLike, loadOnce, TuneletAudioViews } from "./shared.js";
 import type { InitInput, InitOutput } from "./shared.js";
 
 export * from "../pkg/tunelet.js";
+export { TuneletAudioViews };
 
 /** Package subpaths for bundled Node.js scripts without `../pkg/`. */
 const PACKAGE_WASM_SPECIFIERS = [

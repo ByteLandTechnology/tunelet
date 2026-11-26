@@ -3,15 +3,16 @@
  *
  * Call `loadTunelet()` before you construct processors or read the default
  * configuration. Both environments use the same generated bindings and the
- * same Wasm binary. This module re-exports all named exports of the module
- * that wasm-bindgen generates, which include `Tunelet`, `defaultConfig`,
- * `initSync` and the configuration, control-activity, event and feedback
- * types.
+ * same Wasm binary. This module exports `TuneletAudioViews` and re-exports all
+ * named exports of the module that wasm-bindgen generates. Those exports
+ * include `Tunelet`, `defaultConfig`, `initSync` and the configuration,
+ * control-activity, event and feedback types.
  */
-import { init, isUrlLike, loadOnce } from "./shared.js";
+import { init, isUrlLike, loadOnce, TuneletAudioViews } from "./shared.js";
 import type { InitInput, InitOutput } from "./shared.js";
 
 export * from "../pkg/tunelet.js";
+export { TuneletAudioViews };
 
 /**
  * Initializes the Wasm module one time for this imported package instance.
