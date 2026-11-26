@@ -319,13 +319,14 @@ impl CorrectionTable {
             self.set_notes(fallback);
         }
     }
-    /// Applies an event whose MIDI ranges were already checked.
+    /// Applies an event whose MIDI ranges were already checked, and returns
+    /// `true` if the active target table changed.
     pub(crate) fn apply_validated_midi(
         &mut self,
         event: MidiEvent,
         mode: CorrectionMidiMode,
         fallback: NoteMask,
-    ) {
+    ) -> bool {
         match event {
             MidiEvent::NoteOn { note, velocity, .. } if velocity != 0 => {
                 let bit = 1_u128 << note;
@@ -338,6 +339,7 @@ impl CorrectionTable {
                     CorrectionMidiMode::Latch => self.latched,
                 };
                 self.set_notes(mask_from_bits(active));
+                true
             }
             MidiEvent::NoteOn { note, .. } | MidiEvent::NoteOff { note, .. } => {
                 self.keyboard &= !(1_u128 << note);
@@ -349,13 +351,16 @@ impl CorrectionTable {
                         self.midi_active = true;
                         self.set_notes(mask_from_bits(self.keyboard));
                     }
+                    return true;
                 }
+                false
             }
             MidiEvent::AllNotesOff => {
                 self.keyboard = 0;
                 self.latched = 0;
                 self.midi_active = false;
                 self.set_notes(fallback);
+                true
             }
         }
     }

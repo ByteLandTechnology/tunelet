@@ -92,7 +92,7 @@ pub enum HarmonySource {
     serde(rename_all = "camelCase")
 )]
 pub enum MidiChannelMap {
-    /// Channel `c` in `midi_base_channel..midi_base_channel + 4` controls
+    /// Channel `c` in `midi_base_channel..=midi_base_channel + 3` controls
     /// voice `c - midi_base_channel`. Other channels do not control voices.
     /// This is the default.
     #[default]
