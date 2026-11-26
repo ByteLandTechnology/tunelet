@@ -7,6 +7,10 @@ inputs:
     description: Optional Rust components, for example rustfmt and clippy.
     required: false
     default: ""
+  node-cache:
+    description: Optional cache mode for actions/setup-node, for example npm.
+    required: false
+    default: "npm"
   wasm-pack-version:
     description: The wasm-pack version.
     required: false
@@ -103,4 +107,4 @@ runs:
     - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version-file: ".node-version"
-        cache: "npm"
+        cache: ${{ inputs.node-cache }}

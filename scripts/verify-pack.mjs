@@ -4,8 +4,10 @@
  * `loadTunelet()`, the HTTP Wasm loaders and the `NodeNext` TypeScript
  * declarations.
  *
- * If you give `--out-dir <dir>`, the script writes both `.tgz` archives and
- * `SHA256SUMS.txt` to `<dir>` after all checks succeed.
+ * If you give `--ignore-scripts`, the script checks the pre-built `pkg/` and
+ * `dist/` files without a build. If you give `--out-dir <dir>`, the script
+ * writes both `.tgz` archives and `SHA256SUMS.txt` to `<dir>` after all checks
+ * succeed.
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -36,11 +38,33 @@ const PACKAGE_NAME_PATTERN =
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
-/** Read the optional `--out-dir` flag from `process.argv`. */
+/** If `filePath` is a regular file on disk, return `true`. */
+function isRegularFile(filePath) {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Check that all expected source files exist in `repoRoot`. */
+function verifyPrebuiltFiles() {
+  for (const archivePath of EXPECTED_ARCHIVE_PATHS) {
+    const relativeFile = archivePath.slice("package/".length);
+    const fullPath = path.join(repoRoot, relativeFile);
+    assert.ok(
+      isRegularFile(fullPath),
+      `Expected built file at ${relativeFile}`,
+    );
+  }
+}
+
+/** Read the optional `--ignore-scripts` and `--out-dir` flags from `process.argv`. */
 function parseCliOptions(argv) {
   const { values, positionals } = parseArgs({
     args: argv,
     options: {
+      "ignore-scripts": { type: "boolean", default: false },
       "out-dir": { type: "string" },
     },
     strict: true,
@@ -50,15 +74,16 @@ function parseCliOptions(argv) {
     0,
     `Unexpected positional arguments: ${positionals.join(" ")}`,
   );
+  const ignoreScripts = Boolean(values["ignore-scripts"]);
   const rawOutDir = values["out-dir"];
   if (rawOutDir === undefined) {
-    return { outDir: undefined };
+    return { ignoreScripts, outDir: undefined };
   }
   assert.ok(
     rawOutDir.trim().length > 0 && !rawOutDir.startsWith("-"),
     "--out-dir requires a directory path",
   );
-  return { outDir: path.resolve(process.cwd(), rawOutDir) };
+  return { ignoreScripts, outDir: path.resolve(process.cwd(), rawOutDir) };
 }
 
 /** Read and check the manifest in `package.json`. */
@@ -1003,8 +1028,11 @@ function writeVerifiedOutputs(outDir, archives) {
   );
 }
 
-const { outDir } = parseCliOptions(process.argv.slice(2));
+const { ignoreScripts, outDir } = parseCliOptions(process.argv.slice(2));
 const manifest = readPackageManifest();
+if (ignoreScripts) {
+  verifyPrebuiltFiles();
+}
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tunelet-verify-pack-"));
 
 try {
@@ -1019,6 +1047,7 @@ try {
     repoRoot,
     unscopedPackDir,
     unscopedFileName,
+    { ignoreScripts },
   );
   await verifyPackedArchive(
     unscopedWorkDir,
