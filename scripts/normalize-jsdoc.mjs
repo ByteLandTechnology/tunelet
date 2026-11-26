@@ -13,6 +13,7 @@ const pkgDir = path.join(repoRoot, "pkg");
 /** Exact Rust intra-doc link and literal replacements for TypeScript JSDoc. */
 const EXACT_REPLACEMENTS = [
   ["[`voiced`](Self::voiced)", "`voiced`"],
+  ["[`period_samples`](Self::period_samples)", "`periodSamples`"],
   ["[`voice_ratios`](Self::voice_ratios)", "`voiceRatios`"],
   ["[`voice_gains`](Self::voice_gains)", "`voiceGains`"],
   ["[`voice_count`](Self::voice_count)", "`voiceCount`"],
@@ -31,6 +32,10 @@ const EXACT_REPLACEMENTS = [
   ["[`Processor::process_mono_in_place_f32`]", "the native `f32` mono method"],
   ["[`Processor`]", "the native processor"],
   ["[`Feedback::processed_frames`]", "`Feedback.processedFrames`"],
+  ["[`Feedback::resample_ratio`]", "`Feedback.resampleRatio`"],
+  ["[`Feedback::period_samples`]", "`Feedback.periodSamples`"],
+  ["[`Feedback::frequency_hz`]", "`Feedback.frequencyHz`"],
+  ["[`Feedback::target_midi_note`]", "`Feedback.targetMidiNote`"],
   ["[`Feedback::voiced`]", "`Feedback.voiced`"],
   [
     "[`crate::ResynthesisConfig::choir_voices`]",
@@ -85,6 +90,11 @@ const EXACT_REPLACEMENTS = [
   ["[`HarmonyScale`]", "`HarmonyScale`"],
   ["[`Feedback`]", "`Feedback`"],
   ["[`HarmonyConfig`]", "`HarmonyConfig`"],
+  [
+    "[`ControlEvent::Parameter`]",
+    '`{ type: "parameter", value }` in `ControlEvent`',
+  ],
+  ["[`Self::Parameter`]", '`{ type: "parameter", value }`'],
   ["[`Self::I`]", '`"i"`'],
   ["[`Self::Echo`]", '`"echo"`'],
   ["[`ReverbMode::Echo`]", '`"echo"`'],
@@ -132,6 +142,10 @@ const PROSE_REPLACEMENTS = [
   [/\s+`Default`\s+sets\s+all\s+flags\s+to\s+`false`\./g, ""],
   [
     /\s+`Default`\s+gives\s+a\s+snapshot\s+with\s+all\s+zeros\s+and\s+no\s+target\.\s+It\s+does\s+not\s+read\s+the\s+nominal\s+latency\s+of\s+a\s+prepared\s+processor\./g,
+    "",
+  ],
+  [
+    /\s+`Default`\s+gives\s+a\s+snapshot\s+with\s+all\s+zeros\s+and\s+no\s+target\./g,
     "",
   ],
   [/\s+`Default`\s+gives\s+a\s+snapshot\s+with\s+all\s+zeros\./g, ""],

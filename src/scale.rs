@@ -261,8 +261,9 @@ impl CorrectionTable {
     /// Applies an event whose MIDI ranges were already checked, and returns
     /// `true` if the active note table reloaded.
     ///
-    /// If no key in 0..=127 is held or sustained, this method loads `notes`
-    /// again.
+    /// If sustain holds a released key, this method keeps the active note table
+    /// and returns `false`. If no key in 0..=127 is held or sustained, this
+    /// method loads `notes` again.
     pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent, notes: NoteMask) -> bool {
         match event {
             MidiEvent::NoteOn { note, velocity, .. } if velocity != 0 => {
@@ -276,7 +277,10 @@ impl CorrectionTable {
                     self.keyboard[idx] = false;
                     if self.sustain_held.contains(&true) {
                         self.sustained[idx] = true;
+                        return false;
                     }
+                } else if self.sustained[idx] {
+                    return false;
                 }
             }
             MidiEvent::PitchBend { value, .. } => {
