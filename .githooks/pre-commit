@@ -1,0 +1,27 @@
+#!/bin/sh
+# Check the Rust crate and the TypeScript package before a commit.
+set -eu
+
+if ! command -v cargo >/dev/null 2>&1 && [ -d "${HOME:-}/.cargo/bin" ]; then
+    PATH="$HOME/.cargo/bin:$PATH"
+    export PATH
+fi
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+cargo fmt --check
+cargo clippy --locked --lib -- -D warnings
+RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
+
+if [ -d pkg ] && [ -d node_modules ]; then
+    ./node_modules/.bin/tsc --noEmit
+elif ! git diff --cached --quiet -- src/wasm.rs src/index.ts; then
+    printf '%s\n' \
+        'pre-commit: changes in src/wasm.rs or src/index.ts require pkg/ and node_modules/.' \
+        'Run these commands before you commit:' \
+        '  rustup target add wasm32-unknown-unknown' \
+        '  npm ci' \
+        '  npm run build' >&2
+    exit 1
+fi
