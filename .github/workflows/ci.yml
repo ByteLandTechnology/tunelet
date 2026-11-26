@@ -1,5 +1,11 @@
 # Continuous integration for the Rust crate, the Wasm bindings and the
 # npm package.
+#
+# First, build-wasm checks the Rust lints, the docs, the crate archive and the
+# Wasm target on Linux, then uploads pkg/. In parallel, msrv checks
+# rust-version from Cargo.toml. Next, check-os builds the native library,
+# compiles TypeScript and checks the npm archives on Linux, macOS and Windows.
+# Last, verify reports one status check for branch protection.
 name: CI
 
 on:
@@ -18,7 +24,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  verify:
+  build-wasm:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -28,18 +34,74 @@ jobs:
       - uses: ./.github/actions/setup-wasm
         with:
           components: rustfmt, clippy
+          node-cache: ""
       - run: cargo fmt --check
       - run: cargo clippy --locked --lib -- -D warnings
-      - run: cargo build --locked --release
-        env:
-          RUSTFLAGS: "-D warnings"
       - run: cargo doc --locked --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
       - run: cargo package --locked
-      - run: npm ci
       - run: npm run check:wasm
-      - run: npm run verify:pack
+      - run: npm run build:wasm
+      # Upload the built pkg/ files for the cross-OS matrix.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm-pkg
+          path: |
+            pkg/tunelet.js
+            pkg/tunelet.d.ts
+            pkg/tunelet_bg.wasm
+          retention-days: 1
+          if-no-files-found: error
+
+  check-os:
+    needs: build-wasm
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        include:
+          - os: ubuntu-latest
+            cdylib: target/release/libtunelet.so
+          - os: macos-latest
+            cdylib: target/release/libtunelet.dylib
+          - os: windows-latest
+            cdylib: target/release/tunelet.dll
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-bin: "false"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-pkg
+          path: pkg
+          digest-mismatch: error
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ".node-version"
+          cache: "npm"
+      - run: cargo build --locked --release
+        env:
+          RUSTFLAGS: "-D warnings"
+      # Check that Cargo built the native dynamic library for this OS.
+      - run: node --input-type=module -e "import assert from 'node:assert/strict'; import fs from 'node:fs'; const stat = fs.statSync(process.env.CDYLIB); assert.ok(stat.isFile() && stat.size > 0);"
+        env:
+          CDYLIB: ${{ matrix.cdylib }}
+      - run: npm ci
+      - run: npm run build:ts
+      # Pack and check the pre-built files without a second Wasm build.
+      - run: npm run verify:pack -- --ignore-scripts
 
   msrv:
     runs-on: ubuntu-latest
@@ -62,3 +124,23 @@ jobs:
           cache-bin: "false"
       - run: cargo build --locked --lib
       - run: cargo build --locked --lib --target wasm32-unknown-unknown --features wasm
+
+  verify:
+    needs:
+      - build-wasm
+      - check-os
+      - msrv
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Fail if build-wasm, check-os or msrv did not succeed.
+      - run: |
+          if [ "${BUILD_WASM}" != "success" ] || [ "${CHECK_OS}" != "success" ] || [ "${MSRV}" != "success" ]; then
+            echo "Upstream job results: build-wasm=${BUILD_WASM}, check-os=${CHECK_OS}, msrv=${MSRV}" >&2
+            exit 1
+          fi
+        env:
+          BUILD_WASM: ${{ needs.build-wasm.result }}
+          CHECK_OS: ${{ needs.check-os.result }}
+          MSRV: ${{ needs.msrv.result }}
