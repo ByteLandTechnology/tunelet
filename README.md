@@ -325,14 +325,16 @@ reverb network.
 
 The telemetry includes these items:
 
-- The pitch ratio and the gain of each voice.
+- The pitch, the correction ratio and the frame count from the feedback.
+- The pitch ratio and the gain of each active voice.
 - The peaks of the input, of the two output channels and of the reverb wet
   signal.
 - The pitch clarity, which is a confidence score from 0 to 1.
 - The current gains of Punch and Warm, and the position in the Alien loop.
 
-The peak windows of the telemetry are independent of the peak window of the
-feedback. In mono calls, the output and reverb wet peaks measure the audio
+`active_voice_ratios()` and `active_voice_gains()` return slices for the active
+voices. The peak windows of the telemetry are independent of the peak window of
+the feedback. In mono calls, the output and reverb wet peaks measure the audio
 after the downmix. The dry path has the 1,593-frame delay. Resampled voices,
 choir delays and effects use different delays.
 
@@ -566,10 +568,11 @@ bindings.
 
 `controlActivity()` returns a `ControlActivity` object with camelCase boolean
 flags for the choir, harmony and reverb controls. `telemetry()` and
-`takeTelemetry()` return a `Telemetry` object.
+`takeTelemetry()` return a `Telemetry` object. In `Telemetry`, `voiceRatios`
+and `voiceGains` are `Float32Array` values of length `voiceCount`.
 
-In feedback, `targetMidiNote` is `undefined` in these cases, which are also
-the cases where `voiced` is `false`:
+In feedback and telemetry, `targetMidiNote` is `undefined` in these cases,
+which are also the cases where `voiced` is `false`:
 
 - The kept pitch estimate is unvoiced. This includes the time before the
   first detection and after a reset or a drain completion.

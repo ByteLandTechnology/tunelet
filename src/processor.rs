@@ -540,14 +540,15 @@ impl Processor {
         result
     }
 
-    /// Returns the state of the voices, the levels and the effects, and does
-    /// not clear the peak windows.
+    /// Returns the pitch, the state of the voices, the levels and the effects,
+    /// and does not clear the peak windows.
     ///
     /// The telemetry is for meters and displays. It does not change the
     /// audio. To start new peak windows, use
     /// [`take_telemetry`](Self::take_telemetry). The peak windows of the
     /// telemetry are independent of the peak window of [`Feedback`].
     pub fn telemetry(&self) -> Telemetry {
+        let estimate = self.resynthesis.estimate();
         let mut voice_ratios = [0.0; 16];
         let mut voice_gains = [0.0; 16];
         let voice_count = self.resynthesis.voices(&mut voice_ratios, &mut voice_gains);
@@ -557,6 +558,11 @@ impl Processor {
             input_peak: self.input_peak as f32 / 32_768.0,
             output_peak: self.output_peaks.map(|peak| peak as f32 / 32_768.0),
             reverb_wet_peak: self.reverb.wet_peak(),
+            resample_ratio: self.last_resample_ratio,
+            period_samples: estimate.period_samples,
+            frequency_hz: estimate.frequency_hz,
+            target_midi_note: self.resynthesis.target_note(),
+            voiced: estimate.voiced,
             clarity: self.resynthesis.clarity(),
             tracking: self.resynthesis.is_tracking(),
             voice_count,
@@ -1016,21 +1022,22 @@ pub struct Feedback {
     pub latency_frames: usize,
 }
 
-/// A snapshot of the voices, the levels and the effect state that you can
-/// copy.
+/// A snapshot of the pitch, the voices, the levels and the effect state that
+/// you can copy.
 ///
 /// Get it with [`Processor::telemetry`] or [`Processor::take_telemetry`]. The
 /// telemetry is for meters and displays. No audio calculation reads it.
-/// `Default` gives a snapshot with all zeros.
+/// `Default` gives a snapshot with all zeros and no target.
 ///
 /// The three peak fields measure a window. The window starts at
 /// construction, at a reset, at a change of stereo output or at a call to
 /// [`Processor::take_telemetry`]. This window is independent of the peak
 /// window of [`Feedback`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
-    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    derive(serde::Deserialize, tsify::Tsify),
     serde(rename_all = "camelCase"),
     tsify(large_number_types_as_bigints)
 )]
@@ -1057,12 +1064,46 @@ pub struct Telemetry {
     /// measure the wet signal after the downmix. While the reverb is disabled,
     /// the window gets no new values.
     pub reverb_wet_peak: f32,
+    /// The pitch-correction ratio from the last processed frame, where 1 is
+    /// unity, as [`Feedback::resample_ratio`] gives.
+    ///
+    /// It does not include the configured pitch shift or the ratios of
+    /// individual voices. It is zero before the first frame, after a reset or
+    /// after a change of stereo output.
+    pub resample_ratio: f32,
+    /// The reported input pitch period in samples, with fractional samples, as
+    /// [`Feedback::period_samples`] gives.
+    ///
+    /// If [`voiced`](Self::voiced) is `false`, this value is zero. The bounds
+    /// of [`crate::PitchConfig`] apply to this report.
+    pub period_samples: f32,
+    /// The reported input pitch frequency in hertz, as
+    /// [`Feedback::frequency_hz`] gives.
+    ///
+    /// The value comes from the sample rate and
+    /// [`period_samples`](Self::period_samples). If [`voiced`](Self::voiced)
+    /// is `false`, this value is zero.
+    pub frequency_hz: f32,
+    /// The correction target or the input pitch, as a MIDI note number, as
+    /// [`Feedback::target_midi_note`] gives.
+    ///
+    /// If correction selects a note from a non-empty table, the value is that
+    /// pitch class in the nearest octave. In other cases, the value is the
+    /// fractional MIDI note of the input. If [`voiced`](Self::voiced) is
+    /// `false`, and only then, this value is `None`.
+    pub target_midi_note: Option<f32>,
+    /// This field is `true` if the current pitch estimate is positive and
+    /// inside the bounds of [`crate::PitchConfig`].
+    ///
+    /// This is not an amplitude gate or a confidence score. A result can stay
+    /// between detector updates.
+    pub voiced: bool,
     /// How periodic the tracked input is, in 0..=1.
     ///
     /// The value is 1 for a signal that repeats exactly at the tracked
     /// period. It is 0 for a signal with no relation between cycles and
     /// during pitch acquisition. Use it as a confidence score for
-    /// [`Feedback::voiced`]. The tracker updates the related sums on each
+    /// [`voiced`](Self::voiced). The tracker updates the related sums on each
     /// frame.
     pub clarity: f32,
     /// This field is `true` if the pitch tracker follows a period. It is
@@ -1081,7 +1122,13 @@ pub struct Telemetry {
     /// harmony voices. In Choir mode, the entries after the lead are the
     /// secondary voices. Each ratio includes the correction, the configured
     /// pitch shift and the ratio of the voice. The entries after
-    /// [`voice_count`](Self::voice_count) are zero.
+    /// [`voice_count`](Self::voice_count) are zero. In JavaScript, this field
+    /// is a `Float32Array` of length `voiceCount`.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(deserialize_with = "crate::wasm::deserialize_voice_array"),
+        tsify(type = "Float32Array")
+    )]
     pub voice_ratios: [f32; 16],
     /// The linear gain of each voice, in the order of
     /// [`voice_ratios`](Self::voice_ratios).
@@ -1091,7 +1138,13 @@ pub struct Telemetry {
     /// velocity 127 gives the maximum, approximately +12 dB. The gain is zero
     /// for a voice that does not sound. It does not include the configured
     /// harmony level or the pan. The harmony controller updates it every 101
-    /// frames.
+    /// frames. In JavaScript, this field is a `Float32Array` of length
+    /// `voiceCount`.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(deserialize_with = "crate::wasm::deserialize_voice_array"),
+        tsify(type = "Float32Array")
+    )]
     pub voice_gains: [f32; 16],
     /// The effective linear gain of Punch at the current envelope level.
     ///
@@ -1123,4 +1176,26 @@ pub struct Telemetry {
     /// enabled. Compare two values to find if
     /// [`Processor::formant_envelope`] can give a new result.
     pub formant_generation: u32,
+}
+
+impl Telemetry {
+    /// Returns the pitch ratios of the active voices, from `0` to
+    /// [`voice_count`](Self::voice_count).
+    ///
+    /// If `voice_count` is more than 16, this method limits the slice length
+    /// to 16.
+    pub fn active_voice_ratios(&self) -> &[f32] {
+        let count = usize::from(self.voice_count).min(self.voice_ratios.len());
+        &self.voice_ratios[..count]
+    }
+
+    /// Returns the linear gains of the active voices, from `0` to
+    /// [`voice_count`](Self::voice_count).
+    ///
+    /// If `voice_count` is more than 16, this method limits the slice length
+    /// to 16.
+    pub fn active_voice_gains(&self) -> &[f32] {
+        let count = usize::from(self.voice_count).min(self.voice_gains.len());
+        &self.voice_gains[..count]
+    }
 }
