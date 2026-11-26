@@ -12,18 +12,6 @@ import init from "../pkg/tunelet.js";
 import type { InitInput, InitOutput, Tunelet } from "../pkg/tunelet.js";
 
 export * from "../pkg/tunelet.js";
-export type {
-  AlienConfigPatch,
-  CorrectionConfigPatch,
-  FormantConfigPatch,
-  HarmonyConfigPatch,
-  PitchConfigPatch,
-  ProcessorConfigPatch,
-  PunchConfigPatch,
-  ResynthesisConfigPatch,
-  ReverbConfigPatch,
-  WarmConfigPatch,
-} from "../pkg/tunelet.js";
 
 /**
  * Cached `Float32Array` views over the in-place `Tunelet` buffers in Wasm
