@@ -168,7 +168,7 @@ pub struct ProcessorConfig {
     /// before the fixed-point multiplication and the `-32767..=32767` wet clamp.
     /// Thus, a positive value below 1/256 also mutes the wet output.
     pub output_gain: f32,
-    /// The global wet fraction after `output_gain`, 0..=1.
+    /// The global wet fraction after the output gain, 0..=1.
     ///
     /// The default is 1. The dry weight is `1 - mix` in Q14. The dry path
     /// reads the raw mono input before Punch, with a delay of 1,593 frames. All
