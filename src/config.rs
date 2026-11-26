@@ -5,7 +5,7 @@ use crate::effects::punch::PunchConfig;
 use crate::effects::reverb::{ReverbConfig, ReverbMode};
 use crate::effects::warm::WarmConfig;
 use crate::error::{check_range, ConfigProblem};
-use crate::harmony::HarmonySource;
+use crate::harmony::{HarmonySource, MidiChannelMap};
 use crate::resynthesis::MultiVoiceMode;
 use crate::Error;
 use crate::ResynthesisConfig;
@@ -210,13 +210,14 @@ impl ProcessorConfig {
     /// the active modes.
     ///
     /// A `false` flag means that the related control makes no sample change in
-    /// the active voice mode, harmony source or reverb network. This method
-    /// does not allocate memory and does not validate ranges.
+    /// the active voice mode, harmony source, channel map or reverb network.
+    /// This method does not allocate memory and does not validate ranges.
     pub fn control_activity(self) -> ControlActivity {
         let choir = self.resynthesis.mode == MultiVoiceMode::Choir;
         let multi_choir = choir && self.resynthesis.choir_voices > 1;
         let harmony = self.resynthesis.mode == MultiVoiceMode::Harmony;
         let source = self.resynthesis.harmony.source;
+        let midi_channels = harmony && source == HarmonySource::MidiChannels;
         let interval = matches!(
             source,
             HarmonySource::FixedInterval | HarmonySource::SmartInterval
@@ -253,6 +254,9 @@ impl ProcessorConfig {
             harmony_voicing_spread_percent: harmony && chord,
             harmony_portamento_ms: harmony && (!interval || interval_voices),
             harmony_voices: harmony && interval,
+            harmony_midi_channel_map: midi_channels,
+            harmony_midi_base_channel: midi_channels
+                && self.resynthesis.harmony.midi_channel_map == MidiChannelMap::BaseWindow,
             harmony_gain: harmony && (!interval || interval_voices),
             reverb_mode: reverb,
             reverb_mix: reverb,
@@ -271,7 +275,7 @@ impl ProcessorConfig {
 /// Get this snapshot from [`ProcessorConfig::control_activity`] or
 /// [`crate::Processor::control_activity`]. A `false` flag means that the
 /// related control makes no sample change in the active voice mode, harmony
-/// source or reverb network. `Default` sets all flags to `false`.
+/// source, channel map or reverb network. `Default` sets all flags to `false`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -312,6 +316,10 @@ pub struct ControlActivity {
     pub harmony_portamento_ms: bool,
     /// `true` if [`crate::HarmonyConfig::voices`] is active.
     pub harmony_voices: bool,
+    /// `true` if [`crate::HarmonyConfig::midi_channel_map`] is active.
+    pub harmony_midi_channel_map: bool,
+    /// `true` if [`crate::HarmonyConfig::midi_base_channel`] is active.
+    pub harmony_midi_base_channel: bool,
     /// `true` if [`ResynthesisConfig::harmony_gain`] is active.
     pub harmony_gain: bool,
     /// `true` if [`ReverbConfig::mode`] is active.
