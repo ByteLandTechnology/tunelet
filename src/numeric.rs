@@ -135,17 +135,14 @@ impl AtanQ14 {
     /// The 48-bit reciprocal `ceil(2^48 / 300)` for the angle fraction.
     const DIV300_RECIP: u64 = (1u64 << 48).div_ceil(300);
 
-    /// Returns the interpolated arctangent of the input as Q14 radians.
+    /// Returns the interpolated arctangent of a Q14 input as Q14 radians.
     ///
-    /// The function shifts the input word into Q14 and finds the two adjacent
-    /// tangent entries. The caller selects the shift for the input format.
-    /// For example, Punch supplies Q14 and a shift of 0. If the magnitude is
-    /// larger than the last entry, the function uses a fixed terminal angle.
-    /// The signed arithmetic wraps.
-    pub(crate) fn process(&mut self, input: i32, shift: u32) -> i32 {
-        let value = input.wrapping_shl(shift);
-        let negative = value < 0;
-        let value = value.wrapping_abs();
+    /// The function finds the two adjacent tangent entries for the Q14 input.
+    /// If the magnitude is larger than the last entry, the function uses a
+    /// fixed terminal angle. The signed arithmetic wraps.
+    pub(crate) fn process(&mut self, input: i32) -> i32 {
+        let negative = input < 0;
+        let value = input.wrapping_abs();
         let mut index = self.index;
         if TAN[index] > value {
             let stop = index.saturating_sub(8).max(1);
