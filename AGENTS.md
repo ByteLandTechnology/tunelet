@@ -178,6 +178,9 @@ npm run verify:pack
   to make it look better.
 - Do not change fixed-point calculations to floating-point calculations.
 - Do not edit the generated files in `pkg/` or `dist/`.
+- Do not change `release-please` in `.github/workflows/release.yml` to a
+  GitHub App token. Keep `GITHUB_TOKEN` with write access to `contents`,
+  `issues` and `pull-requests`.
 
 ## Work method
 
