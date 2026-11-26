@@ -131,8 +131,11 @@ impl Processor {
     ///
     /// Returns [`Error::InvalidConfig`] if a stage field or the output gain is
     /// not valid. This check occurs before the allocation of the histories.
-    /// The types of `preparation` already make sure that the block limit is
-    /// not zero and that the sample rate is supported.
+    /// At resampled rates, if the scaled core buffers for
+    /// `prepare.max_block_frames` exceed the size limit or fail to allocate,
+    /// the method also returns [`Error::InvalidConfig`]. The types of
+    /// `preparation` already make sure that the block limit is not zero and
+    /// that the sample rate is supported.
     pub fn new(preparation: PrepareConfig, config: ProcessorConfig) -> Result<Self, Error> {
         config.validate()?;
         let host_rate = preparation.sample_rate;
