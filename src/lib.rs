@@ -26,15 +26,25 @@
 //!
 //! # Audio and timed controls
 //!
-//! There are three process methods:
+//! Each buffer layout has an `i16` method and an `f32` method:
 //!
-//! - [`Processor::process`] writes `[left, right]` frames.
-//! - [`Processor::process_planar`] writes separate channels.
-//! - [`Processor::process_mono_in_place`] replaces the input with the stereo
+//! - [`Processor::process`] and [`Processor::process_f32`] write `[left, right]`
+//!   frames.
+//! - [`Processor::process_planar`] and [`Processor::process_planar_f32`] write
+//!   separate channels.
+//! - [`Processor::process_mono_in_place`] and
+//!   [`Processor::process_mono_in_place_f32`] replace the input with the stereo
 //!   downmix.
 //!
+//! [`Processor::drain`], [`Processor::drain_planar`] and
+//! [`Processor::drain_mono`] have the equivalents [`Processor::drain_f32`],
+//! [`Processor::drain_planar_f32`] and [`Processor::drain_mono_f32`].
 //! These layouts do not depend on [`ResynthesisConfig::stereo_output`], which
-//! controls voice panning. The output is clipped to -32767..=32767.
+//! controls voice panning. The `i16` output is clipped to `-32767..=32767`.
+//! For `f32` calls, `NaN` input becomes `0`, and other values clamp to
+//! `-1.0..=1.0`, multiply by `32767.0` and round to `-32767..=32767`. Each
+//! `f32` output sample divides the clipped `i16` sample or downmix by
+//! `32768.0`, and unused drain frames get `0.0`.
 //!
 //! An event applies before its selected frame. Offsets must be in the current
 //! block and must not decrease. Events with equal offsets execute in slice
@@ -99,7 +109,8 @@
 //!
 //! To export JavaScript bindings and generated TypeScript definitions, enable
 //! the optional `wasm` feature for `wasm32-unknown-unknown`. The binding owns
-//! PCM, event and packed MIDI buffers that it uses again. Configuration
+//! reusable `i16`, `f32`, event and packed MIDI buffers, and exposes fixed
+//! `f32` pointers for in-place audio. Configuration conversion, event
 //! conversion, initial buffer growth, feedback objects and errors cause more
 //! allocation at the JavaScript boundary. Packed MIDI calls copy a
 //! `Uint32Array` in one call and do not allocate after the buffer reserves
