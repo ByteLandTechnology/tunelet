@@ -3,8 +3,8 @@
 //!
 //! Acquisition checks that repeated minima agree inside the active vocal
 //! range. Tracking refines the period in a window of 40 lags and checks cycle
-//! clarity. The active vocal range filters acquisition, tracking and feedback
-//! to the host.
+//! clarity. The active vocal range filters acquisition, tracking and pitch
+//! reports to the host.
 
 mod search;
 pub(crate) mod tracker;
@@ -17,7 +17,10 @@ use crate::{Error, SampleRate};
 ///
 /// The default is [`Self::Custom`], which uses `min_frequency_hz` and
 /// `max_frequency_hz` from [`PitchConfig`]. Each other variant sets fixed
-/// inclusive bounds for pitch acquisition, tracking and feedback reports.
+/// inclusive bounds for pitch acquisition, tracking and pitch reports. The
+/// processor converts the hertz bounds to fixed-point period limits with a
+/// small quantization tolerance. Because of this tolerance, a reported boundary
+/// frequency can be slightly outside the nominal hertz bounds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -72,16 +75,19 @@ pub struct PitchConfig {
     ///
     /// The default is 40. It must be strictly less than `max_frequency_hz`,
     /// also when a named preset in `vocal_range` overrides it. Pitches below
-    /// the active range do not acquire or track, and feedback reports them as
-    /// unvoiced.
+    /// the active period limit do not acquire or track, and reports show them
+    /// as unvoiced. A small period tolerance keeps boundary pitches voiced, so
+    /// a reported frequency can be slightly below this bound.
     pub min_frequency_hz: f32,
     /// The upper bound for [`VocalRange::Custom`] in hertz (inclusive),
     /// 40..=2000.
     ///
     /// The default is 1100. It must be strictly greater than
     /// `min_frequency_hz`, also when a named preset in `vocal_range` overrides
-    /// it. Pitches above the active range do not acquire or track, and
-    /// feedback reports them as unvoiced.
+    /// it. Pitches above the active period limit do not acquire or track, and
+    /// reports show them as unvoiced. A small period tolerance keeps boundary
+    /// pitches voiced, so a reported frequency can be slightly above this
+    /// bound.
     pub max_frequency_hz: f32,
 }
 
@@ -118,7 +124,9 @@ impl PitchConfig {
     }
 
     /// Converts the active frequency bounds into inclusive Q6 period limits
-    /// `(min_period, max_period)` at `rate`.
+    /// `(min_period, max_period)` at `rate`. The limits include a Q6
+    /// quantization tolerance of `(raw >> 10).max(8)` bits (`0.125` samples
+    /// minimum).
     pub(crate) fn period_bounds(self, rate: SampleRate) -> (Q6, Q6) {
         let (min_hz, max_hz) = self.frequency_bounds();
         let scale = f64::from(rate.as_u32()) * 64.0;
@@ -134,9 +142,12 @@ impl PitchConfig {
 
     /// Applies the active Q6 period limits at `rate` to a kept estimate.
     ///
-    /// If the estimate is not voiced or its period is outside the active
-    /// range, the result is the unvoiced value with all fields zero. The
-    /// function does not change the tracker state or the correction state.
+    /// Because `period_bounds` includes the Q6 quantization tolerance,
+    /// `estimate.frequency_hz` at a boundary can be slightly outside the
+    /// nominal hertz bounds. If the estimate is not voiced or its period is
+    /// outside the active limits, the result is the unvoiced value with all
+    /// fields zero. The function does not change the tracker state or the
+    /// correction state.
     pub(crate) fn report(
         self,
         rate: SampleRate,
@@ -165,7 +176,7 @@ impl PitchConfig {
     /// [`ConfigProblem::Unordered`]. The `other` value of that problem is
     /// `resynthesis.pitch.max_frequency_hz`.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("resynthesis.pitch.threshold", self.threshold, 0.002, 0.2)?;
+        validate_threshold(self.threshold)?;
         let (min, max) = (
             "resynthesis.pitch.min_frequency_hz",
             "resynthesis.pitch.max_frequency_hz",
@@ -177,6 +188,11 @@ impl PitchConfig {
         }
         Ok(())
     }
+}
+
+/// Checks the range of the pitch acquisition threshold.
+pub(crate) fn validate_threshold(threshold: f32) -> Result<(), Error> {
+    check_range("resynthesis.pitch.threshold", threshold, 0.002, 0.2)
 }
 
 /// A pitch estimate as a period in samples and a frequency in hertz.

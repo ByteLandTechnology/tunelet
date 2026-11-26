@@ -163,7 +163,7 @@ impl PitchTracker {
     /// outside the new limits, the function clears it immediately.
     pub(crate) fn set_config(&mut self, config: PitchConfig) -> bool {
         let was_tracking = !self.detecting;
-        self.threshold = Q14::from_f64(config.threshold as f64);
+        self.set_threshold(config.threshold);
         let (min_period, max_period) = config.period_bounds(self.rate);
         self.min_period = min_period;
         self.max_period = max_period;
@@ -177,6 +177,11 @@ impl PitchTracker {
             self.holdoff_frames = 0;
         }
         was_tracking && self.detecting
+    }
+
+    /// Quantizes and stores a validated acquisition threshold.
+    pub(crate) fn set_threshold(&mut self, threshold: f32) {
+        self.threshold = Q14::from_f64(threshold as f64);
     }
 
     /// Clears the full-rate audio, the current and previous periods and the
