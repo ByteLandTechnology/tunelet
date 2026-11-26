@@ -536,7 +536,7 @@ impl Resynthesis {
             modulation: 0,
             modulation_phase: Q14::ZERO,
             dry_mix: Q8::ZERO,
-            old_position: position_of(-READER_LAG_FRAMES),
+            old_position: Q14::ZERO,
             fade: Q14::ONE,
             current_output_period: Q6::ZERO,
             control_counter: CONTROL_DUE,
