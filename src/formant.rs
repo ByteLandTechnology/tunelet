@@ -100,13 +100,41 @@ impl FormantConfig {
     /// Returns the first [`Error::InvalidConfig`], with the dotted path of the
     /// field and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("resynthesis.formant.width", self.width, 0.5, 2.0)?;
-        check_range("resynthesis.formant.stretch", self.stretch, 0.5, 2.0)?;
-        let field = "resynthesis.formant.aspiration_mix";
-        check_range(field, self.aspiration_mix, 0.0, 1.0)?;
-        let field = "resynthesis.formant.aspiration_cutoff_hz";
-        check_range(field, self.aspiration_cutoff_hz, 500.0, 10000.0)
+        validate_width(self.width)?;
+        validate_stretch(self.stretch)?;
+        validate_aspiration_mix(self.aspiration_mix)?;
+        validate_aspiration_cutoff_hz(self.aspiration_cutoff_hz)
     }
+}
+
+/// Checks the range of the vocal-tract width.
+pub(crate) fn validate_width(width: f32) -> Result<(), Error> {
+    check_range("resynthesis.formant.width", width, 0.5, 2.0)
+}
+
+/// Checks the range of the vocal-tract length.
+pub(crate) fn validate_stretch(stretch: f32) -> Result<(), Error> {
+    check_range("resynthesis.formant.stretch", stretch, 0.5, 2.0)
+}
+
+/// Checks the range of the aspiration mix.
+pub(crate) fn validate_aspiration_mix(aspiration_mix: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.formant.aspiration_mix",
+        aspiration_mix,
+        0.0,
+        1.0,
+    )
+}
+
+/// Checks the range of the aspiration high-pass cutoff.
+pub(crate) fn validate_aspiration_cutoff_hz(aspiration_cutoff_hz: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.formant.aspiration_cutoff_hz",
+        aspiration_cutoff_hz,
+        500.0,
+        10000.0,
+    )
 }
 
 /// The number of frames in each analysis step. The analysis output has a
@@ -219,6 +247,11 @@ pub(crate) struct Formant {
     /// The validated formant controls. The resynthesis caller decides if this
     /// stage runs.
     config: FormantConfig,
+    /// The validated vocal-tract width multipliers of the four harmony voices.
+    voice_width: [f32; HARMONY_VOICES],
+    /// The validated vocal-tract length multipliers of the four harmony
+    /// voices.
+    voice_stretch: [f32; HARMONY_VOICES],
     /// The sample rate for analysis windows, glottal decay and the aspiration
     /// filter.
     rate: SampleRate,
@@ -296,6 +329,8 @@ pub(crate) struct Formant {
     /// The Q14 compensation, from the aspiration cutoff divided by the
     /// sample rate.
     noise_amplitude: i32,
+    /// If `true`, the stage mutes aspiration temporarily for a drain.
+    aspiration_muted: bool,
     /// The wrapping count of model designs that the stage tried. Only the
     /// telemetry reads it.
     generation: u32,
@@ -331,6 +366,8 @@ impl Formant {
         let d2 = rate.hz() as f64 * d1 / 44100.0;
         let mut result = Self {
             config,
+            voice_width,
+            voice_stretch,
             rate,
             input: vec![0; HISTORY + ORDER],
             temporary: vec![0_i32; (2 * (rate.as_u32() as usize / 40) + MAX_ORDER + 256).max(2865)],
@@ -364,17 +401,30 @@ impl Formant {
             noise_filter: Biquad::new(),
             noise_gain: 0_i32,
             noise_amplitude: 0_i32,
+            aspiration_muted: false,
             generation: 0,
             bank_epoch: 0,
         };
-        result.set_config(config, voice_width, voice_stretch);
+        result.configure_all();
         result
     }
-    /// Quantizes the width and the stretch for one synthesis voice slot and
-    /// builds its Q7 area map.
-    fn configure_voice_tract(&mut self, slot: usize, width: f64, stretch: f64) {
+    /// Sets the temporary aspiration mute for a drain without a change to the
+    /// configuration.
+    pub(crate) fn set_aspiration_muted(&mut self, muted: bool) {
+        self.aspiration_muted = muted;
+    }
+    /// Quantizes the vocal-tract width and its square for one voice slot.
+    fn configure_slot_width(&mut self, slot: usize, width: f64) {
         self.width[slot] = (width * 16384.0) as i32;
         self.width_squared[slot] = (width * width * 16384.0) as i32;
+    }
+    /// Quantizes the stretch factor and builds the Q7 area map for one voice
+    /// slot.
+    ///
+    /// A valid stretch gives a model with 25 to 99 entries. Thus, the last
+    /// point of each map and the denominators of the interpolation are always
+    /// defined.
+    fn configure_slot_stretch(&mut self, slot: usize, stretch: f64) {
         self.stretch[slot] = (stretch * 16384.0) as i32;
         let count = (((ORDER - 1) as f64 * stretch + 1.001) as usize).min(MAX_ORDER);
         self.stretch_count[slot] = count;
@@ -384,34 +434,111 @@ impl Formant {
         }
         self.stretch_map[slot][count - 1] = ((ORDER - 1) * 128) as i32;
     }
-    /// Quantizes the validated controls, prepares the Q7 maps for the area
-    /// interpolation and updates the coefficients of the aspiration filter.
+    /// Quantizes the vocal-tract width and its square for all five voice slots
+    /// unconditionally.
+    fn configure_width(&mut self) {
+        let lead_width = f64::from(self.config.width);
+        self.configure_slot_width(0, lead_width);
+        for voice in 0..HARMONY_VOICES {
+            let width = (lead_width * f64::from(self.voice_width[voice])).clamp(0.5, 2.0);
+            self.configure_slot_width(voice + 1, width);
+        }
+    }
+    /// Quantizes the stretch factor and prepares the Q7 interpolation maps for
+    /// all five voice slots unconditionally.
+    fn configure_stretch(&mut self) {
+        let lead_stretch = f64::from(self.config.stretch);
+        self.configure_slot_stretch(0, lead_stretch);
+        for voice in 0..HARMONY_VOICES {
+            let stretch = (lead_stretch * f64::from(self.voice_stretch[voice])).clamp(0.5, 2.0);
+            self.configure_slot_stretch(voice + 1, stretch);
+        }
+    }
+    /// Quantizes the aspiration wet mix unconditionally.
+    fn configure_aspiration_mix(&mut self) {
+        self.noise_gain = (self.config.aspiration_mix as f64 * 16384.0) as i32;
+    }
+    /// Updates the compensation and high-pass filter for aspiration
+    /// unconditionally.
+    fn configure_aspiration_cutoff_hz(&mut self) {
+        let frequency = (self.config.aspiration_cutoff_hz as i32)
+            .min((self.rate.hz() as f64 * 0.48) as i32)
+            .max(500);
+        self.noise_amplitude = (frequency as f64 * 0.8 / self.rate.hz() as f64 * 16384.0) as i32;
+        self.noise_filter
+            .set_design(Design::high_pass(self.rate.hz(), frequency as f32, 0.707));
+    }
+    /// Initializes all configurable controls and filter coefficients
+    /// unconditionally.
+    fn configure_all(&mut self) {
+        self.configure_width();
+        self.configure_stretch();
+        self.configure_aspiration_mix();
+        self.configure_aspiration_cutoff_hz();
+    }
+    /// Updates the quantized controls, the Q7 area maps and the aspiration
+    /// filter for the fields that changed.
     ///
-    /// The histories do not change. A valid stretch gives a model with 25 to
-    /// 99 entries. Thus, the last point of each map and the denominators of
-    /// the interpolation are always defined.
+    /// The histories do not change.
     pub(crate) fn set_config(
         &mut self,
         config: FormantConfig,
         voice_width: [f32; HARMONY_VOICES],
         voice_stretch: [f32; HARMONY_VOICES],
     ) {
+        let old = self.config;
+        let old_voice_width = self.voice_width;
+        let old_voice_stretch = self.voice_stretch;
         self.config = config;
-        let lead_width = f64::from(config.width);
-        let lead_stretch = f64::from(config.stretch);
-        self.configure_voice_tract(0, lead_width, lead_stretch);
-        for voice in 0..HARMONY_VOICES {
-            let width = (lead_width * f64::from(voice_width[voice])).clamp(0.5, 2.0);
-            let stretch = (lead_stretch * f64::from(voice_stretch[voice])).clamp(0.5, 2.0);
-            self.configure_voice_tract(voice + 1, width, stretch);
+        self.voice_width = voice_width;
+        self.voice_stretch = voice_stretch;
+        if old.width != config.width || old_voice_width != voice_width {
+            self.configure_width();
         }
-        self.noise_gain = (config.aspiration_mix as f64 * 16384.0) as i32;
-        let frequency = (config.aspiration_cutoff_hz as i32)
-            .min((self.rate.hz() as f64 * 0.48) as i32)
-            .max(500);
-        self.noise_amplitude = (frequency as f64 * 0.8 / self.rate.hz() as f64 * 16384.0) as i32;
-        self.noise_filter
-            .set_design(Design::high_pass(self.rate.hz(), frequency as f32, 0.707));
+        if old.stretch != config.stretch || old_voice_stretch != voice_stretch {
+            self.configure_stretch();
+        }
+        if old.aspiration_mix != config.aspiration_mix {
+            self.configure_aspiration_mix();
+        }
+        if old.aspiration_cutoff_hz != config.aspiration_cutoff_hz {
+            self.configure_aspiration_cutoff_hz();
+        }
+    }
+    /// Stores the vocal-tract width. If the value changed, quantizes all five
+    /// voice slots again.
+    pub(crate) fn set_width(&mut self, width: f32) {
+        let changed = self.config.width != width;
+        self.config.width = width;
+        if changed {
+            self.configure_width();
+        }
+    }
+    /// Stores the vocal-tract stretch. If the value changed, prepares the area
+    /// maps for all five voice slots again.
+    pub(crate) fn set_stretch(&mut self, stretch: f32) {
+        let changed = self.config.stretch != stretch;
+        self.config.stretch = stretch;
+        if changed {
+            self.configure_stretch();
+        }
+    }
+    /// Stores the aspiration mix. If the value changed, quantizes it again.
+    pub(crate) fn set_aspiration_mix(&mut self, aspiration_mix: f32) {
+        let changed = self.config.aspiration_mix != aspiration_mix;
+        self.config.aspiration_mix = aspiration_mix;
+        if changed {
+            self.configure_aspiration_mix();
+        }
+    }
+    /// Stores the aspiration cutoff. If the value changed, updates the
+    /// high-pass filter.
+    pub(crate) fn set_aspiration_cutoff_hz(&mut self, aspiration_cutoff_hz: f32) {
+        let changed = self.config.aspiration_cutoff_hz != aspiration_cutoff_hz;
+        self.config.aspiration_cutoff_hz = aspiration_cutoff_hz;
+        if changed {
+            self.configure_aspiration_cutoff_hz();
+        }
     }
     /// Clears the audio, the stamps, the synthesis histories and the history
     /// of the aspiration filter.
@@ -420,6 +547,7 @@ impl Formant {
     /// the correlation smoothing again. The other banks stay allocated. The
     /// stage clears each bank when it uses that bank again.
     pub(crate) fn reset(&mut self) {
+        self.aspiration_muted = false;
         if !self.dirty {
             return;
         }
@@ -787,11 +915,11 @@ impl Formant {
     /// Blends random aspiration into a Q14 sample word. The signal modulates
     /// the aspiration, and a high-pass filter changes it.
     ///
-    /// If the level is 0.01 or less, the function returns immediately. The
-    /// random stream and the noise filter then do not advance. If not, the
-    /// function reads one random value.
+    /// If the stage mutes aspiration or the level is 0.01 or less, the
+    /// function returns immediately. The random stream and the noise filter
+    /// then do not advance. If not, the function reads one random value.
     fn add_noise(&mut self, sample: i32, context: &mut NumericContext) -> i32 {
-        if self.config.aspiration_mix <= 0.01 {
+        if self.aspiration_muted || self.config.aspiration_mix <= 0.01 {
             return sample;
         }
         let random = context.random.next_u31() >> 17;
@@ -1065,10 +1193,11 @@ impl Formant {
     /// Reads at most one random value for the current Harmony frame and
     /// advances the aspiration filter one time.
     ///
-    /// If the aspiration level is 0.01 or less, the function returns `None`.
-    /// Then the random stream and the noise filter do not advance.
+    /// If the stage mutes aspiration or the level is 0.01 or less, the
+    /// function returns `None`. Then the random stream and the noise filter do
+    /// not advance.
     pub(crate) fn prepare_noise(&mut self, context: &mut NumericContext) -> Option<i32> {
-        if self.config.aspiration_mix <= 0.01 {
+        if self.aspiration_muted || self.config.aspiration_mix <= 0.01 {
             return None;
         }
         self.dirty = true;

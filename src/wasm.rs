@@ -31,10 +31,11 @@
 //!   `[false, false, false, false]`.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
-//! `{ type, value }`, and the reset control has no `value`. MIDI messages use
-//! `{ type, channel, note, velocity }`, with the fields that apply to the
-//! selected variant. The TypeScript declarations come from the same Rust types
-//! that validation uses.
+//! `{ type, value }`, and the reset control has no `value`. Scalar parameter
+//! events nest `{ type, value }` inside `{ type: "parameter", value }`. MIDI
+//! messages use `{ type, channel, note, velocity }`, with the fields that
+//! apply to the selected variant. The TypeScript declarations come from the
+//! same Rust types that validation uses.
 //!
 //! The class allocates the PCM storage at construction and uses it again for
 //! each block. It also keeps an event buffer and uses that capacity again
@@ -57,13 +58,14 @@
 use crate::events::ValidatedEvents;
 use crate::processor::EnvelopeKey;
 use crate::{
-    ControlActivity, ControlEvent, Error, Feedback, MidiEvent, PrepareConfig, Processor,
-    ProcessorConfig, SampleRate, Telemetry, TimedEvent,
+    ControlActivity, ControlEvent, Error, Feedback, MidiEvent, ParameterControl, PrepareConfig,
+    Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
 };
-use js_sys::{Array, Float32Array, Int16Array, Reflect};
+use js_sys::{Array, Float32Array, Int16Array, Object, Reflect};
 use serde::{Deserialize, Serialize};
 use tsify::{serde_wasm_bindgen, Ts, Tsify};
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 /// The events for one call that processes audio (`TimedEvent[]` in TypeScript).
 ///
@@ -328,7 +330,9 @@ impl WasmProcessor {
         Error::check_length(frames, right.length() as usize)?;
         self.processor.check_block(frames)?;
         let events = match events {
-            Some(events) => decode_events(&mut self.events, events, frames)?,
+            Some(events) => {
+                decode_events(&mut self.events, events, frames, self.processor.config())?
+            }
             None => &[],
         };
         input.copy_to(&mut self.input[..frames]);
@@ -362,7 +366,9 @@ impl WasmProcessor {
         let frames = audio.length() as usize;
         self.processor.check_block(frames)?;
         let events = match events {
-            Some(events) => decode_events(&mut self.events, events, frames)?,
+            Some(events) => {
+                decode_events(&mut self.events, events, frames, self.processor.config())?
+            }
             None => &[],
         };
         audio.copy_to(&mut self.input[..frames]);
@@ -401,7 +407,9 @@ impl WasmProcessor {
         Error::check_length(frames, right.length() as usize)?;
         self.processor.check_block(frames)?;
         let events = match events {
-            Some(events) => decode_events(&mut self.events, events, frames)?,
+            Some(events) => {
+                decode_events(&mut self.events, events, frames, self.processor.config())?
+            }
             None => &[],
         };
         input.copy_to(&mut self.input_f32[..frames]);
@@ -436,7 +444,9 @@ impl WasmProcessor {
         let frames = audio.length() as usize;
         self.processor.check_block(frames)?;
         let events = match events {
-            Some(events) => decode_events(&mut self.events, events, frames)?,
+            Some(events) => {
+                decode_events(&mut self.events, events, frames, self.processor.config())?
+            }
             None => &[],
         };
         audio.copy_to(&mut self.input_f32[..frames]);
@@ -467,7 +477,9 @@ impl WasmProcessor {
     ) -> Result<(), JsError> {
         let frames = self.check_frames(frames)?;
         let events = match events {
-            Some(events) => decode_events(&mut self.events, events, frames)?,
+            Some(events) => {
+                decode_events(&mut self.events, events, frames, self.processor.config())?
+            }
             None => &[],
         };
         self.processor.process_planar_f32(
@@ -499,7 +511,9 @@ impl WasmProcessor {
     ) -> Result<(), JsError> {
         let frames = self.check_frames(frames)?;
         let events = match events {
-            Some(events) => decode_events(&mut self.events, events, frames)?,
+            Some(events) => {
+                decode_events(&mut self.events, events, frames, self.processor.config())?
+            }
             None => &[],
         };
         self.processor
@@ -713,16 +727,18 @@ impl WasmProcessor {
 
     /// Returns a new telemetry object and does not clear its peak windows.
     ///
-    /// The telemetry is for meters and displays. It gives the ratio and the
-    /// gain of each voice, the input and output peaks, the pitch clarity and
-    /// the state of the effects. `processedFrames` is a `bigint`. See
-    /// `Telemetry` for each measurement.
+    /// The telemetry is for meters and displays. It gives the pitch, the
+    /// active voice ratios and gains, the peaks, the clarity and the effect
+    /// state. `voiceRatios` and `voiceGains` are `Float32Array` values of
+    /// length `voiceCount`. If `voiced` is `false`, `targetMidiNote` is
+    /// `undefined`. `processedFrames` is a `bigint`. See `Telemetry` for each
+    /// measurement.
     ///
     /// # Errors
     ///
     /// If the conversion to a JavaScript object fails, this method throws.
     pub fn telemetry(&self) -> Result<Ts<Telemetry>, JsError> {
-        Ok(self.processor.telemetry().into_ts()?)
+        Ok(serialize_telemetry(&self.processor.telemetry()))
     }
 
     /// Returns the telemetry and clears only its three peak windows.
@@ -736,7 +752,7 @@ impl WasmProcessor {
     /// object.
     #[wasm_bindgen(js_name = takeTelemetry)]
     pub fn take_telemetry(&mut self) -> Result<Ts<Telemetry>, JsError> {
-        let telemetry = self.processor.telemetry().into_ts()?;
+        let telemetry = serialize_telemetry(&self.processor.telemetry());
         self.processor.take_telemetry();
         Ok(telemetry)
     }
@@ -818,6 +834,24 @@ impl WasmProcessor {
     }
 }
 
+/// One cached `ParameterControl` discriminant and its constructor.
+struct ParameterKey<T> {
+    name: JsValue,
+    field: &'static str,
+    make: fn(T) -> ParameterControl,
+}
+
+impl<T> ParameterKey<T> {
+    /// Allocates one cached discriminant key and stores its constructor.
+    fn new(name: &'static str, field: &'static str, make: fn(T) -> ParameterControl) -> Self {
+        Self {
+            name: JsValue::from_str(name),
+            field,
+            make,
+        }
+    }
+}
+
 /// The cached property keys and variant names for JavaScript events.
 struct EventKeys {
     offset: JsValue,
@@ -830,6 +864,7 @@ struct EventKeys {
     midi: JsValue,
     correction_midi: JsValue,
     output_gain: JsValue,
+    parameter: JsValue,
     reset: JsValue,
     configure: JsValue,
     resynthesis: JsValue,
@@ -840,6 +875,8 @@ struct EventKeys {
     note_on: JsValue,
     note_off: JsValue,
     all_notes_off: JsValue,
+    f32_parameters: [ParameterKey<f32>; 27],
+    u8_parameters: [ParameterKey<u8>; 2],
 }
 
 impl EventKeys {
@@ -856,6 +893,7 @@ impl EventKeys {
             midi: JsValue::from_str("midi"),
             correction_midi: JsValue::from_str("correctionMidi"),
             output_gain: JsValue::from_str("outputGain"),
+            parameter: JsValue::from_str("parameter"),
             reset: JsValue::from_str("reset"),
             configure: JsValue::from_str("configure"),
             resynthesis: JsValue::from_str("resynthesis"),
@@ -866,6 +904,135 @@ impl EventKeys {
             note_on: JsValue::from_str("noteOn"),
             note_off: JsValue::from_str("noteOff"),
             all_notes_off: JsValue::from_str("allNotesOff"),
+            f32_parameters: [
+                ParameterKey::new(
+                    "punchGainDb",
+                    "punchGainDb value",
+                    ParameterControl::PunchGainDb,
+                ),
+                ParameterKey::new(
+                    "punchImpact",
+                    "punchImpact value",
+                    ParameterControl::PunchImpact,
+                ),
+                ParameterKey::new(
+                    "punchCeilingDb",
+                    "punchCeilingDb value",
+                    ParameterControl::PunchCeilingDb,
+                ),
+                ParameterKey::new(
+                    "punchAttackMs",
+                    "punchAttackMs value",
+                    ParameterControl::PunchAttackMs,
+                ),
+                ParameterKey::new(
+                    "warmDriveDb",
+                    "warmDriveDb value",
+                    ParameterControl::WarmDriveDb,
+                ),
+                ParameterKey::new(
+                    "pitchThreshold",
+                    "pitchThreshold value",
+                    ParameterControl::PitchThreshold,
+                ),
+                ParameterKey::new("retuneMs", "retuneMs value", ParameterControl::RetuneMs),
+                ParameterKey::new("humanize", "humanize value", ParameterControl::Humanize),
+                ParameterKey::new("flexTune", "flexTune value", ParameterControl::FlexTune),
+                ParameterKey::new(
+                    "pitchRatio",
+                    "pitchRatio value",
+                    ParameterControl::PitchRatio,
+                ),
+                ParameterKey::new(
+                    "formantWidth",
+                    "formantWidth value",
+                    ParameterControl::FormantWidth,
+                ),
+                ParameterKey::new(
+                    "formantStretch",
+                    "formantStretch value",
+                    ParameterControl::FormantStretch,
+                ),
+                ParameterKey::new(
+                    "formantAspirationMix",
+                    "formantAspirationMix value",
+                    ParameterControl::FormantAspirationMix,
+                ),
+                ParameterKey::new(
+                    "formantAspirationCutoffHz",
+                    "formantAspirationCutoffHz value",
+                    ParameterControl::FormantAspirationCutoffHz,
+                ),
+                ParameterKey::new(
+                    "choirDetune",
+                    "choirDetune value",
+                    ParameterControl::ChoirDetune,
+                ),
+                ParameterKey::new(
+                    "choirDelay",
+                    "choirDelay value",
+                    ParameterControl::ChoirDelay,
+                ),
+                ParameterKey::new(
+                    "choirSpreadPercent",
+                    "choirSpreadPercent value",
+                    ParameterControl::ChoirSpreadPercent,
+                ),
+                ParameterKey::new(
+                    "harmonyRegisterPercent",
+                    "harmonyRegisterPercent value",
+                    ParameterControl::HarmonyRegisterPercent,
+                ),
+                ParameterKey::new(
+                    "harmonyVoicingSpreadPercent",
+                    "harmonyVoicingSpreadPercent value",
+                    ParameterControl::HarmonyVoicingSpreadPercent,
+                ),
+                ParameterKey::new(
+                    "harmonyPortamentoMs",
+                    "harmonyPortamentoMs value",
+                    ParameterControl::HarmonyPortamentoMs,
+                ),
+                ParameterKey::new(
+                    "harmonyGain",
+                    "harmonyGain value",
+                    ParameterControl::HarmonyGain,
+                ),
+                ParameterKey::new(
+                    "harmonicModulation",
+                    "harmonicModulation value",
+                    ParameterControl::HarmonicModulation,
+                ),
+                ParameterKey::new("dryMix", "dryMix value", ParameterControl::DryMix),
+                ParameterKey::new("reverbMix", "reverbMix value", ParameterControl::ReverbMix),
+                ParameterKey::new(
+                    "reverbDiffusion",
+                    "reverbDiffusion value",
+                    ParameterControl::ReverbDiffusion,
+                ),
+                ParameterKey::new(
+                    "reverbDecay",
+                    "reverbDecay value",
+                    ParameterControl::ReverbDecay,
+                ),
+                ParameterKey::new(
+                    "reverbBrightnessHz",
+                    "reverbBrightnessHz value",
+                    ParameterControl::ReverbBrightnessHz,
+                ),
+            ],
+            u8_parameters: [
+                ParameterKey::new(
+                    "choirVoices",
+                    "choirVoices value",
+                    ParameterControl::ChoirVoices,
+                ),
+                ParameterKey::new(
+                    "harmonyVoices",
+                    "harmonyVoices value",
+                    ParameterControl::HarmonyVoices,
+                ),
+            ],
         }
     }
 }
@@ -883,6 +1050,7 @@ fn decode_events(
     buffer: &mut Vec<TimedEvent>,
     events: Ts<BlockEvents>,
     frames: usize,
+    config: ProcessorConfig,
 ) -> Result<&[TimedEvent], JsError> {
     let value = JsValue::from(events);
     let Some(array) = value.dyn_ref::<Array>() else {
@@ -899,7 +1067,7 @@ fn decode_events(
             Ok(())
         })?;
     }
-    ValidatedEvents::new(buffer, frames)?;
+    ValidatedEvents::new(buffer, frames, config)?;
     Ok(buffer)
 }
 
@@ -923,10 +1091,15 @@ fn decode_control_event(event: &JsValue, keys: &EventKeys) -> Result<ControlEven
         )?))
     } else if kind == keys.output_gain {
         let value = get_property(event, &keys.value)?;
-        let Some(gain) = value.as_f64() else {
-            return Err(JsError::new("outputGain value must be a number"));
-        };
-        Ok(ControlEvent::OutputGain(gain as f32))
+        Ok(ControlEvent::OutputGain(decode_f32(
+            &value,
+            "outputGain value",
+        )?))
+    } else if kind == keys.parameter {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Parameter(decode_parameter_control(
+            &value, keys,
+        )?))
     } else if kind == keys.reset {
         let value = get_property(event, &keys.value)?;
         if !value.is_undefined() && !value.is_null() {
@@ -983,6 +1156,27 @@ fn decode_midi_event(value: &JsValue, keys: &EventKeys) -> Result<MidiEvent, JsE
     }
 }
 
+/// Decodes one `ParameterControl` object from its cached discriminant.
+fn decode_parameter_control(
+    value: &JsValue,
+    keys: &EventKeys,
+) -> Result<ParameterControl, JsError> {
+    let kind = get_property(value, &keys.kind)?;
+    for entry in &keys.f32_parameters {
+        if kind == entry.name {
+            let raw = get_property(value, &keys.value)?;
+            return Ok((entry.make)(decode_f32(&raw, entry.field)?));
+        }
+    }
+    for entry in &keys.u8_parameters {
+        if kind == entry.name {
+            let raw = get_property(value, &keys.value)?;
+            return Ok((entry.make)(decode_u8(&raw, entry.field)?));
+        }
+    }
+    Err(JsError::new("parameter event type is absent or unknown"))
+}
+
 /// Reads a property from a JavaScript object and converts any exception.
 fn get_property(target: &JsValue, key: &JsValue) -> Result<JsValue, JsError> {
     Reflect::get(target, key).map_err(|err| match err.dyn_ref::<js_sys::Error>() {
@@ -1004,6 +1198,14 @@ fn decode_offset(value: &JsValue) -> Result<usize, JsError> {
         ));
     }
     Ok(number as usize)
+}
+
+/// Converts a JavaScript number into an `f32` scalar.
+fn decode_f32(value: &JsValue, field: &str) -> Result<f32, JsError> {
+    let Some(number) = value.as_f64() else {
+        return Err(JsError::new(&format!("{field} must be a number")));
+    };
+    Ok(number as f32)
 }
 
 /// Converts a JavaScript number into a `u8` integer.
@@ -1066,4 +1268,116 @@ pub(crate) fn serialize_frame_count<S: serde::Serializer>(
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_u32(*frames as u32)
+}
+
+#[wasm_bindgen]
+extern "C" {
+    type JsTelemetry;
+
+    #[wasm_bindgen(method, setter = processedFrames)]
+    fn set_processed_frames(this: &JsTelemetry, value: u64);
+    #[wasm_bindgen(method, setter = inputPeak)]
+    fn set_input_peak(this: &JsTelemetry, value: f32);
+    #[wasm_bindgen(method, setter = outputPeak)]
+    fn set_output_peak(this: &JsTelemetry, value: &Array);
+    #[wasm_bindgen(method, setter = reverbWetPeak)]
+    fn set_reverb_wet_peak(this: &JsTelemetry, value: f32);
+    #[wasm_bindgen(method, setter = resampleRatio)]
+    fn set_resample_ratio(this: &JsTelemetry, value: f32);
+    #[wasm_bindgen(method, setter = periodSamples)]
+    fn set_period_samples(this: &JsTelemetry, value: f32);
+    #[wasm_bindgen(method, setter = frequencyHz)]
+    fn set_frequency_hz(this: &JsTelemetry, value: f32);
+    #[wasm_bindgen(method, setter = targetMidiNote)]
+    fn set_target_midi_note(this: &JsTelemetry, value: Option<f64>);
+    #[wasm_bindgen(method, setter = voiced)]
+    fn set_voiced(this: &JsTelemetry, value: bool);
+    #[wasm_bindgen(method, setter = clarity)]
+    fn set_clarity(this: &JsTelemetry, value: f32);
+    #[wasm_bindgen(method, setter = tracking)]
+    fn set_tracking(this: &JsTelemetry, value: bool);
+    #[wasm_bindgen(method, setter = voiceCount)]
+    fn set_voice_count(this: &JsTelemetry, value: u8);
+    #[wasm_bindgen(method, setter = voiceRatios)]
+    fn set_voice_ratios(this: &JsTelemetry, value: &Float32Array);
+    #[wasm_bindgen(method, setter = voiceGains)]
+    fn set_voice_gains(this: &JsTelemetry, value: &Float32Array);
+    #[wasm_bindgen(method, setter = punchGain)]
+    fn set_punch_gain(this: &JsTelemetry, value: f32);
+    #[wasm_bindgen(method, setter = warmGain)]
+    fn set_warm_gain(this: &JsTelemetry, value: f32);
+    #[wasm_bindgen(method, setter = alienLoopFrames)]
+    fn set_alien_loop_frames(this: &JsTelemetry, value: u32);
+    #[wasm_bindgen(method, setter = alienPhaseFrames)]
+    fn set_alien_phase_frames(this: &JsTelemetry, value: u32);
+    #[wasm_bindgen(method, setter = formantGeneration)]
+    fn set_formant_generation(this: &JsTelemetry, value: u32);
+}
+
+/// Copies a slice of `f32` values into a new `Float32Array` of equal length.
+fn float32_array(values: &[f32]) -> Float32Array {
+    let array = Float32Array::new_with_length(values.len() as u32);
+    array.copy_from(values);
+    array
+}
+
+/// Builds a JavaScript telemetry object with `Float32Array` slices for the
+/// active voices.
+fn telemetry_object(telemetry: &Telemetry) -> JsTelemetry {
+    let object: JsTelemetry = Object::new().unchecked_into();
+    let output_peak = Array::new();
+    output_peak.set(0, JsValue::from_f64(f64::from(telemetry.output_peak[0])));
+    output_peak.set(1, JsValue::from_f64(f64::from(telemetry.output_peak[1])));
+    let ratios = float32_array(telemetry.active_voice_ratios());
+    let gains = float32_array(telemetry.active_voice_gains());
+    object.set_processed_frames(telemetry.processed_frames);
+    object.set_input_peak(telemetry.input_peak);
+    object.set_output_peak(&output_peak);
+    object.set_reverb_wet_peak(telemetry.reverb_wet_peak);
+    object.set_resample_ratio(telemetry.resample_ratio);
+    object.set_period_samples(telemetry.period_samples);
+    object.set_frequency_hz(telemetry.frequency_hz);
+    object.set_target_midi_note(telemetry.target_midi_note.map(f64::from));
+    object.set_voiced(telemetry.voiced);
+    object.set_clarity(telemetry.clarity);
+    object.set_tracking(telemetry.tracking);
+    object.set_voice_count(telemetry.voice_count);
+    object.set_voice_ratios(&ratios);
+    object.set_voice_gains(&gains);
+    object.set_punch_gain(telemetry.punch_gain);
+    object.set_warm_gain(telemetry.warm_gain);
+    object.set_alien_loop_frames(telemetry.alien_loop_frames);
+    object.set_alien_phase_frames(telemetry.alien_phase_frames);
+    object.set_formant_generation(telemetry.formant_generation);
+    object
+}
+
+/// Wraps a `Telemetry` snapshot in its typed JavaScript handle.
+fn serialize_telemetry(telemetry: &Telemetry) -> Ts<Telemetry> {
+    Ts::new_unchecked(telemetry_object(telemetry).into())
+}
+
+impl Serialize for Telemetry {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let object = telemetry_object(self);
+        tsify::serde_wasm_bindgen::preserve::serialize(&object, serializer)
+    }
+}
+
+/// Copies a JavaScript `Float32Array` of at most 16 entries into a stack
+/// array.
+pub(crate) fn deserialize_voice_array<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<[f32; 16], D::Error> {
+    let array: Float32Array = tsify::serde_wasm_bindgen::preserve::deserialize(deserializer)?;
+    let length = array.length() as usize;
+    if length > 16 {
+        return Err(serde::de::Error::invalid_length(
+            length,
+            &"a Float32Array with at most 16 entries",
+        ));
+    }
+    let mut values = [0.0; 16];
+    array.copy_to(&mut values[..length]);
+    Ok(values)
 }
