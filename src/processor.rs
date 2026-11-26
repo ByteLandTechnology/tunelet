@@ -69,8 +69,8 @@ pub struct Processor {
     alien: Alien,
     /// The delay network and the damping filters.
     ///
-    /// When you disable reverb, an active tail decays with zero input before a
-    /// clear.
+    /// When you disable reverb, the network input ramps to zero over 256
+    /// frames and an active tail decays before a clear.
     reverb: Reverb,
     /// The random sequence of this instance and the cached arctangent position.
     numeric: NumericContext,
@@ -688,12 +688,14 @@ impl Processor {
     /// Each successful call cancels a drain, also for an identical
     /// configuration. If the reverb mode changes, the stage ramps the wet gain
     /// to zero over 256 frames. Then it clears the delay buffer and the
-    /// damping filters, and ramps the new mode over 256 frames. If you disable
-    /// Punch or Warm, the history of that stage stops. If you disable reverb,
-    /// its active tail decays with zero input before a clear. When you enable
-    /// Alien, it captures a fresh loop and ramps the wet mix over 200 frames.
-    /// A change in either half of the `u64` seed starts the stream again, but
-    /// the new sequence uses only the low 32 bits.
+    /// damping filters, and ramps the new mode over 256 frames.
+    ///
+    /// If you disable Punch or Warm, the history of that stage stops. If you
+    /// disable reverb, its input ramps to zero over 256 frames and its active
+    /// tail decays before a clear. When you enable Alien, it captures a fresh
+    /// loop and ramps the wet mix over 200 frames. A change in either half of
+    /// the `u64` seed starts the stream again, but the new sequence uses only
+    /// the low 32 bits.
     ///
     /// # Errors
     ///
@@ -1187,8 +1189,9 @@ pub struct Telemetry {
     ///
     /// The contribution is the wet signal times the mix, before the output
     /// gain. Stereo calls measure the larger of the two channels. Mono calls
-    /// measure the wet signal after the downmix. While the reverb is disabled,
-    /// the window gets no new values.
+    /// measure the wet signal after the downmix. Active bypass tails also
+    /// update this peak. While the reverb is idle in bypass, the window gets no
+    /// new values.
     pub reverb_wet_peak: f32,
     /// The pitch-correction ratio from the last processed frame, where 1 is
     /// unity, as [`Feedback::resample_ratio`] gives.

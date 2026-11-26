@@ -9,6 +9,12 @@ use crate::{Error, SampleRate};
 /// The step for a 256-frame Q14 gain ramp (`16384 / 256`).
 const RAMP_STEP: Q14 = Q14::from_bits(64);
 
+/// Returns the frames that remain for a 256-frame Q14 ramp to reach zero.
+#[inline]
+fn ramp_frames(fade: Q14) -> usize {
+    (fade.to_bits().max(0) as usize).div_ceil(64)
+}
+
 /// The echo or reverberation network. The default is [`Self::Echo`].
 ///
 /// All modes share one delay buffer. If the mode changes while the reverb is
@@ -41,12 +47,13 @@ pub enum ReverbMode {
 /// decay.
 ///
 /// The reverb is disabled by default. If you disable an active reverb, the
-/// stage feeds zero input into the network until the decay tail finishes, then
-/// clears the delay buffer and the damping filters. If the stage is enabled
-/// and the mix is zero, the network still operates. A reset clears the delay
-/// buffer and keeps the memories of the damping filters. The mix, diffusion
-/// and decay controls are quantized to Q14. The function of each control
-/// changes with the network.
+/// stage ramps the network input to zero over 256 frames. Then the decay tail
+/// finishes before the stage clears the delay buffer and the damping filters.
+/// If the stage is enabled and the mix is zero, the network still operates.
+///
+/// A reset clears the delay buffer and keeps the memories of the damping
+/// filters. The mix, diffusion and decay controls are quantized to Q14. The
+/// function of each control changes with the network.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -56,7 +63,8 @@ pub enum ReverbMode {
 )]
 pub struct ReverbConfig {
     /// Enables the selected network. The default is `false`. If you set this
-    /// field to `false`, an active tail decays with zero input before a clear.
+    /// field to `false`, the network input ramps to zero over 256 frames and
+    /// any active tail decays before a clear.
     pub enabled: bool,
     /// The topology of the delay network. The default is
     /// [`ReverbMode::Echo`].
@@ -171,7 +179,7 @@ pub(crate) struct Reverb {
     /// The Q14 allpass coefficients of MediumHall and LargeHall, scaled by
     /// `diffuse`.
     hall_diffuse: [Q14; 6],
-    /// The Q14 ramp between bypass dry and enabled dry, in 0..=1.
+    /// The Q14 ramp for the network input and the dry blend, in 0..=1.
     enable_fade: Q14,
     /// The Q14 wet gain scale for mode switches, in 0..=1.
     mode_fade: Q14,
@@ -340,13 +348,23 @@ impl Reverb {
             return;
         }
         if config.mode != self.active_config.mode {
-            self.fading_out_mode = true;
             if prev_enabled && !config.enabled {
                 let mut active = self.active_config;
                 active.enabled = true;
-                self.bypass_remaining = tail_frames(self.rate, active);
+                let tail = tail_frames(self.rate, active);
                 self.bypass_quiet_frames = 0;
+                if tail == 0 {
+                    self.bypass_remaining = 0;
+                    self.enable_fade = Q14::ZERO;
+                    self.mode_fade = Q14::ONE;
+                    self.fading_out_mode = false;
+                    self.clear_all();
+                    self.apply_active_config(config);
+                    return;
+                }
+                self.bypass_remaining = tail.saturating_add(ramp_frames(self.enable_fade));
             }
+            self.fading_out_mode = true;
             return;
         }
         self.fading_out_mode = false;
@@ -357,11 +375,16 @@ impl Reverb {
         } else if prev_enabled {
             let mut active = self.active_config;
             active.enabled = true;
-            self.bypass_remaining = tail_frames(self.rate, active);
+            let tail = tail_frames(self.rate, active);
             self.bypass_quiet_frames = 0;
-            if self.bypass_remaining == 0 {
+            if tail == 0 {
+                self.bypass_remaining = 0;
+                self.enable_fade = Q14::ZERO;
+                self.mode_fade = Q14::ONE;
                 self.clear_all();
                 self.apply_active_config(config);
+            } else {
+                self.bypass_remaining = tail.saturating_add(ramp_frames(self.enable_fade));
             }
         }
     }
@@ -422,18 +445,17 @@ impl Reverb {
     }
     /// Returns the finite tail budget, with active bypass tails included.
     pub(crate) fn tail_frames(&self) -> usize {
-        let fade_frames = |fade: Q14| (fade.to_bits().max(0) as usize).div_ceil(64);
         if self.config.enabled {
             let base = tail_frames(self.rate, self.config);
             if self.fading_out_mode {
-                base.saturating_add(fade_frames(self.mode_fade))
+                base.saturating_add(ramp_frames(self.mode_fade))
             } else {
                 base
             }
         } else if self.fading_out_mode {
-            fade_frames(self.mode_fade).max(fade_frames(self.enable_fade))
+            ramp_frames(self.mode_fade).max(ramp_frames(self.enable_fade))
         } else {
-            self.bypass_remaining.max(fade_frames(self.enable_fade))
+            self.bypass_remaining.max(ramp_frames(self.enable_fade))
         }
     }
     /// Returns the largest absolute Q14 wet contribution since the last
@@ -612,11 +634,8 @@ impl Reverb {
             let wet_terms = self.step_network(left, right, self.mix);
             ([mul(left, dry), mul(right, dry)], wet_terms)
         } else {
-            let (net_left, net_right) = if self.config.enabled {
-                (mul(left, self.enable_fade), mul(right, self.enable_fade))
-            } else {
-                (Q14::ZERO, Q14::ZERO)
-            };
+            let net_left = mul(left, self.enable_fade);
+            let net_right = mul(right, self.enable_fade);
             let enabled_dry = if self.fading_out_mode && self.config.enabled {
                 mul(dry, self.mode_fade)
                     + mul(Q14::ONE - self.target_mix, Q14::ONE - self.mode_fade)
@@ -635,38 +654,40 @@ impl Reverb {
         let result = [dry_terms[0] + wet_terms[0], dry_terms[1] + wet_terms[1]];
         // Telemetry only. The wet contribution is the output minus the dry
         // term. Mono calls measure the wet signal after the downmix.
-        if self.config.enabled {
-            let left_wet = result[0] - dry_terms[0];
-            let right_wet = result[1] - dry_terms[1];
-            match layout {
-                OutputLayout::Stereo => {
-                    for wet in [left_wet, right_wet] {
-                        self.wet_peak = self.wet_peak.max(wet.abs().to_bits());
-                    }
+        let left_wet = result[0] - dry_terms[0];
+        let right_wet = result[1] - dry_terms[1];
+        match layout {
+            OutputLayout::Stereo => {
+                for wet in [left_wet, right_wet] {
+                    self.wet_peak = self.wet_peak.max(wet.abs().to_bits());
                 }
-                OutputLayout::Mono => {
-                    let wet = Q14::from_bits(
-                        ((i64::from(left_wet.to_bits()) + i64::from(right_wet.to_bits())) >> 1)
-                            as i32,
-                    )
-                    .abs()
-                    .to_bits();
-                    self.wet_peak = self.wet_peak.max(wet);
-                }
+            }
+            OutputLayout::Mono => {
+                let wet = Q14::from_bits(
+                    ((i64::from(left_wet.to_bits()) + i64::from(right_wet.to_bits())) >> 1) as i32,
+                )
+                .abs()
+                .to_bits();
+                self.wet_peak = self.wet_peak.max(wet);
             }
         }
         if self.fading_out_mode && self.mode_fade == Q14::ZERO {
-            self.clear_all();
-            self.fading_out_mode = false;
-            self.apply_active_config(self.config);
             if self.config.enabled {
+                self.clear_all();
+                self.fading_out_mode = false;
+                self.apply_active_config(self.config);
                 self.bypass_remaining = 0;
-            } else {
+            } else if self.enable_fade == Q14::ZERO {
+                self.clear_all();
+                self.fading_out_mode = false;
+                self.apply_active_config(self.config);
                 self.bypass_remaining = 0;
                 self.mode_fade = Q14::ONE;
             }
         } else if !self.config.enabled && self.bypass_remaining > 0 {
-            let quiet = wet_terms[0].abs().to_bits() <= 2 && wet_terms[1].abs().to_bits() <= 2;
+            let quiet = self.enable_fade == Q14::ZERO
+                && wet_terms[0].abs().to_bits() <= 2
+                && wet_terms[1].abs().to_bits() <= 2;
             if quiet {
                 self.bypass_quiet_frames += 1;
             } else {
@@ -675,9 +696,19 @@ impl Reverb {
             self.bypass_remaining -= 1;
             if self.bypass_remaining == 0 || self.bypass_quiet_frames >= CAPACITY {
                 self.bypass_remaining = 0;
+                self.enable_fade = Q14::ZERO;
+                self.mode_fade = Q14::ONE;
                 self.clear_all();
                 self.apply_active_config(self.config);
             }
+        } else if !self.config.enabled
+            && !self.fading_out_mode
+            && self.bypass_remaining == 0
+            && self.enable_fade == Q14::ZERO
+        {
+            self.mode_fade = Q14::ONE;
+            self.clear_all();
+            self.apply_active_config(self.config);
         }
         result
     }
