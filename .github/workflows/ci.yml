@@ -1,12 +1,11 @@
 # Continuous integration for the Rust crate, the Wasm bindings and the
 # npm package.
 #
-# First, build-wasm checks the Rust and Biome lints, the format, the docs,
-# the crate archive, the Wasm target and the TypeScript types on Linux, then
-# uploads pkg/. In parallel, msrv checks rust-version from Cargo.toml. Next,
-# check-os builds the native library, compiles TypeScript and checks the npm
-# archives on Linux, macOS and Windows. Last, verify reports one status check
-# for branch protection.
+# First, build-wasm checks the lints, Biome, the docs, the crate archive, the
+# Wasm target and TypeScript on Linux, then uploads pkg/. In parallel, msrv
+# checks rust-version from Cargo.toml. Next, check-os builds the native
+# library, compiles TypeScript and checks the npm archives on Linux, macOS and
+# Windows. Last, verify reports one status check for branch protection.
 name: CI
 
 on:
@@ -45,8 +44,6 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
       - run: npm run check:wasm
-        env:
-          RUSTDOCFLAGS: "-D warnings"
       - run: npm run build:wasm
       - run: npm run typecheck
       # Upload the built pkg/ files for the cross-OS matrix.
@@ -98,6 +95,8 @@ jobs:
           node-version-file: ".node-version"
           cache: "npm"
       - run: cargo build --locked --release
+        env:
+          RUSTFLAGS: "-D warnings"
       # Check that Cargo built the native dynamic library for this OS.
       - run: node --input-type=module -e "import assert from 'node:assert/strict'; import fs from 'node:fs'; const stat = fs.statSync(process.env.CDYLIB); assert.ok(stat.isFile() && stat.size > 0);"
         env:

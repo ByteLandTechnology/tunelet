@@ -93,7 +93,7 @@ this file, rustdoc, code comments, TypeScript comments and commit messages.
 Run these Cargo checks in a POSIX shell (`sh`, `bash` or `zsh`):
 
 ```sh
-cargo build --locked --release
+cargo rustc --locked --lib --release -- -D warnings
 cargo fmt --check
 cargo clippy --locked --lib -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
@@ -105,13 +105,12 @@ RUSTDOCFLAGS="-D warnings" cargo doc --locked --release --no-deps --target wasm3
 
 If you run `cargo package --locked` before a commit, add `--allow-dirty`.
 
-In PowerShell on Windows, set `RUSTDOCFLAGS` in the environment before `cargo doc` and `npm run check:wasm`:
+In PowerShell on Windows, set `RUSTDOCFLAGS` in the environment before `cargo doc`:
 
 ```powershell
 $env:RUSTDOCFLAGS = "-D warnings"
 cargo doc --locked --no-deps
 cargo doc --locked --release --no-deps --target wasm32-unknown-unknown --features wasm
-npm run check:wasm
 Remove-Item Env:RUSTDOCFLAGS
 ```
 
@@ -136,7 +135,7 @@ exists:
 
 ```sh
 npm ci
-RUSTDOCFLAGS="-D warnings" npm run check:wasm
+npm run check:wasm
 npm run build:wasm
 npm run typecheck
 npm run verify:pack
