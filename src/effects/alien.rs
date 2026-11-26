@@ -115,8 +115,11 @@ impl Alien {
     /// Applies a validated configuration, keeps the recorded audio and clamps
     /// the phase into the new loop, which is not empty.
     pub(crate) fn set_config(&mut self, config: AlienConfig) {
+        let old = self.config;
         self.config = config;
-        self.mix = Q14::from_f64((config.mix * 100.0) as f64 / 100.0);
+        if old.mix != config.mix {
+            self.mix = Q14::from_f64((config.mix * 100.0) as f64 / 100.0);
+        }
         self.loop_len = config.loop_frames as usize;
         self.phase = self.phase.min(self.loop_len - 1);
     }
@@ -185,12 +188,12 @@ impl Alien {
 /// Returns the finite tail budget: two loop lengths plus the boundary
 /// fade.
 ///
-/// The value is zero when Alien is disabled. It is a configured budget,
-/// not a measured tail.
+/// If Alien is disabled or the mix is zero, the value is zero. It is a
+/// configured budget, not a measured tail.
 pub(crate) fn tail_frames(config: AlienConfig) -> usize {
-    if config.enabled {
-        2 * config.loop_frames as usize + FADE_FRAMES
-    } else {
+    if !config.enabled || config.mix == 0.0 {
         0
+    } else {
+        2 * config.loop_frames as usize + FADE_FRAMES
     }
 }

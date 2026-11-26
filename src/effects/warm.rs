@@ -66,15 +66,27 @@ impl WarmConfig {
     /// Returns the first [`Error::InvalidConfig`] with its dotted field path
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_range("warm.drive_db", self.drive_db, 0.0, 6.0)?;
-        check_range("warm.mix", self.mix, 0.0, 1.0)
+        validate_drive_db(self.drive_db)?;
+        validate_mix(self.mix)
     }
+}
+
+/// Checks the range of the drive of Warm.
+pub(crate) fn validate_drive_db(drive_db: f32) -> Result<(), Error> {
+    check_range("warm.drive_db", drive_db, 0.0, 6.0)
+}
+
+/// Checks the range of the wet mix of Warm.
+fn validate_mix(mix: f32) -> Result<(), Error> {
+    check_range("warm.mix", mix, 0.0, 1.0)
 }
 
 /// An adaptive asymmetric saturator with one persistent high-pass output
 /// filter.
 #[derive(Debug)]
 pub(crate) struct Warm {
+    /// The validated controls that set the saturation drive.
+    config: WarmConfig,
     /// The 50 Hz one-pole high-pass output filter.
     filter: Biquad,
     /// The Q28 peak envelope of the input.
@@ -104,6 +116,7 @@ impl Warm {
         let mut filter = Biquad::new();
         filter.set_design(Design::high_pass_one_pole(rate.hz(), 50.0));
         let mut result = Self {
+            config,
             filter,
             peak: Q28::ZERO,
             compression: Q22::ONE,
@@ -114,7 +127,8 @@ impl Warm {
             input_threshold: Q28::from_f64(db_to_gain(-30.0)),
             output_headroom: Q22::from_f64(db_to_gain(30.0)),
         };
-        result.set_config(config);
+        result.configure_drive_db();
+        result.configure_mix();
         result
     }
     /// Returns the Q22 normalization gain as f32. The stage state does not
@@ -122,12 +136,35 @@ impl Warm {
     pub(crate) fn normalization_gain(&self) -> f32 {
         (self.compression.to_bits() as f64 / f64::from(1u32 << 22)) as f32
     }
-    /// Updates the drive and the output compensation, and keeps the envelope
-    /// and filter state.
+    /// Quantizes the drive and its output compensation unconditionally.
+    fn configure_drive_db(&mut self) {
+        self.drive = Q24::from_f64(db_to_gain(self.config.drive_db as f64));
+        self.output_gain = Q28::from_f64(db_to_gain(-(self.config.drive_db as f64) * 0.35));
+    }
+    /// Quantizes the wet mix unconditionally.
+    fn configure_mix(&mut self) {
+        self.mix = Q14::from_f64((self.config.mix * 100.0) as f64 / 100.0);
+    }
+    /// Stores the configuration. If the drive or the mix changed, updates the
+    /// changed coefficients and keeps the envelope and filter state.
     pub(crate) fn set_config(&mut self, config: WarmConfig) {
-        self.drive = Q24::from_f64(db_to_gain(config.drive_db as f64));
-        self.output_gain = Q28::from_f64(db_to_gain(-(config.drive_db as f64) * 0.35));
-        self.mix = Q14::from_f64((config.mix * 100.0) as f64 / 100.0);
+        let old = self.config;
+        self.config = config;
+        if old.drive_db != config.drive_db {
+            self.configure_drive_db();
+        }
+        if old.mix != config.mix {
+            self.configure_mix();
+        }
+    }
+    /// Stores the drive. If the value changed, updates the quantized drive and
+    /// its output compensation.
+    pub(crate) fn set_drive_db(&mut self, drive_db: f32) {
+        let changed = self.config.drive_db != drive_db;
+        self.config.drive_db = drive_db;
+        if changed {
+            self.configure_drive_db();
+        }
     }
     /// Clears the filter memories, the peak envelope and the normalization,
     /// and keeps the coefficients.
