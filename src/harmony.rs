@@ -377,27 +377,75 @@ impl HarmonyConfig {
     /// and the problem. For an array control, the error identifies the array
     /// field, not the index of an element.
     pub fn validate(self) -> Result<(), Error> {
-        for interval in self.chromatic_intervals {
-            let field = "resynthesis.harmony.chromatic_intervals";
-            check_count(field, i64::from(interval), -24, 24)?;
-        }
-        for interval in self.diatonic_intervals {
-            let field = "resynthesis.harmony.diatonic_intervals";
-            check_count(field, i64::from(interval), -14, 14)?;
-        }
-        let field = "resynthesis.harmony.voices";
-        check_count(field, i64::from(self.voices), 0, HARMONY_VOICES as i64)?;
-        let field = "resynthesis.harmony.register_percent";
-        check_range(field, self.register_percent, 0.0, 100.0)?;
-        let field = "resynthesis.harmony.voicing_spread_percent";
-        check_range(field, self.voicing_spread_percent, 0.0, 100.0)?;
-        check_range(
-            "resynthesis.harmony.portamento_ms",
-            self.portamento_ms,
-            0.0,
-            10_000.0,
-        )
+        validate_chromatic_intervals(self.chromatic_intervals)?;
+        validate_diatonic_intervals(self.diatonic_intervals)?;
+        validate_voices(self.voices)?;
+        validate_register_percent(self.register_percent)?;
+        validate_voicing_spread_percent(self.voicing_spread_percent)?;
+        validate_portamento_ms(self.portamento_ms)
     }
+}
+
+/// Checks the four fixed semitone offsets of harmony.
+pub(crate) fn validate_chromatic_intervals(
+    chromatic_intervals: [i8; HARMONY_VOICES],
+) -> Result<(), Error> {
+    for interval in chromatic_intervals {
+        let field = "resynthesis.harmony.chromatic_intervals";
+        check_count(field, i64::from(interval), -24, 24)?;
+    }
+    Ok(())
+}
+
+/// Checks the four offsets in scale steps of harmony.
+pub(crate) fn validate_diatonic_intervals(
+    diatonic_intervals: [i8; HARMONY_VOICES],
+) -> Result<(), Error> {
+    for interval in diatonic_intervals {
+        let field = "resynthesis.harmony.diatonic_intervals";
+        check_count(field, i64::from(interval), -14, 14)?;
+    }
+    Ok(())
+}
+
+/// Checks the count of interval harmony voices.
+pub(crate) fn validate_voices(voices: u8) -> Result<(), Error> {
+    check_count(
+        "resynthesis.harmony.voices",
+        i64::from(voices),
+        0,
+        HARMONY_VOICES as i64,
+    )
+}
+
+/// Checks the range of the chord register.
+pub(crate) fn validate_register_percent(register_percent: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.harmony.register_percent",
+        register_percent,
+        0.0,
+        100.0,
+    )
+}
+
+/// Checks the range of the chord spread.
+pub(crate) fn validate_voicing_spread_percent(voicing_spread_percent: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.harmony.voicing_spread_percent",
+        voicing_spread_percent,
+        0.0,
+        100.0,
+    )
+}
+
+/// Checks the range of the portamento half-life.
+pub(crate) fn validate_portamento_ms(portamento_ms: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.harmony.portamento_ms",
+        portamento_ms,
+        0.0,
+        10_000.0,
+    )
 }
 
 /// The prepared controller of periods and gains, and the MIDI allocator, for
@@ -537,9 +585,48 @@ impl HarmonyState {
         if old.portamento_ms != config.portamento_ms {
             self.prepare_portamento();
         }
-        if old != config {
+        if old.source != config.source
+            || old.key != config.key
+            || old.scale != config.scale
+            || old.chord != config.chord
+            || old.degree != config.degree
+            || old.inversion != config.inversion
+            || old.register_percent != config.register_percent
+            || old.voicing_spread_percent != config.voicing_spread_percent
+        {
             self.setup_chord();
         }
+    }
+    /// Stores the chord register. If the value changed, prepares the chord
+    /// again.
+    pub(crate) fn set_register_percent(&mut self, register_percent: f32) {
+        let changed = self.config.register_percent != register_percent;
+        self.config.register_percent = register_percent;
+        if changed {
+            self.setup_chord();
+        }
+    }
+    /// Stores the chord spread. If the value changed, prepares the chord
+    /// again.
+    pub(crate) fn set_voicing_spread_percent(&mut self, voicing_spread_percent: f32) {
+        let changed = self.config.voicing_spread_percent != voicing_spread_percent;
+        self.config.voicing_spread_percent = voicing_spread_percent;
+        if changed {
+            self.setup_chord();
+        }
+    }
+    /// Stores the portamento half-life. If the value changed, prepares the
+    /// portamento coefficient again.
+    pub(crate) fn set_portamento_ms(&mut self, portamento_ms: f32) {
+        let changed = self.config.portamento_ms != portamento_ms;
+        self.config.portamento_ms = portamento_ms;
+        if changed {
+            self.prepare_portamento();
+        }
+    }
+    /// Stores the count of interval voices.
+    pub(crate) fn set_voices(&mut self, voices: u8) {
+        self.config.voices = voices;
     }
     /// Clears the voice envelopes, ratios, periods, MIDI state and scale search
     /// state, then prepares the configured chord again.

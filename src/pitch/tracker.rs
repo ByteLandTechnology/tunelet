@@ -140,7 +140,12 @@ impl PitchTracker {
     /// The reporting bounds apply outside the tracker. A change of the
     /// sensitivity does not reset a tracked period.
     pub(crate) fn set_config(&mut self, config: PitchConfig) {
-        self.threshold = Q14::from_f64(config.threshold as f64);
+        self.set_threshold(config.threshold);
+    }
+
+    /// Quantizes and stores a validated acquisition threshold.
+    pub(crate) fn set_threshold(&mut self, threshold: f32) {
+        self.threshold = Q14::from_f64(threshold as f64);
     }
 
     /// Clears the full-rate audio, the acquisition and tracking correlations,

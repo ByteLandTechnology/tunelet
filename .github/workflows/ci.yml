@@ -42,8 +42,6 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
       - run: cargo package --locked
       - run: npm run check:wasm
-        env:
-          RUSTDOCFLAGS: "-D warnings"
       - run: npm run build:wasm
       # Upload the built pkg/ files for the cross-OS matrix.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -94,6 +92,8 @@ jobs:
           node-version-file: ".node-version"
           cache: "npm"
       - run: cargo build --locked --release
+        env:
+          RUSTFLAGS: "-D warnings"
       # Check that Cargo built the native dynamic library for this OS.
       - run: node --input-type=module -e "import assert from 'node:assert/strict'; import fs from 'node:fs'; const stat = fs.statSync(process.env.CDYLIB); assert.ok(stat.isFile() && stat.size > 0);"
         env:

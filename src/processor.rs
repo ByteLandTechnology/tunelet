@@ -8,7 +8,10 @@ use crate::events::{ValidatedEvent, ValidatedEvents};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
 use crate::resynthesis::{self, Resynthesis};
-use crate::{ControlActivity, ControlEvent, Error, PrepareConfig, ProcessorConfig, TimedEvent};
+use crate::{
+    ControlActivity, ControlEvent, Error, ParameterControl, PrepareConfig, ProcessorConfig,
+    TimedEvent,
+};
 
 /// Selects the output channel layout for the downmix and the peak meters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -545,14 +548,15 @@ impl Processor {
         result
     }
 
-    /// Returns the state of the voices, the levels and the effects, and does
-    /// not clear the peak windows.
+    /// Returns the pitch, the state of the voices, the levels and the effects,
+    /// and does not clear the peak windows.
     ///
     /// The telemetry is for meters and displays. It does not change the
     /// audio. To start new peak windows, use
     /// [`take_telemetry`](Self::take_telemetry). The peak windows of the
     /// telemetry are independent of the peak window of [`Feedback`].
     pub fn telemetry(&self) -> Telemetry {
+        let estimate = self.resynthesis.estimate();
         let mut voice_ratios = [0.0; 16];
         let mut voice_gains = [0.0; 16];
         let voice_count = self.resynthesis.voices(&mut voice_ratios, &mut voice_gains);
@@ -562,6 +566,11 @@ impl Processor {
             input_peak: self.input_peak as f32 / 32_768.0,
             output_peak: self.output_peaks.map(|peak| peak as f32 / 32_768.0),
             reverb_wet_peak: self.reverb.wet_peak(),
+            resample_ratio: self.last_resample_ratio,
+            period_samples: estimate.period_samples,
+            frequency_hz: estimate.frequency_hz,
+            target_midi_note: self.resynthesis.target_note(),
+            voiced: estimate.voiced,
             clarity: self.resynthesis.clarity(),
             tracking: self.resynthesis.is_tracking(),
             voice_count,
@@ -773,7 +782,7 @@ impl Processor {
         events: &'a [TimedEvent],
     ) -> Result<ValidatedEvents<'a>, Error> {
         self.check_block(frames)?;
-        ValidatedEvents::new(events, frames)
+        ValidatedEvents::new(events, frames, self.config)
     }
 
     /// Enforces the prepared block limit for each call.
@@ -789,33 +798,171 @@ impl Processor {
 
     /// Applies a validated control immediately before its frame is rendered.
     ///
-    /// A partial configuration event replaces one stage in the active
-    /// configuration. MIDI and reset events act directly. A reset does not
-    /// discard later events in the block.
+    /// A stage event replaces one stage in the active configuration. A scalar
+    /// parameter event updates one field and its quantized state. MIDI and
+    /// reset events act directly. A reset does not discard later events in the
+    /// block.
     fn apply(&mut self, event: ValidatedEvent) {
-        let mut config = self.config;
         match event.into_inner() {
-            ControlEvent::Configure(value) => config = value,
-            ControlEvent::Resynthesis(value) => config.resynthesis = value,
-            ControlEvent::Punch(value) => config.punch = value,
-            ControlEvent::Warm(value) => config.warm = value,
-            ControlEvent::Alien(value) => config.alien = value,
-            ControlEvent::Reverb(value) => config.reverb = value,
-            ControlEvent::OutputGain(value) => config.output_gain = value,
-            ControlEvent::Midi(event) => {
-                self.resynthesis.apply_midi(event);
-                return;
+            ControlEvent::Configure(value) => self.apply_config(value),
+            ControlEvent::Resynthesis(value) => {
+                let mut config = self.config;
+                config.resynthesis = value;
+                self.apply_config(config);
             }
-            ControlEvent::CorrectionMidi(event) => {
-                self.resynthesis.apply_correction_midi(event);
-                return;
+            ControlEvent::Punch(value) => {
+                let mut config = self.config;
+                config.punch = value;
+                self.apply_config(config);
             }
-            ControlEvent::Reset => {
-                self.reset();
-                return;
+            ControlEvent::Warm(value) => {
+                let mut config = self.config;
+                config.warm = value;
+                self.apply_config(config);
+            }
+            ControlEvent::Alien(value) => {
+                let mut config = self.config;
+                config.alien = value;
+                self.apply_config(config);
+            }
+            ControlEvent::Reverb(value) => {
+                let mut config = self.config;
+                config.reverb = value;
+                self.apply_config(config);
+            }
+            ControlEvent::OutputGain(value) => {
+                self.config.output_gain = value;
+                self.drain_remaining = None;
+            }
+            ControlEvent::Parameter(parameter) => self.apply_parameter(parameter),
+            ControlEvent::Midi(event) => self.resynthesis.apply_midi(event),
+            ControlEvent::CorrectionMidi(event) => self.resynthesis.apply_correction_midi(event),
+            ControlEvent::Reset => self.reset(),
+        }
+    }
+
+    /// Updates one validated scalar parameter, cancels an active drain and
+    /// calls only the setter for that field.
+    fn apply_parameter(&mut self, parameter: ParameterControl) {
+        match parameter {
+            ParameterControl::PunchGainDb(value) => {
+                self.config.punch.gain_db = value;
+                self.punch.set_gain_db(value);
+            }
+            ParameterControl::PunchImpact(value) => {
+                self.config.punch.impact = value;
+                self.punch.set_impact(value);
+            }
+            ParameterControl::PunchCeilingDb(value) => {
+                self.config.punch.ceiling_db = value;
+                self.punch.set_ceiling_db(value);
+            }
+            ParameterControl::PunchAttackMs(value) => {
+                self.config.punch.attack_ms = value;
+                self.punch.set_attack_ms(value);
+            }
+            ParameterControl::WarmDriveDb(value) => {
+                self.config.warm.drive_db = value;
+                self.warm.set_drive_db(value);
+            }
+            ParameterControl::PitchThreshold(value) => {
+                self.config.resynthesis.pitch.threshold = value;
+                self.resynthesis.set_pitch_threshold(value);
+            }
+            ParameterControl::RetuneMs(value) => {
+                self.config.resynthesis.correction.retune_ms = value;
+                self.resynthesis.set_retune_ms(value);
+            }
+            ParameterControl::Humanize(value) => {
+                self.config.resynthesis.correction.humanize = value;
+                self.resynthesis.set_humanize(value);
+            }
+            ParameterControl::FlexTune(value) => {
+                self.config.resynthesis.correction.flex_tune = value;
+                self.resynthesis.set_flex_tune(value);
+            }
+            ParameterControl::PitchRatio(value) => {
+                self.config.resynthesis.pitch_ratio = value;
+                self.resynthesis.set_pitch_ratio(value);
+            }
+            ParameterControl::FormantWidth(value) => {
+                self.config.resynthesis.formant.width = value;
+                self.resynthesis.set_formant_width(value);
+            }
+            ParameterControl::FormantStretch(value) => {
+                self.config.resynthesis.formant.stretch = value;
+                self.resynthesis.set_formant_stretch(value);
+            }
+            ParameterControl::FormantAspirationMix(value) => {
+                self.config.resynthesis.formant.aspiration_mix = value;
+                self.resynthesis.set_formant_aspiration_mix(value);
+            }
+            ParameterControl::FormantAspirationCutoffHz(value) => {
+                self.config.resynthesis.formant.aspiration_cutoff_hz = value;
+                self.resynthesis.set_formant_aspiration_cutoff_hz(value);
+            }
+            ParameterControl::ChoirVoices(value) => {
+                self.config.resynthesis.choir_voices = value;
+                self.resynthesis.set_choir_voices(value);
+            }
+            ParameterControl::ChoirDetune(value) => {
+                self.config.resynthesis.choir_detune = value;
+                self.resynthesis.set_choir_detune(value);
+            }
+            ParameterControl::ChoirDelay(value) => {
+                self.config.resynthesis.choir_delay = value;
+                self.resynthesis.set_choir_delay(value);
+            }
+            ParameterControl::ChoirSpreadPercent(value) => {
+                self.config.resynthesis.choir_spread_percent = value;
+                self.resynthesis.set_choir_spread_percent(value);
+            }
+            ParameterControl::HarmonyRegisterPercent(value) => {
+                self.config.resynthesis.harmony.register_percent = value;
+                self.resynthesis.set_harmony_register_percent(value);
+            }
+            ParameterControl::HarmonyVoicingSpreadPercent(value) => {
+                self.config.resynthesis.harmony.voicing_spread_percent = value;
+                self.resynthesis.set_harmony_voicing_spread_percent(value);
+            }
+            ParameterControl::HarmonyPortamentoMs(value) => {
+                self.config.resynthesis.harmony.portamento_ms = value;
+                self.resynthesis.set_harmony_portamento_ms(value);
+            }
+            ParameterControl::HarmonyVoices(value) => {
+                self.config.resynthesis.harmony.voices = value;
+                self.resynthesis.set_harmony_voices(value);
+            }
+            ParameterControl::HarmonyGain(value) => {
+                self.config.resynthesis.harmony_gain = value;
+                self.resynthesis.set_harmony_gain(value);
+            }
+            ParameterControl::HarmonicModulation(value) => {
+                self.config.resynthesis.harmonic_modulation = value;
+                self.resynthesis.set_harmonic_modulation(value);
+            }
+            ParameterControl::DryMix(value) => {
+                self.config.resynthesis.dry_mix = value;
+                self.resynthesis.set_dry_mix(value);
+            }
+            ParameterControl::ReverbMix(value) => {
+                self.config.reverb.mix = value;
+                self.reverb.set_mix(value);
+            }
+            ParameterControl::ReverbDiffusion(value) => {
+                self.config.reverb.diffusion = value;
+                self.reverb.set_diffusion(value);
+            }
+            ParameterControl::ReverbDecay(value) => {
+                self.config.reverb.decay = value;
+                self.reverb.set_decay(value);
+            }
+            ParameterControl::ReverbBrightnessHz(value) => {
+                self.config.reverb.brightness_hz = value;
+                self.reverb.set_brightness_hz(value);
             }
         }
-        self.apply_config(config);
+        self.drain_remaining = None;
     }
 
     /// Renders one frame through the full chain and updates the peak meters.
@@ -880,10 +1027,10 @@ impl Processor {
     /// unused frames.
     ///
     /// An empty request does not change the drain state. The method mutes
-    /// aspiration temporarily, and restores the configuration after the block.
-    /// The last positive block sets `drain_remaining` to `Some(0)` without a
-    /// reset. The next non-empty call sees `Some(0)`, resets the processor and
-    /// returns zero.
+    /// aspiration temporarily, and does not change the settings that the host
+    /// sees. The last positive block sets `drain_remaining` to `Some(0)`
+    /// without a reset. The next non-empty call sees `Some(0)`, resets the
+    /// processor and returns zero.
     fn drain_into(
         &mut self,
         frames: usize,
@@ -902,19 +1049,11 @@ impl Processor {
             return Ok(0);
         }
         let count = remaining.min(frames);
-        let configured = self.config.resynthesis;
-        if configured.formant.aspiration_mix != 0.0 {
-            let mut silent = configured;
-            silent.formant.aspiration_mix = 0.0;
-            // Zero aspiration is valid in all validated configurations.
-            self.resynthesis.apply_config(silent);
-        }
+        self.resynthesis.set_aspiration_muted(true);
         for index in 0..count {
             write(index, self.next(0, layout));
         }
-        if configured.formant.aspiration_mix != 0.0 {
-            self.resynthesis.apply_config(configured);
-        }
+        self.resynthesis.set_aspiration_muted(false);
         self.drain_remaining = Some(remaining - count);
         Ok(count)
     }
@@ -1017,21 +1156,22 @@ pub struct Feedback {
     pub latency_frames: usize,
 }
 
-/// A snapshot of the voices, the levels and the effect state that you can
-/// copy.
+/// A snapshot of the pitch, the voices, the levels and the effect state that
+/// you can copy.
 ///
 /// Get it with [`Processor::telemetry`] or [`Processor::take_telemetry`]. The
 /// telemetry is for meters and displays. No audio calculation reads it.
-/// `Default` gives a snapshot with all zeros.
+/// `Default` gives a snapshot with all zeros and no target.
 ///
 /// The three peak fields measure a window. The window starts at
 /// construction, at a reset, at a change of stereo output or at a call to
 /// [`Processor::take_telemetry`]. This window is independent of the peak
 /// window of [`Feedback`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
-    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    derive(serde::Deserialize, tsify::Tsify),
     serde(rename_all = "camelCase"),
     tsify(large_number_types_as_bigints)
 )]
@@ -1058,12 +1198,46 @@ pub struct Telemetry {
     /// measure the wet signal after the downmix. While the reverb is disabled,
     /// the window gets no new values.
     pub reverb_wet_peak: f32,
+    /// The pitch-correction ratio from the last processed frame, where 1 is
+    /// unity, as [`Feedback::resample_ratio`] gives.
+    ///
+    /// It does not include the configured pitch shift or the ratios of
+    /// individual voices. It is zero before the first frame, after a reset or
+    /// after a change of stereo output.
+    pub resample_ratio: f32,
+    /// The reported input pitch period in samples, with fractional samples, as
+    /// [`Feedback::period_samples`] gives.
+    ///
+    /// If [`voiced`](Self::voiced) is `false`, this value is zero. The bounds
+    /// of [`crate::PitchConfig`] apply to this report.
+    pub period_samples: f32,
+    /// The reported input pitch frequency in hertz, as
+    /// [`Feedback::frequency_hz`] gives.
+    ///
+    /// The value comes from the sample rate and
+    /// [`period_samples`](Self::period_samples). If [`voiced`](Self::voiced)
+    /// is `false`, this value is zero.
+    pub frequency_hz: f32,
+    /// The correction target or the input pitch, as a MIDI note number, as
+    /// [`Feedback::target_midi_note`] gives.
+    ///
+    /// If correction selects a note from a non-empty table, the value is that
+    /// pitch class in the nearest octave. In other cases, the value is the
+    /// fractional MIDI note of the input. If [`voiced`](Self::voiced) is
+    /// `false`, and only then, this value is `None`.
+    pub target_midi_note: Option<f32>,
+    /// This field is `true` if the current pitch estimate is positive and
+    /// inside the bounds of [`crate::PitchConfig`].
+    ///
+    /// This is not an amplitude gate or a confidence score. A result can stay
+    /// between detector updates.
+    pub voiced: bool,
     /// How periodic the tracked input is, in 0..=1.
     ///
     /// The value is 1 for a signal that repeats exactly at the tracked
     /// period. It is 0 for a signal with no relation between cycles and
     /// during pitch acquisition. Use it as a confidence score for
-    /// [`Feedback::voiced`]. The tracker updates the related sums on each
+    /// [`voiced`](Self::voiced). The tracker updates the related sums on each
     /// frame.
     pub clarity: f32,
     /// This field is `true` if the pitch tracker follows a period. It is
@@ -1082,7 +1256,13 @@ pub struct Telemetry {
     /// harmony voices. In Choir mode, the entries after the lead are the
     /// secondary voices. Each ratio includes the correction, the configured
     /// pitch shift and the ratio of the voice. The entries after
-    /// [`voice_count`](Self::voice_count) are zero.
+    /// [`voice_count`](Self::voice_count) are zero. In JavaScript, this field
+    /// is a `Float32Array` of length `voiceCount`.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(deserialize_with = "crate::wasm::deserialize_voice_array"),
+        tsify(type = "Float32Array")
+    )]
     pub voice_ratios: [f32; 16],
     /// The linear gain of each voice, in the order of
     /// [`voice_ratios`](Self::voice_ratios).
@@ -1092,7 +1272,13 @@ pub struct Telemetry {
     /// velocity 127 gives the maximum, approximately +12 dB. The gain is zero
     /// for a voice that does not sound. It does not include the configured
     /// harmony level or the pan. The harmony controller updates it every 101
-    /// frames.
+    /// frames. In JavaScript, this field is a `Float32Array` of length
+    /// `voiceCount`.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(deserialize_with = "crate::wasm::deserialize_voice_array"),
+        tsify(type = "Float32Array")
+    )]
     pub voice_gains: [f32; 16],
     /// The effective linear gain of Punch at the current envelope level.
     ///
@@ -1124,4 +1310,26 @@ pub struct Telemetry {
     /// enabled. Compare two values to find if
     /// [`Processor::formant_envelope`] can give a new result.
     pub formant_generation: u32,
+}
+
+impl Telemetry {
+    /// Returns the pitch ratios of the active voices, from `0` to
+    /// [`voice_count`](Self::voice_count).
+    ///
+    /// If `voice_count` is more than 16, this method limits the slice length
+    /// to 16.
+    pub fn active_voice_ratios(&self) -> &[f32] {
+        let count = usize::from(self.voice_count).min(self.voice_ratios.len());
+        &self.voice_ratios[..count]
+    }
+
+    /// Returns the linear gains of the active voices, from `0` to
+    /// [`voice_count`](Self::voice_count).
+    ///
+    /// If `voice_count` is more than 16, this method limits the slice length
+    /// to 16.
+    pub fn active_voice_gains(&self) -> &[f32] {
+        let count = usize::from(self.voice_count).min(self.voice_gains.len());
+        &self.voice_gains[..count]
+    }
 }
