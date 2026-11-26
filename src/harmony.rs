@@ -452,6 +452,7 @@ pub(crate) fn validate_portamento_ms(portamento_ms: f32) -> Result<(), Error> {
 ///
 /// Each `None` field keeps its active value on the processor.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),

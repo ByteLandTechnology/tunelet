@@ -196,6 +196,7 @@ pub(crate) fn validate_flex_tune(flex_tune: f32) -> Result<(), Error> {
 ///
 /// Each `None` field keeps its active value on the processor.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
@@ -496,6 +497,7 @@ pub(crate) fn validate_dry_mix(dry_mix: f32) -> Result<(), Error> {
 ///
 /// Each `None` field keeps its active value on the processor.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),

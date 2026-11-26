@@ -333,6 +333,7 @@ pub struct ControlActivity {
 /// the processor. Validation examines only the supplied stages and fields
 /// before any state changes.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),

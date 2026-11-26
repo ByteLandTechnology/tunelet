@@ -138,6 +138,7 @@ pub(crate) fn validate_aspiration_cutoff_hz(aspiration_cutoff_hz: f32) -> Result
 ///
 /// Each `None` field keeps its active value on the processor.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
