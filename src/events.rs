@@ -41,6 +41,12 @@ pub enum ParameterControl {
     /// Sets [`crate::CorrectionConfig::retune_ms`]
     /// (`resynthesis.correction.retune_ms`), 0..=400 ms.
     RetuneMs(f32),
+    /// Sets [`crate::CorrectionConfig::humanize`]
+    /// (`resynthesis.correction.humanize`), 0..=1.
+    Humanize(f32),
+    /// Sets [`crate::CorrectionConfig::flex_tune`]
+    /// (`resynthesis.correction.flex_tune`), 0..=1.
+    FlexTune(f32),
     /// Sets [`ResynthesisConfig::pitch_ratio`] (`resynthesis.pitch_ratio`),
     /// 0.25..=4.
     PitchRatio(f32),
@@ -116,6 +122,8 @@ impl ParameterControl {
             Self::WarmDriveDb(value) => warm::validate_drive_db(value),
             Self::PitchThreshold(value) => pitch::validate_threshold(value),
             Self::RetuneMs(value) => resynthesis::validate_retune_ms(value),
+            Self::Humanize(value) => resynthesis::validate_humanize(value),
+            Self::FlexTune(value) => resynthesis::validate_flex_tune(value),
             Self::PitchRatio(value) => resynthesis::validate_pitch_ratio(value),
             Self::FormantWidth(value) => formant::validate_width(value),
             Self::FormantStretch(value) => formant::validate_stretch(value),
@@ -152,6 +160,8 @@ impl ParameterControl {
             Self::WarmDriveDb(value) => config.warm.drive_db = value,
             Self::PitchThreshold(value) => config.resynthesis.pitch.threshold = value,
             Self::RetuneMs(value) => config.resynthesis.correction.retune_ms = value,
+            Self::Humanize(value) => config.resynthesis.correction.humanize = value,
+            Self::FlexTune(value) => config.resynthesis.correction.flex_tune = value,
             Self::PitchRatio(value) => config.resynthesis.pitch_ratio = value,
             Self::FormantWidth(value) => config.resynthesis.formant.width = value,
             Self::FormantStretch(value) => config.resynthesis.formant.stretch = value,
