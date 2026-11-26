@@ -158,15 +158,19 @@ impl Resampler {
         self.output_filter.reset();
     }
 
-    /// Converts `input` from the host rate into `self.core_input` and returns
-    /// the number of generated core frames.
-    pub(crate) fn resample_input(&mut self, input: &[i16]) -> usize {
+    /// Converts `host_frames` input samples from `read` into `self.core_input`
+    /// and returns the number of generated core frames.
+    pub(crate) fn resample_input(
+        &mut self,
+        host_frames: usize,
+        mut read: impl FnMut(usize) -> i16,
+    ) -> usize {
         let mut core_count = 0;
         let host_step = self.host_step;
         let core_step = self.core_step;
         let half_core = core_step >> 1;
-        for &sample in input {
-            self.input_filter.push(sample);
+        for index in 0..host_frames {
+            self.input_filter.push(read(index));
             while self.input_filter.phase < core_step {
                 let phase_index =
                     ((self.input_filter.phase * PHASES as u32 + half_core) / core_step) as usize;
@@ -182,22 +186,7 @@ impl Resampler {
     /// Converts `host_frames` of silent host input into `self.core_input` and
     /// returns the number of generated core frames.
     pub(crate) fn resample_silence(&mut self, host_frames: usize) -> usize {
-        let mut core_count = 0;
-        let host_step = self.host_step;
-        let core_step = self.core_step;
-        let half_core = core_step >> 1;
-        for _ in 0..host_frames {
-            self.input_filter.push(0);
-            while self.input_filter.phase < core_step {
-                let phase_index =
-                    ((self.input_filter.phase * PHASES as u32 + half_core) / core_step) as usize;
-                self.core_input[core_count] = self.input_filter.evaluate(phase_index);
-                core_count += 1;
-                self.input_filter.phase += host_step;
-            }
-            self.input_filter.phase -= core_step;
-        }
-        core_count
+        self.resample_input(host_frames, |_| 0)
     }
 
     /// Converts `core_count` frames from `self.core_output` into `host_frames`

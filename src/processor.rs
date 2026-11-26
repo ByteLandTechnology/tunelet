@@ -233,6 +233,82 @@ impl Processor {
         self.process_into(audio.len(), events, audio)
     }
 
+    /// Processes mono `f32` audio into `[left, right]` stereo frames.
+    ///
+    /// For each input sample, `NaN` becomes `0`, and other values clamp to
+    /// `-1.0..=1.0`, multiply by `32767.0` and round to `-32767..=32767`. Each
+    /// clipped stereo `i16` sample then divides by `32768.0`, so each output
+    /// value is in `-32767.0 / 32768.0..=32767.0 / 32768.0`.
+    ///
+    /// The frame counts, the block limit, the events and the drain cancellation
+    /// obey the same rules as in [`process`](Self::process). If the call
+    /// succeeds, it writes all output frames.
+    ///
+    /// # Errors
+    ///
+    /// The call checks [`Error::BufferLength`] first and
+    /// [`Error::BlockTooLarge`] second. Then it checks [`Error::InvalidEvent`]
+    /// for the first invalid event. The validation of the full event slice
+    /// finishes before the state or the output changes.
+    pub fn process_f32(
+        &mut self,
+        input: &[f32],
+        output: &mut [[f32; 2]],
+        events: &[TimedEvent],
+    ) -> Result<(), Error> {
+        Error::check_length(input.len(), output.len())?;
+        self.process_into(input.len(), events, (input, output))
+    }
+
+    /// Processes mono `f32` audio into separate left and right `f32` slices.
+    ///
+    /// The three slices must have equal frame counts and fit in
+    /// [`PrepareConfig::max_block_frames`]. Input quantization, the output
+    /// range `-32767.0 / 32768.0..=32767.0 / 32768.0`, events and drain
+    /// cancellation are the same as in [`process_f32`](Self::process_f32). If
+    /// the call succeeds, it writes all output samples.
+    ///
+    /// # Errors
+    ///
+    /// The call checks [`Error::BufferLength`] for the left channel, then for
+    /// the right channel. Next, it checks [`Error::BlockTooLarge`], then
+    /// [`Error::InvalidEvent`]. If an error occurs, the two output buffers and
+    /// all processor state do not change.
+    pub fn process_planar_f32(
+        &mut self,
+        input: &[f32],
+        left: &mut [f32],
+        right: &mut [f32],
+        events: &[TimedEvent],
+    ) -> Result<(), Error> {
+        Error::check_length(input.len(), left.len())?;
+        Error::check_length(input.len(), right.len())?;
+        self.process_into(input.len(), events, (input, left, right))
+    }
+
+    /// Replaces mono `f32` audio with the stereo result after the downmix.
+    ///
+    /// The method quantizes each input sample before it writes over that
+    /// location, as in [`process_f32`](Self::process_f32). It divides the `i16`
+    /// downmix of [`process_mono_in_place`](Self::process_mono_in_place) by
+    /// `32768.0`, so each output sample is in
+    /// `-32767.0 / 32768.0..=32767.0 / 32768.0`. Peak feedback and output
+    /// telemetry measure the mono samples after this downmix. Events and drain
+    /// cancellation are the same as for [`process`](Self::process).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BlockTooLarge`] for a slice that is too large. Returns
+    /// [`Error::InvalidEvent`] for the first invalid event. All checks finish
+    /// before the audio slice or the processor state changes.
+    pub fn process_mono_in_place_f32(
+        &mut self,
+        audio: &mut [f32],
+        events: &[TimedEvent],
+    ) -> Result<(), Error> {
+        self.process_into(audio.len(), events, audio)
+    }
+
     /// Starts a tail with the current [`tail_frames`](Self::tail_frames)
     /// budget and returns that budget.
     ///
@@ -312,6 +388,73 @@ impl Processor {
             output[index] = frame[0];
         })?;
         output[count..].fill(0);
+        Ok(count)
+    }
+
+    /// Renders the next stereo tail frames as `f32` pairs and returns their
+    /// count.
+    ///
+    /// Call [`begin_drain`](Self::begin_drain) first. Each rendered sample is
+    /// in `-32767.0 / 32768.0..=32767.0 / 32768.0`, and unused frames get
+    /// `0.0`. Return values, empty buffers and completion are the same as in
+    /// [`drain`](Self::drain).
+    ///
+    /// # Errors
+    ///
+    /// If the output is larger than the prepared block limit, the method
+    /// returns [`Error::BlockTooLarge`] and does not change state or output.
+    pub fn drain_f32(&mut self, output: &mut [[f32; 2]]) -> Result<usize, Error> {
+        let count = self.drain_into(output.len(), OutputLayout::Stereo, |index, frame| {
+            output[index] = frame.map(pcm_to_f32);
+        })?;
+        output[count..].fill([0.0; 2]);
+        Ok(count)
+    }
+
+    /// Renders the tail into separate `f32` output channels of equal size.
+    ///
+    /// Each rendered sample is in `-32767.0 / 32768.0..=32767.0 / 32768.0`,
+    /// and unused samples get `0.0`. The return values, empty buffers and
+    /// completion are the same as in [`drain_planar`](Self::drain_planar).
+    ///
+    /// # Errors
+    ///
+    /// The method checks [`Error::BufferLength`] before
+    /// [`Error::BlockTooLarge`]. If either error occurs, the two channels and
+    /// the drain state do not change.
+    pub fn drain_planar_f32(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+    ) -> Result<usize, Error> {
+        Error::check_length(left.len(), right.len())?;
+        let count = self.drain_into(left.len(), OutputLayout::Stereo, |index, frame| {
+            left[index] = pcm_to_f32(frame[0]);
+            right[index] = pcm_to_f32(frame[1]);
+        })?;
+        left[count..].fill(0.0);
+        right[count..].fill(0.0);
+        Ok(count)
+    }
+
+    /// Renders the tail as mono `f32` audio and returns the number of rendered
+    /// frames.
+    ///
+    /// The downmix, the peak measurements and the `1 / 32768` output scale are
+    /// the same as in
+    /// [`process_mono_in_place_f32`](Self::process_mono_in_place_f32). Unused
+    /// samples get `0.0`. The return values, empty buffers and completion are
+    /// the same as in [`drain_mono`](Self::drain_mono).
+    ///
+    /// # Errors
+    ///
+    /// If the output is larger than the prepared block limit, the method
+    /// returns [`Error::BlockTooLarge`] before it changes output or state.
+    pub fn drain_mono_f32(&mut self, output: &mut [f32]) -> Result<usize, Error> {
+        let count = self.drain_into(output.len(), OutputLayout::Mono, |index, frame| {
+            output[index] = pcm_to_f32(frame[0]);
+        })?;
+        output[count..].fill(0.0);
         Ok(count)
     }
 
@@ -754,17 +897,21 @@ impl Processor {
         }
     }
 
-    /// Resamples a host input slice and runs the core stages on those frames.
-    fn run_resampled_core(&mut self, input: &[i16], layout: OutputLayout) -> usize {
-        for &sample in input {
-            self.input_peak = self.input_peak.max(i32::from(sample).abs());
-        }
+    /// Resamples `start..end` from `block` and runs the core stages on those
+    /// frames.
+    fn run_resampled_core<B: BlockBuffer>(&mut self, block: &B, start: usize, end: usize) -> usize {
+        let mut input_peak = self.input_peak;
         let core_count = self
             .resampler
             .as_mut()
             .expect("resampler active")
-            .resample_input(input);
-        self.render_core_frames(core_count, layout);
+            .resample_input(end - start, |offset| {
+                let sample = block.sample(start + offset);
+                input_peak = input_peak.max(i32::from(sample).abs());
+                sample
+            });
+        self.input_peak = input_peak;
+        self.render_core_frames(core_count, B::LAYOUT);
         core_count
     }
 
@@ -831,7 +978,7 @@ impl Processor {
                 self.apply(event);
             }
             let end = events.peek_offset().unwrap_or(frames);
-            let core_count = self.run_resampled_core(block.slice(cursor, end), B::LAYOUT);
+            let core_count = self.run_resampled_core(&block, cursor, end);
             self.finish_resampled_output(core_count, end - cursor, B::LAYOUT, |index, frame| {
                 block.write(cursor + index, frame);
             });
@@ -894,16 +1041,26 @@ fn downmix(frame: [i16; 2]) -> i16 {
     ((i32::from(frame[0]) + i32::from(frame[1])) >> 1) as i16
 }
 
+/// Quantizes one `f32` sample to symmetric `-32767..=32767` PCM.
+fn pcm_from_f32(sample: f32) -> i16 {
+    if sample.is_nan() {
+        return 0;
+    }
+    (f64::from(sample.clamp(-1.0, 1.0)) * 32_767.0).round() as i16
+}
+
+/// Divides one 16-bit PCM sample by `32768.0`.
+fn pcm_to_f32(sample: i16) -> f32 {
+    f32::from(sample) / 32_768.0
+}
+
 /// Reads the mono input and writes the output frames for one buffer layout.
 trait BlockBuffer {
     /// The stereo or mono output layout for the downmix and the peak meters.
     const LAYOUT: OutputLayout;
 
-    /// Returns the mono input sample at `index`.
+    /// Returns the quantized mono input sample at `index`.
     fn sample(&self, index: usize) -> i16;
-
-    /// Returns the mono input slice for `start..end`.
-    fn slice(&self, start: usize, end: usize) -> &[i16];
 
     /// Writes one output frame at `index`.
     fn write(&mut self, index: usize, frame: [i16; 2]);
@@ -918,11 +1075,6 @@ impl BlockBuffer for (&[i16], &mut [[i16; 2]]) {
     }
 
     #[inline]
-    fn slice(&self, start: usize, end: usize) -> &[i16] {
-        &self.0[start..end]
-    }
-
-    #[inline]
     fn write(&mut self, index: usize, frame: [i16; 2]) {
         self.1[index] = frame;
     }
@@ -934,11 +1086,6 @@ impl BlockBuffer for (&[i16], &mut [i16], &mut [i16]) {
     #[inline]
     fn sample(&self, index: usize) -> i16 {
         self.0[index]
-    }
-
-    #[inline]
-    fn slice(&self, start: usize, end: usize) -> &[i16] {
-        &self.0[start..end]
     }
 
     #[inline]
@@ -957,13 +1104,51 @@ impl BlockBuffer for &mut [i16] {
     }
 
     #[inline]
-    fn slice(&self, start: usize, end: usize) -> &[i16] {
-        &self[start..end]
+    fn write(&mut self, index: usize, frame: [i16; 2]) {
+        self[index] = frame[0];
+    }
+}
+
+impl BlockBuffer for (&[f32], &mut [[f32; 2]]) {
+    const LAYOUT: OutputLayout = OutputLayout::Stereo;
+
+    #[inline]
+    fn sample(&self, index: usize) -> i16 {
+        pcm_from_f32(self.0[index])
     }
 
     #[inline]
     fn write(&mut self, index: usize, frame: [i16; 2]) {
-        self[index] = frame[0];
+        self.1[index] = frame.map(pcm_to_f32);
+    }
+}
+
+impl BlockBuffer for (&[f32], &mut [f32], &mut [f32]) {
+    const LAYOUT: OutputLayout = OutputLayout::Stereo;
+
+    #[inline]
+    fn sample(&self, index: usize) -> i16 {
+        pcm_from_f32(self.0[index])
+    }
+
+    #[inline]
+    fn write(&mut self, index: usize, frame: [i16; 2]) {
+        self.1[index] = pcm_to_f32(frame[0]);
+        self.2[index] = pcm_to_f32(frame[1]);
+    }
+}
+
+impl BlockBuffer for &mut [f32] {
+    const LAYOUT: OutputLayout = OutputLayout::Mono;
+
+    #[inline]
+    fn sample(&self, index: usize) -> i16 {
+        pcm_from_f32(self[index])
+    }
+
+    #[inline]
+    fn write(&mut self, index: usize, frame: [i16; 2]) {
+        self[index] = pcm_to_f32(frame[0]);
     }
 }
 
