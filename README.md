@@ -180,6 +180,8 @@ multi-voice mixes.
 `0..=1`. The default is 0. `resynthesis.correction.flex_tune` sets the outer
 fraction of each half-bin where pull toward the target decreases, in `0..=1`.
 The default is 0, which applies full pull across the whole bin.
+`resynthesis.correction.pitch_bend_semitones` sets the maximum correction pitch
+bend, in `0..=24`. The default is 2.
 
 `resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
 dry path starts after Warm and has a delay of 1,593 frames. All six reverb
@@ -203,7 +205,8 @@ with `resynthesis.harmony.source`:
 `resynthesis.harmony.voices` sets the number of interval voices, in `0..=4`.
 The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
 voices. The other voices release with the usual gain envelope. The chord
-and MIDI sources ignore this field.
+and MIDI sources ignore this field. `resynthesis.harmony.pitch_bend_semitones`
+sets the maximum harmony pitch bend, in `0..=24`. The default is 2.
 
 `resynthesis.harmony_gain` scales the four harmony voices in mono and in
 stereo. It does not scale the lead voice.
@@ -580,7 +583,9 @@ and show enums as string literals. To change the configuration, do these steps:
 If a required field is absent or a value is not valid, the call throws a
 JavaScript `Error`. If an optional field is absent or `undefined`, it gets its
 default. `resynthesis.correction.humanize` and
-`resynthesis.correction.flexTune` default to 0, and
+`resynthesis.correction.flexTune` default to 0,
+`resynthesis.correction.pitchBendSemitones` and
+`resynthesis.harmony.pitchBendSemitones` default to 2 (in `0..=24`), and
 `resynthesis.harmony.voices` defaults to 4. The conversion ignores extra object
 properties. The generated declarations contain the parameter documentation from
 the Rust types.
@@ -609,6 +614,16 @@ A harmony Note On event has this form:
 
 ```ts
 { offset: 0, event: { type: "midi", value: { type: "noteOn", channel: 0, note: 60, velocity: 100 } } }
+```
+
+MIDI events also accept `"noteOff"`, `"pitchBend"` (`channel` in `0..=15`,
+`value` in `-8192..=8191`), `"sustainPedal"` (`channel` in `0..=15`, `held` as
+a `boolean`) and `"allNotesOff"`. For example, these events hold the sustain
+pedal and bend the pitch upward:
+
+```ts
+{ offset: 0, event: { type: "midi", value: { type: "sustainPedal", channel: 0, held: true } } }
+{ offset: 0, event: { type: "midi", value: { type: "pitchBend", channel: 0, value: 4096 } } }
 ```
 
 Use `correctionMidi` for the separate correction keyboard. The native rules

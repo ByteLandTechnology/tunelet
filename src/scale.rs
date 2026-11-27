@@ -1,6 +1,7 @@
 //! Pitch classes and correction tables, made from scales or held MIDI notes.
 
-use crate::midi::MidiEvent;
+use crate::midi::{bend_ratio, MidiEvent};
+use crate::numeric::fixed::Q14;
 use crate::SampleRate;
 
 /// One of the twelve notes in an octave.
@@ -164,6 +165,17 @@ pub(crate) struct CorrectionTable {
     base_periods: [i32; 12],
     /// The held MIDI keys 0..=127.
     pub keyboard: [bool; 128],
+    /// The keys that Note Off released while sustain was active.
+    sustained: [bool; 128],
+    /// The sustain-pedal state (controller 64) for each MIDI channel.
+    sustain_held: [bool; 16],
+    /// The centered 14-bit pitch bend across all channels of correction MIDI.
+    pitch_bend: i16,
+    /// The configured maximum pitch bend in semitones.
+    pitch_bend_semitones: f32,
+    /// The Q14 frequency multiplier from `pitch_bend` and
+    /// `pitch_bend_semitones`.
+    pub bend_ratio: Q14,
 }
 
 impl CorrectionTable {
@@ -176,6 +188,11 @@ impl CorrectionTable {
             notes: [0; 12],
             base_periods: [0; 12],
             keyboard: [false; 128],
+            sustained: [false; 128],
+            sustain_held: [false; 16],
+            pitch_bend: 0,
+            pitch_bend_semitones: 2.0,
+            bend_ratio: Q14::ONE,
         };
         result.set_sample_rate(rate);
         result.set_notes(mask);
@@ -226,33 +243,76 @@ impl CorrectionTable {
             self.midpoints[0] = self.midpoints[self.count] / 2;
         }
     }
-    /// Releases keys 0..=127 and loads `notes` again.
+    /// Updates the pitch-bend range and calculates `bend_ratio` again.
+    pub(crate) fn set_pitch_bend_semitones(&mut self, semitones: f32) {
+        self.pitch_bend_semitones = semitones;
+        self.bend_ratio = bend_ratio(self.pitch_bend, semitones);
+    }
+    /// Releases keys 0..=127, clears sustain and pitch bend, and loads `notes`
+    /// again.
     pub(crate) fn reset(&mut self, notes: NoteMask) {
         self.keyboard.fill(false);
+        self.sustained.fill(false);
+        self.sustain_held.fill(false);
+        self.pitch_bend = 0;
+        self.bend_ratio = Q14::ONE;
         self.set_notes(notes);
     }
-    /// Applies an event whose MIDI ranges were already checked.
+    /// Applies an event whose MIDI ranges were already checked, and returns
+    /// `true` if the active note table reloaded.
     ///
-    /// If no key in 0..=127 is held, this method loads `notes` again.
-    pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent, notes: NoteMask) {
+    /// If sustain holds a released key, this method keeps the active note table
+    /// and returns `false`. If no key in 0..=127 is held or sustained, this
+    /// method loads `notes` again.
+    pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent, notes: NoteMask) -> bool {
         match event {
-            MidiEvent::NoteOn { note, velocity, .. } => {
-                self.keyboard[usize::from(note)] = velocity != 0
+            MidiEvent::NoteOn { note, velocity, .. } if velocity != 0 => {
+                let idx = usize::from(note);
+                self.keyboard[idx] = true;
+                self.sustained[idx] = false;
             }
-            MidiEvent::NoteOff { note, .. } => self.keyboard[usize::from(note)] = false,
+            MidiEvent::NoteOn { note, .. } | MidiEvent::NoteOff { note, .. } => {
+                let idx = usize::from(note);
+                if self.keyboard[idx] {
+                    self.keyboard[idx] = false;
+                    if self.sustain_held.contains(&true) {
+                        self.sustained[idx] = true;
+                        return false;
+                    }
+                } else if self.sustained[idx] {
+                    return false;
+                }
+            }
+            MidiEvent::PitchBend { value, .. } => {
+                self.pitch_bend = value;
+                self.bend_ratio = bend_ratio(value, self.pitch_bend_semitones);
+                return false;
+            }
+            MidiEvent::SustainPedal { channel, held } => {
+                self.sustain_held[usize::from(channel)] = held;
+                if held || self.sustain_held.contains(&true) {
+                    return false;
+                }
+                let had_sustained = self.sustained.contains(&true);
+                self.sustained.fill(false);
+                if !had_sustained {
+                    return false;
+                }
+            }
             MidiEvent::AllNotesOff => {
                 self.reset(notes);
-                return;
+                return true;
             }
         }
         let mut mask = [false; 12];
-        for (i, &held) in self.keyboard.iter().enumerate() {
-            mask[i % 12] |= held;
+        for i in 0..128 {
+            mask[i % 12] |= self.keyboard[i] || self.sustained[i];
         }
         if mask == [false; 12] {
             self.set_notes(notes);
         } else {
             self.set_notes(NoteMask(mask));
         }
+        true
     }
 }

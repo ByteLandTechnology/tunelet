@@ -253,6 +253,7 @@ impl ProcessorConfig {
             harmony_voicing_spread_percent: harmony && chord,
             harmony_portamento_ms: harmony && (!interval || interval_voices),
             harmony_voices: harmony && interval,
+            harmony_pitch_bend_semitones: harmony && (!interval || interval_voices),
             harmony_gain: harmony && (!interval || interval_voices),
             reverb_mode: reverb,
             reverb_mix: reverb,
@@ -312,6 +313,8 @@ pub struct ControlActivity {
     pub harmony_portamento_ms: bool,
     /// `true` if [`crate::HarmonyConfig::voices`] is active.
     pub harmony_voices: bool,
+    /// `true` if [`crate::HarmonyConfig::pitch_bend_semitones`] is active.
+    pub harmony_pitch_bend_semitones: bool,
     /// `true` if [`ResynthesisConfig::harmony_gain`] is active.
     pub harmony_gain: bool,
     /// `true` if [`ReverbConfig::mode`] is active.

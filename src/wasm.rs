@@ -23,13 +23,17 @@
 //! - Each object must contain all required fields.
 //! - The optional correction `humanize` and `flexTune` fields default to 0.
 //! - The optional harmony `voices` field defaults to 4.
+//! - The optional correction and harmony `pitchBendSemitones` fields are in
+//!   0..=24 and default to 2.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
 //! `{ type, value }`, and the reset control has no `value`. Scalar parameter
 //! events nest `{ type, value }` inside `{ type: "parameter", value }`. MIDI
-//! messages use `{ type, channel, note, velocity }`, with the fields that
-//! apply to the selected variant. The TypeScript declarations come from the
-//! same Rust types that validation uses.
+//! messages use a `type` tag (`"noteOn"`, `"noteOff"`, `"pitchBend"`,
+//! `"sustainPedal"` or `"allNotesOff"`) and the fields for that variant. The
+//! variant fields are `channel` (0..=15), `note` (0..=127), `velocity`
+//! (0..=127), `value` (-8192..=8191) and `held`. The TypeScript declarations
+//! come from the same Rust types that validation uses.
 //!
 //! The class allocates the PCM storage at construction and uses it again for
 //! each block. It also keeps an event buffer and uses that capacity again
@@ -855,6 +859,7 @@ struct EventKeys {
     channel: JsValue,
     note: JsValue,
     velocity: JsValue,
+    held: JsValue,
     midi: JsValue,
     correction_midi: JsValue,
     output_gain: JsValue,
@@ -868,6 +873,8 @@ struct EventKeys {
     reverb: JsValue,
     note_on: JsValue,
     note_off: JsValue,
+    pitch_bend: JsValue,
+    sustain_pedal: JsValue,
     all_notes_off: JsValue,
     f32_parameters: [ParameterKey<f32>; 27],
     u8_parameters: [ParameterKey<u8>; 2],
@@ -884,6 +891,7 @@ impl EventKeys {
             channel: JsValue::from_str("channel"),
             note: JsValue::from_str("note"),
             velocity: JsValue::from_str("velocity"),
+            held: JsValue::from_str("held"),
             midi: JsValue::from_str("midi"),
             correction_midi: JsValue::from_str("correctionMidi"),
             output_gain: JsValue::from_str("outputGain"),
@@ -897,6 +905,8 @@ impl EventKeys {
             reverb: JsValue::from_str("reverb"),
             note_on: JsValue::from_str("noteOn"),
             note_off: JsValue::from_str("noteOff"),
+            pitch_bend: JsValue::from_str("pitchBend"),
+            sustain_pedal: JsValue::from_str("sustainPedal"),
             all_notes_off: JsValue::from_str("allNotesOff"),
             f32_parameters: [
                 ParameterKey::new(
@@ -1143,6 +1153,17 @@ fn decode_midi_event(value: &JsValue, keys: &EventKeys) -> Result<MidiEvent, JsE
         let channel = decode_u8(&get_property(value, &keys.channel)?, "MIDI channel")?;
         let note = decode_u8(&get_property(value, &keys.note)?, "MIDI note")?;
         Ok(MidiEvent::NoteOff { channel, note })
+    } else if kind == keys.pitch_bend {
+        let channel = decode_u8(&get_property(value, &keys.channel)?, "MIDI channel")?;
+        let bend = decode_i16(&get_property(value, &keys.value)?, "MIDI pitch bend")?;
+        Ok(MidiEvent::PitchBend {
+            channel,
+            value: bend,
+        })
+    } else if kind == keys.sustain_pedal {
+        let channel = decode_u8(&get_property(value, &keys.channel)?, "MIDI channel")?;
+        let held = decode_bool(&get_property(value, &keys.held)?, "MIDI sustain held")?;
+        Ok(MidiEvent::SustainPedal { channel, held })
     } else if kind == keys.all_notes_off {
         Ok(MidiEvent::AllNotesOff)
     } else {
@@ -1215,6 +1236,28 @@ fn decode_u8(value: &JsValue, field: &str) -> Result<u8, JsError> {
         )));
     }
     Ok(number as u8)
+}
+
+/// Converts a JavaScript number into an `i16` integer.
+fn decode_i16(value: &JsValue, field: &str) -> Result<i16, JsError> {
+    let Some(number) = value.as_f64() else {
+        return Err(JsError::new(&format!(
+            "{field} must be an integer in -32768..=32767"
+        )));
+    };
+    if !(-32768.0..=32767.0).contains(&number) || number.fract() != 0.0 {
+        return Err(JsError::new(&format!(
+            "{field} must be an integer in -32768..=32767"
+        )));
+    }
+    Ok(number as i16)
+}
+
+/// Converts a JavaScript value into a `bool`.
+fn decode_bool(value: &JsValue, field: &str) -> Result<bool, JsError> {
+    value
+        .as_bool()
+        .ok_or_else(|| JsError::new(&format!("{field} must be a boolean")))
 }
 
 /// Returns the first `points` entries of a reusable envelope buffer. If the
