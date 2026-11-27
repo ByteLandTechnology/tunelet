@@ -905,7 +905,8 @@ impl Formant {
     /// `input` gets the vocal-tract envelope from the analysis. `output` gets
     /// the envelope of the synthesis model, which includes the width gain.
     /// The two responses include the glottal de-emphasis. Point `k` of `n` is
-    /// at the frequency `max_frequency_hz * k / (n - 1)`. The values are
+    /// at the frequency `max_frequency_hz * k / (n - 1)`. Points at
+    /// frequencies above half of the stage rate are zero. The values are
     /// linear and have no absolute level, because the analysis normalizes the
     /// signal energy.
     ///
@@ -946,6 +947,27 @@ impl Formant {
         } else {
             0.0
         };
+        let core_nyquist = f64::from(self.rate.as_u32()) * 0.5;
+        let max_hz = f64::from(max_frequency_hz);
+        let active = if points > 1 && max_hz > core_nyquist {
+            let nyquist_scaled = core_nyquist * (points - 1) as f64;
+            let mut count = ((nyquist_scaled / max_hz) as usize)
+                .saturating_add(1)
+                .min(points);
+            while count > 1 && max_hz * (count - 1) as f64 > nyquist_scaled {
+                count -= 1;
+            }
+            while count < points && max_hz * count as f64 <= nyquist_scaled {
+                count += 1;
+            }
+            count
+        } else {
+            points
+        };
+        input[active..].fill(0.0);
+        output[active..].fill(0.0);
+        let input = &mut input[..active];
+        let output = &mut output[..active];
         const SCALE: f64 = 1.0 / 16384.0;
         let glottal = self.glottal as f64 * SCALE;
         let width = self.width as f64 * SCALE;

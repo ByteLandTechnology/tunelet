@@ -9,7 +9,7 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Error {
-    /// The numeric rate has no [`crate::SampleRate`] variant that matches it.
+    /// The sample rate is outside 8000..=192000 Hz.
     UnsupportedSampleRate {
         /// The unsupported rate, in hertz.
         hz: u32,

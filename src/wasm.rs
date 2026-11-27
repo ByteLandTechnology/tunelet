@@ -153,10 +153,10 @@ pub struct WasmProcessor {
 impl WasmProcessor {
     /// Prepares a processor and its reusable PCM buffers.
     ///
-    /// `sample_rate` must be 44100 or 48000. `max_block_frames` must be an
-    /// integer in 1..=4294967295. It is a limit for each call, and smaller
-    /// blocks and empty blocks are also valid. If you omit `config`, the
-    /// processor uses the default configuration. The constructor validates
+    /// `sample_rate` must be an integer in `8000..=192000`. `max_block_frames`
+    /// must be an integer in `1..=4294967295`. It is a limit for each call, and
+    /// smaller blocks and empty blocks are also valid. If you omit `config`,
+    /// the processor uses the default configuration. The constructor validates
     /// the settings before it allocates the processor or the PCM buffers. In
     /// TypeScript, use `new Tunelet(sampleRate, maxBlockFrames, config)`.
     ///
@@ -164,7 +164,7 @@ impl WasmProcessor {
     ///
     /// The constructor throws if one of these conditions occurs:
     ///
-    /// - The rate is not 44100 or 48000.
+    /// - The rate is not an integer or is outside 8000..=192000.
     /// - The block limit is not an integer or is out of range.
     /// - The configuration object is malformed or a field is missing.
     /// - The configuration is not valid.
@@ -180,11 +180,14 @@ impl WasmProcessor {
     ) -> Result<WasmProcessor, JsError> {
         // Accept JavaScript numbers without the u32 coercion of wasm-bindgen.
         // That coercion silently truncates fractions and wraps large values.
-        let rate = match sample_rate {
-            44100.0 => SampleRate::Hz44100,
-            48000.0 => SampleRate::Hz48000,
-            _ => return Err(JsError::new("sampleRate must be 44100 or 48000")),
-        };
+        let min_rate = f64::from(crate::config::MIN_SAMPLE_RATE_HZ);
+        let max_rate = f64::from(crate::config::MAX_SAMPLE_RATE_HZ);
+        if !(min_rate..=max_rate).contains(&sample_rate) || sample_rate.fract() != 0.0 {
+            return Err(JsError::new(
+                "sampleRate must be an integer in 8000..=192000",
+            ));
+        }
+        let rate = SampleRate::try_from(sample_rate as u32)?;
         if !(1.0..=f64::from(u32::MAX)).contains(&max_block_frames)
             || max_block_frames.fract() != 0.0
         {
@@ -258,9 +261,11 @@ impl WasmProcessor {
         self.input.len()
     }
 
-    /// The nominal resynthesis latency: 1,593 frames at both sample rates.
+    /// The nominal latency in host frames.
     ///
-    /// The dry path also has a delay of 1,593 frames. Resampled voices, choir
+    /// At 44.1 kHz and 48 kHz, the value is 1,593 frames and the dry path has
+    /// the same delay. At other rates, the value scales the core delay to host
+    /// frames and adds the polyphase filter delay. Resampled voices, choir
     /// delays and effects have their own timing. Thus, this value does not
     /// align all paths.
     #[wasm_bindgen(getter, js_name = latencyFrames)]
@@ -761,7 +766,8 @@ impl WasmProcessor {
     /// display.
     ///
     /// `maxFrequencyHz` must be finite, more than zero and not more than half
-    /// of the sample rate.
+    /// of the sample rate. If the sample rate is above the internal core rate,
+    /// the method writes zero for frequencies above half of the core rate.
     ///
     /// The method returns `true` if the envelopes are valid. It returns
     /// `false` and fills the two arrays with zeros if the formant stage is

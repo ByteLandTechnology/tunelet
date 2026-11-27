@@ -1,7 +1,9 @@
 //! A crate for vocal pitch correction, choir, harmony, formant control and effects.
 //!
 //! [`Processor`] changes mono signed 16-bit PCM into the same number of stereo
-//! or mono frames. The sample rate is 44.1 kHz or 48 kHz. The signal chain is
+//! or mono frames. The sample rate is an integer in 8000..=192000 Hz. At rates
+//! other than 44.1 kHz and 48 kHz, a fixed-point polyphase resampler converts
+//! to and from the 44.1 kHz or 48 kHz core. The signal chain is
 //! Punch → Warm → pitch tracking and resynthesis → Alien → reverb → output
 //! gain. The default configuration enables chromatic pitch correction and one
 //! choir voice. The optional effects and the formant stage are disabled.
@@ -62,8 +64,8 @@
 //! accumulated output peak and the frame count.
 //! [`Processor::take_feedback`] also clears the peak window. The pitch
 //! reporting bounds change only the reports. They do not change the detection
-//! or the audio signal. [`Processor::latency_frames`] gives a nominal
-//! resynthesis delay, which the dry path also uses. Voice delays, pitch
+//! or the audio signal. [`Processor::latency_frames`] gives the nominal
+//! delay in host frames, which the dry path also uses. Voice delays, pitch
 //! changes and effects have their own timing.
 //!
 //! [`Processor::control_activity`] and [`ProcessorConfig::control_activity`]
@@ -128,6 +130,7 @@ mod midi;
 mod numeric;
 mod pitch;
 mod processor;
+mod resample;
 mod resynthesis;
 mod scale;
 

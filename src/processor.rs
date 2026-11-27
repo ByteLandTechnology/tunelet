@@ -7,10 +7,11 @@ use crate::effects::warm::Warm;
 use crate::events::{ValidatedEvent, ValidatedEvents};
 use crate::numeric::rng::RandomStream;
 use crate::numeric::NumericContext;
+use crate::resample::Resampler;
 use crate::resynthesis::{self, Resynthesis};
 use crate::{
     ControlActivity, ControlEvent, Error, ParameterControl, PrepareConfig, ProcessorConfig,
-    TimedEvent,
+    SampleRate, TimedEvent,
 };
 
 /// Selects the output channel layout for the downmix and the peak meters.
@@ -54,6 +55,11 @@ pub(crate) struct EnvelopeKey {
 pub struct Processor {
     /// The fixed rate and the block limit for each call.
     preparation: PrepareConfig,
+    /// The internal 44.1 kHz or 48 kHz rate for the DSP stages.
+    core_rate: SampleRate,
+    /// The optional polyphase rate converter for host rates other than 44.1
+    /// kHz and 48 kHz.
+    resampler: Option<Resampler>,
     /// The settings that the host sees.
     ///
     /// The temporary aspiration mute of a drain is not stored here.
@@ -125,19 +131,26 @@ impl Processor {
     ///
     /// Returns [`Error::InvalidConfig`] if a stage field or the output gain is
     /// not valid. This check occurs before the allocation of the histories.
-    /// The types of `preparation` already make sure that the block limit is
-    /// not zero and that the sample rate is supported.
+    /// At resampled rates, if the scaled core buffers for
+    /// `prepare.max_block_frames` exceed the size limit or fail to allocate,
+    /// the method also returns [`Error::InvalidConfig`]. The types of
+    /// `preparation` already make sure that the block limit is not zero and
+    /// that the sample rate is supported.
     pub fn new(preparation: PrepareConfig, config: ProcessorConfig) -> Result<Self, Error> {
         config.validate()?;
-        let rate = preparation.sample_rate;
+        let host_rate = preparation.sample_rate;
+        let core_rate = host_rate.core_rate();
+        let resampler = Resampler::new(host_rate, core_rate, preparation.max_block_frames.get())?;
         Ok(Self {
             preparation,
+            core_rate,
+            resampler,
             config,
-            punch: Punch::new(rate, config.punch),
-            warm: Warm::new(rate, config.warm),
-            resynthesis: Box::new(Resynthesis::new(rate, config.resynthesis)),
+            punch: Punch::new(core_rate, config.punch),
+            warm: Warm::new(core_rate, config.warm),
+            resynthesis: Box::new(Resynthesis::new(core_rate, config.resynthesis)),
             alien: Alien::new(config.alien),
-            reverb: Reverb::new(rate, config.reverb),
+            reverb: Reverb::new(core_rate, config.reverb),
             numeric: NumericContext::new(config.resynthesis.random_seed as u32),
             peak: 0,
             input_peak: 0,
@@ -174,9 +187,7 @@ impl Processor {
         events: &[TimedEvent],
     ) -> Result<(), Error> {
         Error::check_length(input.len(), output.len())?;
-        self.process_into(input.len(), events, |processor, index| {
-            output[index] = processor.next(input[index], OutputLayout::Stereo);
-        })
+        self.process_into(input.len(), events, (input, output))
     }
 
     /// Processes mono PCM into separate left and right output slices.
@@ -201,11 +212,7 @@ impl Processor {
     ) -> Result<(), Error> {
         Error::check_length(input.len(), left.len())?;
         Error::check_length(input.len(), right.len())?;
-        self.process_into(input.len(), events, |processor, index| {
-            let frame = processor.next(input[index], OutputLayout::Stereo);
-            left[index] = frame[0];
-            right[index] = frame[1];
-        })
+        self.process_into(input.len(), events, (input, left, right))
     }
 
     /// Replaces mono PCM with the stereo result after the downmix.
@@ -227,10 +234,7 @@ impl Processor {
         audio: &mut [i16],
         events: &[TimedEvent],
     ) -> Result<(), Error> {
-        self.process_into(audio.len(), events, |processor, index| {
-            let output = processor.next(audio[index], OutputLayout::Mono);
-            audio[index] = output[0];
-        })
+        self.process_into(audio.len(), events, audio)
     }
 
     /// Processes mono `f32` audio into `[left, right]` stereo frames.
@@ -257,11 +261,7 @@ impl Processor {
         events: &[TimedEvent],
     ) -> Result<(), Error> {
         Error::check_length(input.len(), output.len())?;
-        self.process_into(input.len(), events, |processor, index| {
-            output[index] = processor
-                .next(pcm_from_f32(input[index]), OutputLayout::Stereo)
-                .map(pcm_to_f32);
-        })
+        self.process_into(input.len(), events, (input, output))
     }
 
     /// Processes mono `f32` audio into separate left and right `f32` slices.
@@ -287,11 +287,7 @@ impl Processor {
     ) -> Result<(), Error> {
         Error::check_length(input.len(), left.len())?;
         Error::check_length(input.len(), right.len())?;
-        self.process_into(input.len(), events, |processor, index| {
-            let frame = processor.next(pcm_from_f32(input[index]), OutputLayout::Stereo);
-            left[index] = pcm_to_f32(frame[0]);
-            right[index] = pcm_to_f32(frame[1]);
-        })
+        self.process_into(input.len(), events, (input, left, right))
     }
 
     /// Replaces mono `f32` audio with the stereo result after the downmix.
@@ -314,10 +310,7 @@ impl Processor {
         audio: &mut [f32],
         events: &[TimedEvent],
     ) -> Result<(), Error> {
-        self.process_into(audio.len(), events, |processor, index| {
-            let output = processor.next(pcm_from_f32(audio[index]), OutputLayout::Mono);
-            audio[index] = pcm_to_f32(output[0]);
-        })
+        self.process_into(audio.len(), events, audio)
     }
 
     /// Starts a tail with the current [`tail_frames`](Self::tail_frames)
@@ -469,20 +462,23 @@ impl Processor {
         Ok(count)
     }
 
-    /// Returns the finite tail budget for the current configuration.
+    /// Returns the finite tail budget in host frames for the current
+    /// configuration.
     ///
     /// This value is a configured limit. It is not the number of drain frames
     /// that are left, and it is not a measured decay time. It can include
     /// silence. It can also stop filter output that continues for a long
     /// time.
     pub fn tail_frames(&self) -> usize {
-        self.resynthesis
+        let core_tail = self
+            .resynthesis
             .tail_frames()
             .saturating_add(alien::tail_frames(self.config.alien))
-            .saturating_add(reverb::tail_frames(
-                self.preparation.sample_rate,
-                self.config.reverb,
-            ))
+            .saturating_add(reverb::tail_frames(self.core_rate, self.config.reverb));
+        match &self.resampler {
+            Some(resampler) => resampler.tail_frames(core_tail),
+            None => core_tail,
+        }
     }
 
     /// Returns the fixed sample rate and block limit.
@@ -510,13 +506,28 @@ impl Processor {
         self.config.control_activity()
     }
 
-    /// Returns the nominal resynthesis latency: 1,593 frames at both rates.
+    /// Returns the nominal latency in host frames.
     ///
-    /// The dry path also has a delay of 1,593 frames. Resampled voices, choir
+    /// At 44.1 kHz and 48 kHz, the value is 1,593 frames and the dry path has
+    /// the same delay. At other rates, the value scales the core delay to host
+    /// frames and adds the polyphase filter delay. Resampled voices, choir
     /// delays and effects have their own timing. Thus, this value does not
     /// align all paths.
     pub fn latency_frames(&self) -> usize {
-        resynthesis::LATENCY_FRAMES
+        match &self.resampler {
+            Some(resampler) => resampler.latency_frames(resynthesis::LATENCY_FRAMES),
+            None => resynthesis::LATENCY_FRAMES,
+        }
+    }
+
+    /// Scales a core pitch period to host samples at resampled rates.
+    fn scale_period_samples(&self, period_samples: f32) -> f32 {
+        if self.resampler.is_some() {
+            (f64::from(period_samples) * f64::from(self.preparation.sample_rate.as_u32())
+                / f64::from(self.core_rate.as_u32())) as f32
+        } else {
+            period_samples
+        }
     }
 
     /// Returns the pitch, output peak and frame count, and does not clear them.
@@ -526,7 +537,7 @@ impl Processor {
         let estimate = self.resynthesis.estimate();
         Feedback {
             resample_ratio: self.last_resample_ratio,
-            period_samples: estimate.period_samples,
+            period_samples: self.scale_period_samples(estimate.period_samples),
             frequency_hz: estimate.frequency_hz,
             target_midi_note: self.resynthesis.target_note(),
             voiced: estimate.voiced,
@@ -562,7 +573,7 @@ impl Processor {
             output_peak: self.output_peaks.map(|peak| peak as f32 / 32_768.0),
             reverb_wet_peak: self.reverb.wet_peak(),
             resample_ratio: self.last_resample_ratio,
-            period_samples: estimate.period_samples,
+            period_samples: self.scale_period_samples(estimate.period_samples),
             frequency_hz: estimate.frequency_hz,
             target_midi_note: self.resynthesis.target_note(),
             voiced: estimate.voiced,
@@ -614,7 +625,9 @@ impl Processor {
     /// analysis normalizes the signal energy. Scale them for a display.
     ///
     /// `max_frequency_hz` must be finite, more than zero and not more than
-    /// half of the sample rate. The two slices must have the same length.
+    /// half of the sample rate. If the sample rate is above the internal core
+    /// rate, the method writes zero for frequencies above half of the core
+    /// rate. The two slices must have the same length.
     ///
     /// Returns `Ok(true)` if the envelopes are valid. Returns `Ok(false)` and
     /// fills the two slices with zeros in these cases:
@@ -757,6 +770,9 @@ impl Processor {
     ///
     /// For a fully new state, make a new processor.
     pub fn reset(&mut self) {
+        if let Some(resampler) = &mut self.resampler {
+            resampler.reset();
+        }
         self.punch.reset();
         self.warm.reset();
         self.resynthesis.reset();
@@ -969,13 +985,8 @@ impl Processor {
         self.drain_remaining = None;
     }
 
-    /// Renders one frame through the full chain and updates the peak meters.
-    ///
-    /// Resynthesis produces Q14 audio. Output gain is Q8. The gain product
-    /// uses `i64` arithmetic before the symmetric `-32767..=32767` PCM clamp.
-    /// In the mono layout, the downmix occurs before the peak measurement.
-    fn next(&mut self, mut input: i16, layout: OutputLayout) -> [i16; 2] {
-        self.input_peak = self.input_peak.max((input as i32).abs());
+    /// Renders one core frame through the stages without host meter updates.
+    fn next_core(&mut self, mut input: i16, layout: OutputLayout) -> [i16; 2] {
         if self.config.punch.enabled {
             input = self.punch.process_sample(input, &mut self.numeric);
         }
@@ -987,9 +998,15 @@ impl Processor {
         let alien = self.alien.process_sample(voice);
         let reverb = self.reverb.process_sample(alien, layout);
         let gain = (self.config.output_gain as f64 * 256.0) as i64;
-        let mut result = reverb.map(|sample| {
+        reverb.map(|sample| {
             (((i64::from(sample.to_bits()) * gain) >> 8) << 1).clamp(-32767, 32767) as i16
-        });
+        })
+    }
+
+    /// Applies an optional mono downmix and updates the output peaks and frame
+    /// count.
+    #[inline]
+    fn record_output(&mut self, mut result: [i16; 2], layout: OutputLayout) -> [i16; 2] {
         if matches!(layout, OutputLayout::Mono) {
             let mono = downmix(result);
             result = [mono, mono];
@@ -1005,24 +1022,119 @@ impl Processor {
         result
     }
 
+    /// Renders one frame through the full chain and updates the peak meters.
+    ///
+    /// Resynthesis produces Q14 audio. Output gain is Q8. The gain product
+    /// uses `i64` arithmetic before the symmetric `-32767..=32767` PCM clamp.
+    /// In the mono layout, the downmix occurs before the peak measurement.
+    fn next(&mut self, input: i16, layout: OutputLayout) -> [i16; 2] {
+        self.input_peak = self.input_peak.max((input as i32).abs());
+        let result = self.next_core(input, layout);
+        self.record_output(result, layout)
+    }
+
+    /// Runs the core stages across `core_count` resampled input frames.
+    fn render_core_frames(&mut self, core_count: usize, layout: OutputLayout) {
+        for index in 0..core_count {
+            let sample = self
+                .resampler
+                .as_ref()
+                .expect("resampler active")
+                .core_input[index];
+            let frame = self.next_core(sample, layout);
+            self.resampler
+                .as_mut()
+                .expect("resampler active")
+                .core_output[index] = frame;
+        }
+    }
+
+    /// Resamples `start..end` from `block` and runs the core stages on those
+    /// frames.
+    fn run_resampled_core<B: BlockBuffer>(&mut self, block: &B, start: usize, end: usize) -> usize {
+        let mut input_peak = self.input_peak;
+        let core_count = self
+            .resampler
+            .as_mut()
+            .expect("resampler active")
+            .resample_input(end - start, |offset| {
+                let sample = block.sample(start + offset);
+                input_peak = input_peak.max(i32::from(sample).abs());
+                sample
+            });
+        self.input_peak = input_peak;
+        self.render_core_frames(core_count, B::LAYOUT);
+        core_count
+    }
+
+    /// Resamples the current `core_output` prefix to `host_frames` frames and
+    /// updates the output peaks and the frame count.
+    fn finish_resampled_output(
+        &mut self,
+        core_count: usize,
+        host_frames: usize,
+        layout: OutputLayout,
+        mut write: impl FnMut(usize, [i16; 2]),
+    ) {
+        let mut peak = self.peak;
+        let mut output_peaks = self.output_peaks;
+        let mut frames = self.frames;
+        self.resampler
+            .as_mut()
+            .expect("resampler active")
+            .resample_output(core_count, host_frames, |index, mut frame| {
+                if matches!(layout, OutputLayout::Mono) {
+                    let mono = downmix(frame);
+                    frame = [mono, mono];
+                }
+                peak = peak
+                    .max(i32::from(frame[0]).abs())
+                    .max(i32::from(frame[1]).abs());
+                for (channel_peak, sample) in output_peaks.iter_mut().zip(frame) {
+                    *channel_peak = (*channel_peak).max(i32::from(sample).abs());
+                }
+                frames = frames.saturating_add(1);
+                write(index, frame);
+            });
+        self.peak = peak;
+        self.output_peaks = output_peaks;
+        self.frames = frames;
+    }
+
     /// Checks the block, applies all controls at each offset and renders each
     /// frame.
     ///
-    /// A callback reads the input sample and writes the output for its buffer
+    /// `block` reads the mono input and writes the output for its buffer
     /// layout.
-    fn process_into(
+    fn process_into<B: BlockBuffer>(
         &mut self,
         frames: usize,
         events: &[TimedEvent],
-        mut render: impl FnMut(&mut Self, usize),
+        mut block: B,
     ) -> Result<(), Error> {
         let mut events = self.validate(frames, events)?;
         self.drain_remaining = None;
-        for index in 0..frames {
-            while let Some(event) = events.next_at(index) {
+        if self.resampler.is_none() {
+            for index in 0..frames {
+                while let Some(event) = events.next_at(index) {
+                    self.apply(event);
+                }
+                let frame = self.next(block.sample(index), B::LAYOUT);
+                block.write(index, frame);
+            }
+            return Ok(());
+        }
+        let mut cursor = 0;
+        while cursor < frames {
+            while let Some(event) = events.next_at(cursor) {
                 self.apply(event);
             }
-            render(self, index);
+            let end = events.peek_offset().unwrap_or(frames);
+            let core_count = self.run_resampled_core(&block, cursor, end);
+            self.finish_resampled_output(core_count, end - cursor, B::LAYOUT, |index, frame| {
+                block.write(cursor + index, frame);
+            });
+            cursor = end;
         }
         Ok(())
     }
@@ -1043,8 +1155,18 @@ impl Processor {
         self.check_block(frames)?;
         let count = self.drain_remaining.unwrap_or(0).min(frames);
         self.resynthesis.set_aspiration_muted(true);
-        for index in 0..count {
-            write(index, self.next(0, layout));
+        if self.resampler.is_none() {
+            for index in 0..count {
+                write(index, self.next(0, layout));
+            }
+        } else if count > 0 {
+            let core_count = self
+                .resampler
+                .as_mut()
+                .expect("resampler active")
+                .resample_silence(count);
+            self.render_core_frames(core_count, layout);
+            self.finish_resampled_output(core_count, count, layout, write);
         }
         self.resynthesis.set_aspiration_muted(false);
         if let Some(remaining) = self.drain_remaining {
@@ -1074,6 +1196,104 @@ fn pcm_from_f32(sample: f32) -> i16 {
 /// Divides one 16-bit PCM sample by `32768.0`.
 fn pcm_to_f32(sample: i16) -> f32 {
     f32::from(sample) / 32_768.0
+}
+
+/// Reads the mono input and writes the output frames for one buffer layout.
+trait BlockBuffer {
+    /// The stereo or mono output layout for the downmix and the peak meters.
+    const LAYOUT: OutputLayout;
+
+    /// Returns the quantized mono input sample at `index`.
+    fn sample(&self, index: usize) -> i16;
+
+    /// Writes one output frame at `index`.
+    fn write(&mut self, index: usize, frame: [i16; 2]);
+}
+
+impl BlockBuffer for (&[i16], &mut [[i16; 2]]) {
+    const LAYOUT: OutputLayout = OutputLayout::Stereo;
+
+    #[inline]
+    fn sample(&self, index: usize) -> i16 {
+        self.0[index]
+    }
+
+    #[inline]
+    fn write(&mut self, index: usize, frame: [i16; 2]) {
+        self.1[index] = frame;
+    }
+}
+
+impl BlockBuffer for (&[i16], &mut [i16], &mut [i16]) {
+    const LAYOUT: OutputLayout = OutputLayout::Stereo;
+
+    #[inline]
+    fn sample(&self, index: usize) -> i16 {
+        self.0[index]
+    }
+
+    #[inline]
+    fn write(&mut self, index: usize, frame: [i16; 2]) {
+        self.1[index] = frame[0];
+        self.2[index] = frame[1];
+    }
+}
+
+impl BlockBuffer for &mut [i16] {
+    const LAYOUT: OutputLayout = OutputLayout::Mono;
+
+    #[inline]
+    fn sample(&self, index: usize) -> i16 {
+        self[index]
+    }
+
+    #[inline]
+    fn write(&mut self, index: usize, frame: [i16; 2]) {
+        self[index] = frame[0];
+    }
+}
+
+impl BlockBuffer for (&[f32], &mut [[f32; 2]]) {
+    const LAYOUT: OutputLayout = OutputLayout::Stereo;
+
+    #[inline]
+    fn sample(&self, index: usize) -> i16 {
+        pcm_from_f32(self.0[index])
+    }
+
+    #[inline]
+    fn write(&mut self, index: usize, frame: [i16; 2]) {
+        self.1[index] = frame.map(pcm_to_f32);
+    }
+}
+
+impl BlockBuffer for (&[f32], &mut [f32], &mut [f32]) {
+    const LAYOUT: OutputLayout = OutputLayout::Stereo;
+
+    #[inline]
+    fn sample(&self, index: usize) -> i16 {
+        pcm_from_f32(self.0[index])
+    }
+
+    #[inline]
+    fn write(&mut self, index: usize, frame: [i16; 2]) {
+        self.1[index] = pcm_to_f32(frame[0]);
+        self.2[index] = pcm_to_f32(frame[1]);
+    }
+}
+
+impl BlockBuffer for &mut [f32] {
+    const LAYOUT: OutputLayout = OutputLayout::Mono;
+
+    #[inline]
+    fn sample(&self, index: usize) -> i16 {
+        pcm_from_f32(self[index])
+    }
+
+    #[inline]
+    fn write(&mut self, index: usize, frame: [i16; 2]) {
+        self[index] = pcm_to_f32(frame[0]);
+    }
 }
 
 /// A snapshot of the pitch analysis and the output level that you can copy.
@@ -1146,7 +1366,8 @@ pub struct Feedback {
     /// The count saturates at `u64::MAX`. Drain completion resets it in the
     /// last drain call.
     pub processed_frames: u64,
-    /// The nominal resynthesis latency, as [`Processor::latency_frames`] gives.
+    /// The nominal latency in host frames, as [`Processor::latency_frames`]
+    /// gives.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(serialize_with = "crate::wasm::serialize_frame_count"),

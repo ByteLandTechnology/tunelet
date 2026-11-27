@@ -51,8 +51,8 @@ browsers and Node.js.
   only safe Rust.
 
 The input is mono signed 16-bit PCM or normalized 32-bit floating-point audio
-at 44.1 kHz or 48 kHz. The output is stereo or mono in 16-bit PCM or 32-bit
-floating-point form.
+at an integer rate in 8000..=192000 Hz. The output is stereo or mono in 16-bit
+PCM or 32-bit floating-point form.
 
 ## Installation
 
@@ -360,7 +360,7 @@ These calls read the state of the processor. They do not change the audio.
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
-| `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
+| `latency_frames()`   | The nominal delay in host frames (1,593 frames at 44.1 kHz and 48 kHz) |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
 
 `Processor::control_activity()` and `ProcessorConfig::control_activity()`
@@ -380,8 +380,10 @@ The telemetry includes these items:
 `active_voice_ratios()` and `active_voice_gains()` return slices for the active
 voices. The peak windows of the telemetry are independent of the peak window of
 the feedback. In mono calls, the output and reverb wet peaks measure the audio
-after the downmix. The dry path has the 1,593-frame delay. Resampled voices,
-choir delays and effects use different delays.
+after the downmix. At 44.1 kHz and 48 kHz, the processor bypasses rate
+conversion and the dry path has the 1,593-frame delay. Other rates scale the
+core delay to host frames and add the polyphase filter delay. Resampled
+voices, choir delays and effects use different delays.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
@@ -390,7 +392,9 @@ choir delays and effects use different delays.
 
 The values are linear and have no absolute level. The formant stage must be
 enabled. The envelopes are those of the model that the audio used for the
-last frame. The method returns `Result<bool, Error>`:
+last frame. If the sample rate is above the internal core rate, the method
+writes zero for frequencies above half of the core rate. The method returns
+`Result<bool, Error>`:
 
 | Result      | Description                                                      |
 | ----------- | ---------------------------------------------------------------- |
@@ -635,8 +639,10 @@ buffers of equal length and returns `false` if no envelope is available.
 In that case, it fills both buffers with zeros. If the lengths are not equal
 or the frequency is not valid, it throws and does not change the buffers. The
 frequency must be finite, more than zero and not more than half of the sample
-rate. The class keeps a buffer for the points, so only the first call and a
-call with more points than before reserve memory.
+rate. If the sample rate is above the internal core rate, the method writes
+zero for frequencies above half of the core rate. The class keeps a buffer for
+the points, so only the first call and a call with more points than before
+reserve memory.
 
 ### Memory allocation
 
