@@ -1,15 +1,28 @@
 /**
  * The shared ESM entry point for browsers and Node.js.
  *
- * Call `loadTunelet()` before you construct processors or read the default
- * configuration. Both environments use the same generated bindings and the
- * same Wasm binary. This module exports `TuneletAudioViews` and re-exports all
- * named exports of the module that wasm-bindgen generates. Those exports
- * include `Tunelet`, `defaultConfig`, `initSync` and the configuration,
- * control-activity, event and feedback types.
+ * Call `loadTunelet()` or `initSync()` before you construct processors or read
+ * the default configuration. Both environments use the same generated bindings
+ * and the same Wasm binary. This module exports `TuneletAudioViews`, wraps
+ * `Tunelet`, `defaultConfig` and `initSync` with lifecycle checks, and
+ * re-exports the configuration, control-activity, event, feedback and
+ * telemetry types.
  */
-import init from "../pkg/tunelet.js";
-import type { InitInput, InitOutput, Tunelet } from "../pkg/tunelet.js";
+import init, {
+  Tunelet as WasmTunelet,
+  defaultConfig as wasmDefaultConfig,
+  initSync as wasmInitSync,
+} from "../pkg/tunelet.js";
+import type {
+  BlockEvents,
+  ControlActivity,
+  Feedback,
+  InitInput,
+  InitOutput,
+  ProcessorConfig,
+  SyncInitInput,
+  Telemetry,
+} from "../pkg/tunelet.js";
 
 export * from "../pkg/tunelet.js";
 
@@ -132,6 +145,38 @@ if (Symbol.dispose) {
 /** The shared initialization promise, which a failure clears. */
 let initialization: Promise<InitOutput> | undefined;
 
+/** True after the Wasm module completes initialization. */
+let initialized = false;
+
+/** Maps each active wrapper instance to its Wasm processor. */
+const instances = new WeakMap<Tunelet, WasmTunelet>();
+
+/** Throws if the Wasm module is not initialized yet. */
+function ensureInitialized(): void {
+  if (initialized) {
+    return;
+  }
+  try {
+    wasmInitSync({ module: undefined as never });
+    initialized = true;
+  } catch {
+    throw new Error(
+      "Tunelet Wasm is not initialized. Call loadTunelet() or initSync() first.",
+    );
+  }
+}
+
+/** Returns the active Wasm processor, or throws if it was freed. */
+function active(instance: Tunelet): WasmTunelet {
+  const inner = instances.get(instance);
+  if (inner === undefined) {
+    throw new Error(
+      "Tunelet instance is disposed. Do not use it after free().",
+    );
+  }
+  return inner;
+}
+
 /**
  * Initializes the Wasm module one time for this imported package instance.
  *
@@ -161,8 +206,8 @@ let initialization: Promise<InitOutput> | undefined;
  *
  * @param source The optional Wasm source. The default is the binary in this
  * package.
- * @returns The initialized Wasm exports. Use the re-exported `Tunelet` class
- * for processors.
+ * @returns The initialized Wasm exports. Use the exported `Tunelet` class for
+ * processors.
  */
 export function loadTunelet(
   source?: InitInput | Promise<InitInput>,
@@ -209,6 +254,7 @@ async function initialize(
       ? new URL("../pkg/tunelet_bg.wasm", import.meta.url)
       : await source;
 
+  let output: InitOutput;
   const fileUrl = resolveFileUrl(input);
   if (fileUrl !== undefined) {
     // Keep the Node.js built-in module out of browser bundles. TypeScript
@@ -218,10 +264,273 @@ async function initialize(
     const fs: typeof import("node:fs/promises") = await import(
       /* webpackIgnore: true */ /* @vite-ignore */ moduleName
     );
-    return init({ module_or_path: await fs.readFile(fileUrl) });
+    output = await init({ module_or_path: await fs.readFile(fileUrl) });
+  } else {
+    output = await init({ module_or_path: input });
   }
 
-  return init({ module_or_path: input });
+  initialized = true;
+  return output;
+}
+
+/**
+ * Instantiates the Wasm module synchronously from bytes or a compiled
+ * `WebAssembly.Module`.
+ *
+ * If the module is already initialized, later calls return the active exports
+ * and do not load Wasm again.
+ */
+export function initSync(
+  module: { module: SyncInitInput } | SyncInitInput,
+): InitOutput {
+  const output = wasmInitSync(module);
+  initialized = true;
+  initialization ??= Promise.resolve(output);
+  return output;
+}
+
+/**
+ * Returns a complete, independent default configuration for JavaScript.
+ *
+ * Call `loadTunelet()` or `initSync()` before this function. Change the fields
+ * of the returned object and give it to `Tunelet` or to `setConfig`.
+ */
+export function defaultConfig(): ProcessorConfig {
+  ensureInitialized();
+  return wasmDefaultConfig();
+}
+
+export interface Tunelet {
+  [Symbol.dispose](): void;
+}
+
+/**
+ * A stateful vocal processor for mono `Int16Array` PCM and `Float32Array`
+ * audio.
+ *
+ * Call `loadTunelet()` or `initSync()` before you construct an instance. If
+ * you do not need the instance any more, call `free()`. Duplicate `free()`
+ * calls do no work. After `free()`, method and property calls throw an
+ * `Error`.
+ */
+export class Tunelet {
+  /**
+   * Prepares a processor and its reusable PCM buffers.
+   *
+   * `sampleRate` must be 44100 or 48000. `maxBlockFrames` must be an integer
+   * from 1 to 4294967295 (inclusive). If you omit `config`, the processor uses
+   * the default configuration.
+   */
+  constructor(
+    sampleRate: number,
+    maxBlockFrames: number,
+    config?: ProcessorConfig | null,
+  ) {
+    ensureInitialized();
+    instances.set(this, new WasmTunelet(sampleRate, maxBlockFrames, config));
+  }
+
+  /** Releases the Wasm processor memory. Duplicate calls do no work. */
+  free(): void {
+    const inner = instances.get(this);
+    if (inner === undefined) {
+      return;
+    }
+    instances.delete(this);
+    inner.free();
+  }
+
+  /**
+   * The byte offset in Wasm memory of the `maxBlockFrames` `f32` input buffer.
+   */
+  get inputF32Ptr(): number {
+    return active(this).inputF32Ptr;
+  }
+
+  /**
+   * The byte offset in Wasm memory of the `maxBlockFrames` left `f32` output
+   * buffer.
+   */
+  get leftF32Ptr(): number {
+    return active(this).leftF32Ptr;
+  }
+
+  /**
+   * The byte offset in Wasm memory of the `maxBlockFrames` right `f32` output
+   * buffer.
+   */
+  get rightF32Ptr(): number {
+    return active(this).rightF32Ptr;
+  }
+
+  /** The sample rate of the input and the output in hertz. */
+  get sampleRate(): number {
+    return active(this).sampleRate;
+  }
+
+  /** The maximum frame count for each call that processes or drains audio. */
+  get maxBlockFrames(): number {
+    return active(this).maxBlockFrames;
+  }
+
+  /** The nominal resynthesis latency: 1,593 frames at both sample rates. */
+  get latencyFrames(): number {
+    return active(this).latencyFrames;
+  }
+
+  /** Returns a copy of the active configuration as a new JavaScript object. */
+  config(): ProcessorConfig {
+    return active(this).config();
+  }
+
+  /** Validates a configuration and replaces the complete configuration. */
+  setConfig(config: ProcessorConfig): void {
+    active(this).setConfig(config);
+  }
+
+  /** Processes mono input into left and right `Int16Array` buffers. */
+  process(
+    input: Int16Array,
+    left: Int16Array,
+    right: Int16Array,
+    events?: BlockEvents | null,
+  ): void {
+    active(this).process(input, left, right, events);
+  }
+
+  /** Replaces the audio in a mono `Int16Array` with the stereo downmix. */
+  processMono(audio: Int16Array, events?: BlockEvents | null): void {
+    active(this).processMono(audio, events);
+  }
+
+  /**
+   * Processes mono `Float32Array` input into left and right `Float32Array`
+   * buffers.
+   */
+  processF32(
+    input: Float32Array,
+    left: Float32Array,
+    right: Float32Array,
+    events?: BlockEvents | null,
+  ): void {
+    active(this).processF32(input, left, right, events);
+  }
+
+  /** Replaces the audio in a mono `Float32Array` with the stereo downmix. */
+  processMonoF32(audio: Float32Array, events?: BlockEvents | null): void {
+    active(this).processMonoF32(audio, events);
+  }
+
+  /**
+   * Processes `frames` samples from `inputF32Ptr` into `leftF32Ptr` and
+   * `rightF32Ptr`.
+   */
+  processF32InPlace(frames: number, events?: BlockEvents | null): void {
+    active(this).processF32InPlace(frames, events);
+  }
+
+  /**
+   * Replaces `frames` samples at `inputF32Ptr` with the mono `f32` downmix.
+   */
+  processMonoF32InPlace(frames: number, events?: BlockEvents | null): void {
+    active(this).processMonoF32InPlace(frames, events);
+  }
+
+  /** Starts a finite tail budget and returns its frame count. */
+  beginDrain(): number {
+    return active(this).beginDrain();
+  }
+
+  /** Returns the tail budget of the current configuration. */
+  tailFrames(): number {
+    return active(this).tailFrames();
+  }
+
+  /** Renders stereo tail frames into `Int16Array` buffers of equal length. */
+  drain(left: Int16Array, right: Int16Array): number {
+    return active(this).drain(left, right);
+  }
+
+  /** Renders a mono tail block and returns its frame count. */
+  drainMono(audio: Int16Array): number {
+    return active(this).drainMono(audio);
+  }
+
+  /**
+   * Renders stereo tail frames into `Float32Array` buffers of equal length.
+   */
+  drainF32(left: Float32Array, right: Float32Array): number {
+    return active(this).drainF32(left, right);
+  }
+
+  /**
+   * Renders a mono `Float32Array` tail block and returns its frame count.
+   */
+  drainMonoF32(audio: Float32Array): number {
+    return active(this).drainMonoF32(audio);
+  }
+
+  /**
+   * Renders up to `frames` stereo tail frames into `leftF32Ptr` and
+   * `rightF32Ptr`.
+   */
+  drainF32InPlace(frames: number): number {
+    return active(this).drainF32InPlace(frames);
+  }
+
+  /**
+   * Renders up to `frames` mono tail frames into `inputF32Ptr` and returns
+   * their count.
+   */
+  drainMonoF32InPlace(frames: number): number {
+    return active(this).drainMonoF32InPlace(frames);
+  }
+
+  /** Returns a new feedback object and does not clear the peak window. */
+  feedback(): Feedback {
+    return active(this).feedback();
+  }
+
+  /** Returns the feedback and clears only the peak window. */
+  takeFeedback(): Feedback {
+    return active(this).takeFeedback();
+  }
+
+  /**
+   * Returns which choir, harmony and reverb controls change the audio in the
+   * active configuration.
+   */
+  controlActivity(): ControlActivity {
+    return active(this).controlActivity();
+  }
+
+  /** Returns a new telemetry object and does not clear its peak windows. */
+  telemetry(): Telemetry {
+    return active(this).telemetry();
+  }
+
+  /** Returns the telemetry and clears only its three peak windows. */
+  takeTelemetry(): Telemetry {
+    return active(this).takeTelemetry();
+  }
+
+  /** Writes the formant envelopes into two `Float32Array` buffers. */
+  formantEnvelope(
+    maxFrequencyHz: number,
+    input: Float32Array,
+    output: Float32Array,
+  ): boolean {
+    return active(this).formantEnvelope(maxFrequencyHz, input, output);
+  }
+
+  /** Resets the audio histories and feedback. */
+  reset(): void {
+    active(this).reset();
+  }
+}
+
+if (typeof Symbol.dispose === "symbol") {
+  Tunelet.prototype[Symbol.dispose] = Tunelet.prototype.free;
 }
 
 /** The default export is the same function as `loadTunelet`. */
