@@ -21,6 +21,7 @@
 //! - Field names use camelCase.
 //! - Enum values are strings.
 //! - Each object must contain all required fields.
+//! - The optional `resynthesis.pitch.vocalRange` field defaults to `"custom"`.
 //! - The optional correction `humanize` and `flexTune` fields default to 0.
 //! - The optional harmony `voices` field defaults to 4.
 //!
@@ -678,8 +679,8 @@ impl WasmProcessor {
     ///
     /// - The kept pitch estimate is unvoiced. This includes the time before
     ///   the first detection and after a reset or a drain completion.
-    /// - The estimated frequency is outside the inclusive reporting bounds
-    ///   `minFrequencyHz` and `maxFrequencyHz` of the pitch configuration.
+    /// - The estimated period is outside the active `vocalRange` preset or the
+    ///   custom `minFrequencyHz` and `maxFrequencyHz` bounds.
     ///
     /// # Errors
     ///

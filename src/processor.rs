@@ -746,10 +746,6 @@ impl Processor {
     /// - the configuration
     /// - the random stream and the arctangent lookup position of Punch
     /// - the reverb low-pass memories and the reverb write position
-    /// - the last usable period of the pitch tracker, which fills unvoiced
-    ///   gaps
-    /// - the harmony gain envelopes and the last voice ratios of the harmony
-    ///   controller
     /// - the prepared chord targets of the named and degree chord sources
     /// - the choir drift
     /// - the control-step counter of Choir and Harmony
@@ -1100,13 +1096,15 @@ pub struct Feedback {
     pub resample_ratio: f32,
     /// The reported input pitch period in samples, with fractional samples.
     ///
-    /// It is zero if the input is unvoiced or outside the reporting bounds of
-    /// [`crate::PitchConfig`].
+    /// It is zero if the input is unvoiced or outside the active vocal range
+    /// of [`crate::PitchConfig`].
     pub period_samples: f32,
     /// The reported input pitch frequency in hertz.
     ///
     /// The value comes from the sample rate and the current tracked period.
-    /// It is zero if the estimate is not reported.
+    /// Because the active vocal range uses a small period tolerance, a
+    /// boundary value can be slightly outside the nominal hertz bounds. It is
+    /// zero if the estimate is not reported.
     pub frequency_hz: f32,
     /// The correction target or the input pitch, as a MIDI note number.
     ///
@@ -1123,12 +1121,12 @@ pub struct Feedback {
     /// is not the final pitch of shifted output or harmony output.
     ///
     /// The value is `None` if [`voiced`](Self::voiced) is `false`, and only
-    /// then. This occurs if the input is unvoiced or if its frequency is
-    /// outside the current reporting bounds. A target table that has no
-    /// selected target does not give `None`.
+    /// then. This occurs if the input is unvoiced or if its period is outside
+    /// the active vocal range. A target table that has no selected target does
+    /// not give `None`.
     pub target_midi_note: Option<f32>,
     /// This field is `true` if the current pitch estimate is positive and
-    /// inside the current reporting bounds.
+    /// inside the active vocal range.
     ///
     /// This is not an amplitude gate or a confidence score. A tracking result
     /// can stay between detector updates.
@@ -1207,8 +1205,8 @@ pub struct Telemetry {
     /// The reported input pitch period in samples, with fractional samples, as
     /// [`Feedback::period_samples`] gives.
     ///
-    /// If [`voiced`](Self::voiced) is `false`, this value is zero. The bounds
-    /// of [`crate::PitchConfig`] apply to this report.
+    /// If [`voiced`](Self::voiced) is `false`, this value is zero. The active
+    /// vocal range of [`crate::PitchConfig`] applies to this report.
     pub period_samples: f32,
     /// The reported input pitch frequency in hertz, as
     /// [`Feedback::frequency_hz`] gives.
@@ -1226,7 +1224,7 @@ pub struct Telemetry {
     /// `false`, and only then, this value is `None`.
     pub target_midi_note: Option<f32>,
     /// This field is `true` if the current pitch estimate is positive and
-    /// inside the bounds of [`crate::PitchConfig`].
+    /// inside the active vocal range of [`crate::PitchConfig`].
     ///
     /// This is not an amplitude gate or a confidence score. A result can stay
     /// between detector updates.

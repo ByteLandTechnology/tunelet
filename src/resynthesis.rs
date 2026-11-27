@@ -220,7 +220,7 @@ pub(crate) fn validate_flex_tune(flex_tune: f32) -> Result<(), Error> {
     tsify(large_number_types_as_bigints)
 )]
 pub struct ResynthesisConfig {
-    /// The acquisition sensitivity and the reporting bounds. The
+    /// The vocal range, acquisition sensitivity and frequency bounds. The
     /// default is [`PitchConfig::default`].
     pub pitch: PitchConfig,
     /// The target notes and the retune time. The default is enabled
@@ -490,8 +490,8 @@ pub(crate) struct Resynthesis {
     /// replace a delayed entry with its resampled output period. This aligns
     /// the secondary voices.
     periods: Box<[Q6; HISTORY]>,
-    /// The last usable Q6 tracker periods. The code keeps them through
-    /// unvoiced gaps.
+    /// The last usable Q6 tracker periods. Each period stays for 20 ms across
+    /// short unvoiced gaps, then becomes zero.
     previous_periods: Box<[Q6; HISTORY]>,
     /// The Q14 ratios of the correction only, aligned to each recorded input
     /// frame.
@@ -523,7 +523,7 @@ pub(crate) struct Resynthesis {
     /// The last Q14 target ratios from the harmony controller.
     harmony_ratios: [Q14; HARMONY_VOICES],
     /// The last Q12 gain envelopes from the harmony controller. An audio
-    /// reset keeps them.
+    /// reset clears them.
     harmony_gains: [Q12; HARMONY_VOICES],
     /// The effective Q14 ratios of the lead and the four harmony readers from
     /// the last frame. In Choir mode, only the lead slot changes. Only the
@@ -830,8 +830,17 @@ impl Resynthesis {
     pub(crate) fn apply_config(&mut self, config: ResynthesisConfig) {
         let old = self.config;
         self.config = config;
-        if old.pitch.threshold != config.pitch.threshold {
-            self.pitch.set_config(config.pitch);
+        if old.pitch.vocal_range != config.pitch.vocal_range
+            || old.pitch.min_frequency_hz != config.pitch.min_frequency_hz
+            || old.pitch.max_frequency_hz != config.pitch.max_frequency_hz
+        {
+            if self.pitch.set_config(config.pitch) {
+                self.correction = Q14::ONE;
+                self.scale_initialized = false;
+                self.dwell = Q14::ZERO;
+            }
+        } else if old.pitch.threshold != config.pitch.threshold {
+            self.pitch.set_threshold(config.pitch.threshold);
         }
         if old.formant != config.formant {
             self.formant.set_config(config.formant);
@@ -1100,7 +1109,6 @@ impl Resynthesis {
     /// - The choir drift.
     /// - The modulation phase.
     /// - The control counter.
-    /// - The harmony release envelopes and the last harmony gains.
     fn reset_audio(&mut self) {
         let written = usize::from(self.written);
         self.written = 0;
@@ -1125,6 +1133,7 @@ impl Resynthesis {
         self.write = 0;
         self.formant.reset();
         self.harmony.reset();
+        self.harmony.clear_envelopes();
         clear_dirty_ring(self.overlap.as_mut_slice(), written, Q14::ZERO);
         self.overlap_index = 0;
         self.previous_output = [Q14::ZERO; 2];
@@ -1136,6 +1145,7 @@ impl Resynthesis {
         self.old_position = self.positions[0];
         self.fade = Q14::ONE;
         self.harmony_ratios.fill(Q14::ONE);
+        self.harmony_gains.fill(Q12::ZERO);
         self.voice_ratios.fill(Q14::ONE);
         self.formant_position = 0;
         self.current_output_period = Q6::ZERO;
@@ -1185,20 +1195,25 @@ impl Resynthesis {
             }
     }
     /// Converts the latest period to samples and hertz and applies the
-    /// current report limits.
+    /// active vocal range limits.
     ///
     /// The analysis does not advance, and the correction does not change.
     pub(crate) fn estimate(&self) -> PitchEstimate {
-        let period = (self.periods[self.write].to_bits() as f64 / 64.0) as f32;
-        self.config.pitch.report(PitchEstimate {
-            period_samples: period,
-            frequency_hz: if period > 0.0 {
-                self.rate.hz() / period
-            } else {
-                0.0
+        let raw_period = self.periods[self.write];
+        let period = (raw_period.to_bits() as f64 / 64.0) as f32;
+        self.config.pitch.report(
+            self.rate,
+            raw_period,
+            PitchEstimate {
+                period_samples: period,
+                frequency_hz: if period > 0.0 {
+                    self.rate.hz() / period
+                } else {
+                    0.0
+                },
+                voiced: period > 0.0,
             },
-            voiced: period > 0.0,
-        })
+        )
     }
     /// Returns the current Q14 correction factor as f32. The result does not
     /// include other ratios.
@@ -1244,9 +1259,15 @@ impl Resynthesis {
         gains[0] = 1.0;
         if self.config.mode == MultiVoiceMode::Choir {
             let count = self.config.choir_voices as usize;
+            let delayed = ring(self.write as i32 - OVERLAP_FRAMES as i32);
             for voice in 1..count {
-                ratios[voice] =
-                    (lead as f64 * self.drift_ratio[voice].to_bits() as f64 / 16384.0) as f32;
+                let delay = ring(delayed as i32 - self.delays[voice]);
+                let (period, _) = self.period_for(delay, self.write);
+                ratios[voice] = if period == Q6::ZERO {
+                    1.0
+                } else {
+                    (lead as f64 * self.drift_ratio[voice].to_bits() as f64 / 16384.0) as f32
+                };
                 gains[voice] = 1.0;
             }
             count as u8
@@ -1540,7 +1561,11 @@ impl Resynthesis {
         let delay = ring(delayed as i32 - offset);
         let (period, _) = self.period_for(delay, self.write);
         self.current_output_period = period;
-        let ratio = self.drift_ratio[voice];
+        let ratio = if period == Q6::ZERO {
+            Q14::ONE
+        } else {
+            self.drift_ratio[voice]
+        };
         let position = self.move_reader(voice, ratio, period, offset, false);
         (position, ratio)
     }

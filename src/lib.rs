@@ -60,11 +60,11 @@
 //!
 //! [`Processor::feedback`] gives the pitch, the correction ratio, the
 //! accumulated output peak and the frame count.
-//! [`Processor::take_feedback`] also clears the peak window. The pitch
-//! reporting bounds change only the reports. They do not change the detection
-//! or the audio signal. [`Processor::latency_frames`] gives a nominal
-//! resynthesis delay, which the dry path also uses. Voice delays, pitch
-//! changes and effects have their own timing.
+//! [`Processor::take_feedback`] also clears the peak window. The active vocal
+//! range limits acquisition, tracking and pitch reports.
+//! [`Processor::latency_frames`] gives a nominal resynthesis delay, which the
+//! dry path also uses. Voice delays, pitch changes and effects have their own
+//! timing.
 //!
 //! [`Processor::control_activity`] and [`ProcessorConfig::control_activity`]
 //! give [`ControlActivity`], which shows the active choir, harmony and reverb
@@ -146,7 +146,7 @@ pub use harmony::{
     ChordDegree, ChordName, HarmonyConfig, HarmonyScale, HarmonySource, Inversion, HARMONY_VOICES,
 };
 pub use midi::MidiEvent;
-pub use pitch::PitchConfig;
+pub use pitch::{PitchConfig, VocalRange};
 pub use processor::{Feedback, Processor, Telemetry};
 pub use resynthesis::{CorrectionConfig, MultiVoiceMode, ResynthesisConfig};
 pub use scale::{CorrectionScale, NoteMask, PitchClass};

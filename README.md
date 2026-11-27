@@ -185,6 +185,15 @@ The default is 0, which applies full pull across the whole bin.
 dry path starts after Warm and has a delay of 1,593 frames. All six reverb
 modes keep the stereo dry signal.
 
+`resynthesis.pitch.vocal_range` selects `Custom`, `Soprano` (240 to 1,100 Hz),
+`AltoTenor` (120 to 600 Hz) or `BaritoneBass` (45 to 360 Hz). The default is
+`Custom`, which uses `min_frequency_hz` to `max_frequency_hz` (40 to 1,100 Hz
+by default). A small fixed-point period tolerance keeps boundary pitches voiced,
+so a reported frequency can be slightly outside the nominal hertz bounds.
+Pitches outside the active period limits do not acquire or track. If there is no
+tracked pitch for 20 ms, the fallback period becomes zero. Then the lead ratio
+returns to 1 and the harmony voices release toward zero.
+
 ### Harmony sources
 
 Set `resynthesis.mode` to `Harmony`. Then select the source of the voices
@@ -579,11 +588,11 @@ and show enums as string literals. To change the configuration, do these steps:
 
 If a required field is absent or a value is not valid, the call throws a
 JavaScript `Error`. If an optional field is absent or `undefined`, it gets its
-default. `resynthesis.correction.humanize` and
-`resynthesis.correction.flexTune` default to 0, and
-`resynthesis.harmony.voices` defaults to 4. The conversion ignores extra object
-properties. The generated declarations contain the parameter documentation from
-the Rust types.
+default. `resynthesis.pitch.vocalRange` defaults to `"custom"`,
+`resynthesis.correction.humanize` and `resynthesis.correction.flexTune` default
+to 0, and `resynthesis.harmony.voices` defaults to 4. The conversion ignores
+extra object properties. The generated declarations contain the parameter
+documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
@@ -627,8 +636,8 @@ which are also the cases where `voiced` is `false`:
 
 - The kept pitch estimate is unvoiced. This includes the time before the
   first detection and after a reset or a drain completion.
-- The estimated frequency is outside the inclusive reporting bounds
-  `resynthesis.pitch.minFrequencyHz` and `resynthesis.pitch.maxFrequencyHz`.
+- The estimated period is outside the active `resynthesis.pitch.vocalRange`
+  preset or the custom `minFrequencyHz` and `maxFrequencyHz` bounds.
 
 `formantEnvelope(maxFrequencyHz, input, output)` fills two `Float32Array`
 buffers of equal length and returns `false` if no envelope is available.
