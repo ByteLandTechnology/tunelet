@@ -289,37 +289,37 @@ processor.process(&input, &mut output, &events)?;
 `ControlEvent::Parameter` accepts these `ParameterControl` variants. All ranges
 are inclusive, and `f32` values must be finite.
 
-| Variant                       | TypeScript `type`               | Configuration field                     | Range             |
-| ----------------------------- | ------------------------------- | --------------------------------------- | ----------------- |
-| `PunchGainDb`                 | `"punchGainDb"`                 | `punch.gain_db`                         | `-96..=12` dB     |
-| `PunchImpact`                 | `"punchImpact"`                 | `punch.impact`                          | `0..=1`           |
-| `PunchCeilingDb`              | `"punchCeilingDb"`              | `punch.ceiling_db`                      | `-96..=0` dBFS    |
-| `PunchAttackMs`               | `"punchAttackMs"`               | `punch.attack_ms`                       | `0.01..=5000` ms  |
-| `WarmDriveDb`                 | `"warmDriveDb"`                 | `warm.drive_db`                         | `0..=6` dB        |
-| `PitchThreshold`              | `"pitchThreshold"`              | `resynthesis.pitch.threshold`           | `0.002..=0.2`     |
-| `RetuneMs`                    | `"retuneMs"`                    | `resynthesis.correction.retune_ms`      | `0..=400` ms      |
-| `Humanize`                    | `"humanize"`                    | `resynthesis.correction.humanize`       | `0..=1`           |
-| `FlexTune`                    | `"flexTune"`                    | `resynthesis.correction.flex_tune`      | `0..=1`           |
-| `PitchRatio`                  | `"pitchRatio"`                  | `resynthesis.pitch_ratio`               | `0.25..=4`        |
-| `FormantWidth`                | `"formantWidth"`                | `resynthesis.formant.width`             | `0.5..=2`         |
-| `FormantStretch`              | `"formantStretch"`              | `resynthesis.formant.stretch`           | `0.5..=2`         |
-| `FormantAspirationMix`        | `"formantAspirationMix"`        | `resynthesis.formant.aspiration_mix`    | `0..=1`           |
-| `FormantAspirationCutoffHz`   | `"formantAspirationCutoffHz"`   | `resynthesis.formant.aspiration_cutoff_hz` | `500..=10000` Hz |
-| `ChoirVoices`                 | `"choirVoices"`                 | `resynthesis.choir_voices`              | `1..=16`          |
-| `ChoirDetune`                 | `"choirDetune"`                 | `resynthesis.choir_detune`              | `10..=100`        |
-| `ChoirDelay`                  | `"choirDelay"`                  | `resynthesis.choir_delay`               | `20..=200`        |
-| `ChoirSpreadPercent`          | `"choirSpreadPercent"`          | `resynthesis.choir_spread_percent`      | `0..=100`%        |
-| `HarmonyRegisterPercent`      | `"harmonyRegisterPercent"`      | `resynthesis.harmony.register_percent`  | `0..=100`%        |
-| `HarmonyVoicingSpreadPercent` | `"harmonyVoicingSpreadPercent"` | `resynthesis.harmony.voicing_spread_percent` | `0..=100`%   |
-| `HarmonyPortamentoMs`         | `"harmonyPortamentoMs"`         | `resynthesis.harmony.portamento_ms`     | `0..=10000` ms    |
-| `HarmonyVoices`               | `"harmonyVoices"`               | `resynthesis.harmony.voices`            | `0..=4`           |
-| `HarmonyGain`                 | `"harmonyGain"`                 | `resynthesis.harmony_gain`              | `0..=1`           |
-| `HarmonicModulation`          | `"harmonicModulation"`          | `resynthesis.harmonic_modulation`       | `0..=24`          |
-| `DryMix`                      | `"dryMix"`                      | `resynthesis.dry_mix`                   | `0..=1`           |
-| `ReverbMix`                   | `"reverbMix"`                   | `reverb.mix`                            | `0..=1`           |
-| `ReverbDiffusion`             | `"reverbDiffusion"`             | `reverb.diffusion`                      | `0..=1`           |
-| `ReverbDecay`                 | `"reverbDecay"`                 | `reverb.decay`                          | `0..=1`           |
-| `ReverbBrightnessHz`          | `"reverbBrightnessHz"`          | `reverb.brightness_hz`                  | `80..=20000` Hz   |
+| Variant                       | TypeScript `type`               | Configuration field                          | Range            |
+| ----------------------------- | ------------------------------- | -------------------------------------------- | ---------------- |
+| `PunchGainDb`                 | `"punchGainDb"`                 | `punch.gain_db`                              | `-96..=12` dB    |
+| `PunchImpact`                 | `"punchImpact"`                 | `punch.impact`                               | `0..=1`          |
+| `PunchCeilingDb`              | `"punchCeilingDb"`              | `punch.ceiling_db`                           | `-96..=0` dBFS   |
+| `PunchAttackMs`               | `"punchAttackMs"`               | `punch.attack_ms`                            | `0.01..=5000` ms |
+| `WarmDriveDb`                 | `"warmDriveDb"`                 | `warm.drive_db`                              | `0..=6` dB       |
+| `PitchThreshold`              | `"pitchThreshold"`              | `resynthesis.pitch.threshold`                | `0.002..=0.2`    |
+| `RetuneMs`                    | `"retuneMs"`                    | `resynthesis.correction.retune_ms`           | `0..=400` ms     |
+| `Humanize`                    | `"humanize"`                    | `resynthesis.correction.humanize`            | `0..=1`          |
+| `FlexTune`                    | `"flexTune"`                    | `resynthesis.correction.flex_tune`           | `0..=1`          |
+| `PitchRatio`                  | `"pitchRatio"`                  | `resynthesis.pitch_ratio`                    | `0.25..=4`       |
+| `FormantWidth`                | `"formantWidth"`                | `resynthesis.formant.width`                  | `0.5..=2`        |
+| `FormantStretch`              | `"formantStretch"`              | `resynthesis.formant.stretch`                | `0.5..=2`        |
+| `FormantAspirationMix`        | `"formantAspirationMix"`        | `resynthesis.formant.aspiration_mix`         | `0..=1`          |
+| `FormantAspirationCutoffHz`   | `"formantAspirationCutoffHz"`   | `resynthesis.formant.aspiration_cutoff_hz`   | `500..=10000` Hz |
+| `ChoirVoices`                 | `"choirVoices"`                 | `resynthesis.choir_voices`                   | `1..=16`         |
+| `ChoirDetune`                 | `"choirDetune"`                 | `resynthesis.choir_detune`                   | `10..=100`       |
+| `ChoirDelay`                  | `"choirDelay"`                  | `resynthesis.choir_delay`                    | `20..=200`       |
+| `ChoirSpreadPercent`          | `"choirSpreadPercent"`          | `resynthesis.choir_spread_percent`           | `0..=100`%       |
+| `HarmonyRegisterPercent`      | `"harmonyRegisterPercent"`      | `resynthesis.harmony.register_percent`       | `0..=100`%       |
+| `HarmonyVoicingSpreadPercent` | `"harmonyVoicingSpreadPercent"` | `resynthesis.harmony.voicing_spread_percent` | `0..=100`%       |
+| `HarmonyPortamentoMs`         | `"harmonyPortamentoMs"`         | `resynthesis.harmony.portamento_ms`          | `0..=10000` ms   |
+| `HarmonyVoices`               | `"harmonyVoices"`               | `resynthesis.harmony.voices`                 | `0..=4`          |
+| `HarmonyGain`                 | `"harmonyGain"`                 | `resynthesis.harmony_gain`                   | `0..=1`          |
+| `HarmonicModulation`          | `"harmonicModulation"`          | `resynthesis.harmonic_modulation`            | `0..=24`         |
+| `DryMix`                      | `"dryMix"`                      | `resynthesis.dry_mix`                        | `0..=1`          |
+| `ReverbMix`                   | `"reverbMix"`                   | `reverb.mix`                                 | `0..=1`          |
+| `ReverbDiffusion`             | `"reverbDiffusion"`             | `reverb.diffusion`                           | `0..=1`          |
+| `ReverbDecay`                 | `"reverbDecay"`                 | `reverb.decay`                               | `0..=1`          |
+| `ReverbBrightnessHz`          | `"reverbBrightnessHz"`          | `reverb.brightness_hz`                       | `80..=20000` Hz  |
 
 ## Lifecycle
 

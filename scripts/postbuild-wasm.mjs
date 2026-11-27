@@ -205,7 +205,10 @@ export function sanitizeDeclarations(rawSource) {
   return newline === "\r\n" ? content.replace(/\n/g, "\r\n") : content;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
   fs.rmSync(gitignorePath, { force: true });
   if (!fs.existsSync(dtsPath)) {
     throw new Error(`Declaration file was not found at ${dtsPath}`);

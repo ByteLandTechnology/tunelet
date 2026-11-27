@@ -1,11 +1,11 @@
 # Continuous integration for the Rust crate, the Wasm bindings and the
 # npm package.
 #
-# First, build-wasm checks the Rust lints, the docs, the crate archive and the
-# Wasm target on Linux, then uploads pkg/. In parallel, msrv checks
-# rust-version from Cargo.toml. Next, check-os builds the native library,
-# compiles TypeScript and checks the npm archives on Linux, macOS and Windows.
-# Last, verify reports one status check for branch protection.
+# First, build-wasm checks the lints, Biome, the docs, the crate archive, the
+# Wasm target and TypeScript on Linux, then uploads pkg/. In parallel, msrv
+# checks rust-version from Cargo.toml. Next, check-os builds the native
+# library, compiles TypeScript and checks the npm archives on Linux, macOS and
+# Windows. Last, verify reports one status check for branch protection.
 name: CI
 
 on:
@@ -34,15 +34,18 @@ jobs:
       - uses: ./.github/actions/setup-wasm
         with:
           components: rustfmt, clippy
-          node-cache: ""
       - run: cargo fmt --check
       - run: cargo clippy --locked --lib -- -D warnings
       - run: cargo doc --locked --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
       - run: cargo package --locked
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
       - run: npm run check:wasm
       - run: npm run build:wasm
+      - run: npm run typecheck
       # Upload the built pkg/ files for the cross-OS matrix.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

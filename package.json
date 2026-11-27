@@ -34,11 +34,15 @@
     "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node scripts/postbuild-wasm.mjs && node scripts/normalize-jsdoc.mjs",
     "build:ts": "tsc",
     "check:wasm": "cargo clippy --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings && cargo rustdoc --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings",
+    "lint": "biome lint --error-on-warnings .",
+    "format:check": "biome format .",
+    "typecheck": "tsc --noEmit",
     "prepack": "npm run build",
     "prepare": "git config core.hooksPath .githooks || true",
     "verify:pack": "node scripts/verify-pack.mjs"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.6.8",
     "@types/node": "^24.19.2",
     "typescript": "^7.0.2"
   }

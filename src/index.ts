@@ -13,6 +13,13 @@ import type { InitInput, InitOutput, Tunelet } from "../pkg/tunelet.js";
 
 export * from "../pkg/tunelet.js";
 
+interface CachedAudioViews {
+  readonly buffer: ArrayBuffer;
+  readonly input: Float32Array;
+  readonly left: Float32Array;
+  readonly right: Float32Array;
+}
+
 /**
  * Cached `Float32Array` views over the in-place `Tunelet` buffers in Wasm
  * linear memory.
@@ -28,14 +35,12 @@ export * from "../pkg/tunelet.js";
  * after `processor.free()`.
  */
 export class TuneletAudioViews {
+  declare [Symbol.dispose]: () => void;
   private readonly memory: InitOutput["memory"];
   private processor: Tunelet | null;
   /** The fixed frame capacity of `input`, `left` and `right`. */
   readonly maxBlockFrames: number;
-  private cachedBuffer: ArrayBuffer | null = null;
-  private inputView: Float32Array | null = null;
-  private leftView: Float32Array | null = null;
-  private rightView: Float32Array | null = null;
+  private cachedViews: CachedAudioViews | null = null;
 
   /**
    * Binds `Float32Array` views for `processor` over `memory`.
@@ -61,8 +66,7 @@ export class TuneletAudioViews {
    * If `memory.buffer` changed, this getter refreshes all three views first.
    */
   get input(): Float32Array {
-    this.refresh();
-    return this.inputView!;
+    return this.syncViews().input;
   }
 
   /**
@@ -71,8 +75,7 @@ export class TuneletAudioViews {
    * If `memory.buffer` changed, this getter refreshes all three views first.
    */
   get left(): Float32Array {
-    this.refresh();
-    return this.leftView!;
+    return this.syncViews().left;
   }
 
   /**
@@ -81,8 +84,7 @@ export class TuneletAudioViews {
    * If `memory.buffer` changed, this getter refreshes all three views first.
    */
   get right(): Float32Array {
-    this.refresh();
-    return this.rightView!;
+    return this.syncViews().right;
   }
 
   /**
@@ -90,38 +92,38 @@ export class TuneletAudioViews {
    * from `memory.buffer`.
    */
   refresh(): void {
+    this.syncViews();
+  }
+
+  private syncViews(): CachedAudioViews {
     const processor = this.processor;
     if (processor === null) {
       throw new Error("TuneletAudioViews is disposed");
     }
     const buffer = this.memory.buffer;
-    if (this.cachedBuffer !== buffer) {
-      const frames = this.maxBlockFrames;
-      const inputPtr = processor.inputF32Ptr;
-      const leftPtr = processor.leftF32Ptr;
-      const rightPtr = processor.rightF32Ptr;
-      const input = new Float32Array(buffer, inputPtr, frames);
-      const left = new Float32Array(buffer, leftPtr, frames);
-      const right = new Float32Array(buffer, rightPtr, frames);
-      this.inputView = input;
-      this.leftView = left;
-      this.rightView = right;
-      this.cachedBuffer = buffer;
+    const cached = this.cachedViews;
+    if (cached !== null && cached.buffer === buffer) {
+      return cached;
     }
+    const frames = this.maxBlockFrames;
+    const inputPtr = processor.inputF32Ptr;
+    const leftPtr = processor.leftF32Ptr;
+    const rightPtr = processor.rightF32Ptr;
+    const next: CachedAudioViews = {
+      buffer,
+      input: new Float32Array(buffer, inputPtr, frames),
+      left: new Float32Array(buffer, leftPtr, frames),
+      right: new Float32Array(buffer, rightPtr, frames),
+    };
+    this.cachedViews = next;
+    return next;
   }
 
   /** Clears the cached `ArrayBuffer`, `Float32Array` views and processor link. */
   dispose(): void {
     this.processor = null;
-    this.cachedBuffer = null;
-    this.inputView = null;
-    this.leftView = null;
-    this.rightView = null;
+    this.cachedViews = null;
   }
-}
-
-export interface TuneletAudioViews {
-  [Symbol.dispose](): void;
 }
 
 if (Symbol.dispose) {

@@ -261,7 +261,9 @@ function normalizeBlock(block, filePath) {
 
   const rebuiltLines = normalized
     .split("\n")
-    .map((line) => (line.length === 0 ? `${starPrefix}*` : `${starPrefix}* ${line}`));
+    .map((line) =>
+      line.length === 0 ? `${starPrefix}*` : `${starPrefix}* ${line}`,
+    );
 
   return [`/**`, ...rebuiltLines, `${starPrefix}*/`].join("\n");
 }

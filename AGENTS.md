@@ -116,15 +116,28 @@ Remove-Item Env:RUSTDOCFLAGS
 
 In `cmd.exe` on Windows, use `set "RUSTDOCFLAGS=-D warnings"` before the doc commands and `set "RUSTDOCFLAGS="` after them.
 
+If you change TypeScript, JSON, YAML or Markdown files, also check the
+lints and the format:
+
+```sh
+npm ci
+npm run lint
+npm run format:check
+```
+
 If you change the Wasm or TypeScript code, also run these commands.
 `npm run check:wasm` runs Clippy and rustdoc in release mode for
 `wasm32-unknown-unknown`. `npm run build` compiles `src/wasm.rs` and
 `src/index.ts`. `npm run verify:pack` runs `npm run build` one time and
-checks the `tunelet` and `@bytelandtechnology/tunelet` archives:
+checks the `tunelet` and `@bytelandtechnology/tunelet` archives. Run
+`npm run build:wasm` before `npm run typecheck` so `pkg/tunelet.d.ts`
+exists:
 
 ```sh
 npm ci
 npm run check:wasm
+npm run build:wasm
+npm run typecheck
 npm run verify:pack
 ```
 
@@ -133,10 +146,10 @@ npm run verify:pack
 `npm run build:ts` before `npm run verify:pack -- --ignore-scripts`.
 
 - `.github/workflows/ci.yml` runs on each pull request and each push to `main`.
-  `build-wasm` checks the format, Clippy, rustdoc, the crate archive and
-  `check:wasm` on `ubuntu-latest`, then builds and uploads `pkg/`. `check-os`
-  runs on `ubuntu-latest`, `macos-latest` and `windows-latest` with isolated
-  failures (`fail-fast: false`). Each runner builds `libtunelet.so`,
+  `build-wasm` checks the format, Clippy, rustdoc, the crate archive, Biome,
+  `check:wasm` and `typecheck` on `ubuntu-latest`, then uploads `pkg/`.
+  `check-os` runs on `ubuntu-latest`, `macos-latest` and `windows-latest` with
+  isolated failures (`fail-fast: false`). Each runner builds `libtunelet.so`,
   `libtunelet.dylib` or `tunelet.dll`, compiles TypeScript and runs
   `npm run verify:pack -- --ignore-scripts`. `msrv` checks `rust-version` from
   `Cargo.toml` on `ubuntu-latest`. `verify` reports the combined status for
