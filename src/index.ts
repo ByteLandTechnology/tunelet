@@ -8,129 +8,11 @@
  * include `Tunelet`, `defaultConfig`, `initSync` and the configuration,
  * control-activity, event and feedback types.
  */
-import init from "../pkg/tunelet.js";
-import type { InitInput, InitOutput, Tunelet } from "../pkg/tunelet.js";
+import { init, isUrlLike, loadOnce, TuneletAudioViews } from "./shared.js";
+import type { InitInput, InitOutput } from "./shared.js";
 
 export * from "../pkg/tunelet.js";
-
-/**
- * Cached `Float32Array` views over the in-place `Tunelet` buffers in Wasm
- * linear memory.
- *
- * Each access to `input`, `left` or `right` checks `memory.buffer`. If Wasm
- * memory grew and detached the previous `ArrayBuffer`, the helper binds the
- * three fixed pointers of `processor` to the new buffer. If `memory.buffer` did
- * not change, the helper returns the cached views with no allocation.
- *
- * Read `input` before you write input samples. If an in-place call passes
- * `events`, read `left` and `right` (or `input` for mono) after that call.
- * When you call `processor.free()`, also call `dispose()`. Do not use the views
- * after `processor.free()`.
- */
-export class TuneletAudioViews {
-  private readonly memory: InitOutput["memory"];
-  private processor: Tunelet | null;
-  /** The fixed frame capacity of `input`, `left` and `right`. */
-  readonly maxBlockFrames: number;
-  private cachedBuffer: ArrayBuffer | null = null;
-  private inputView: Float32Array | null = null;
-  private leftView: Float32Array | null = null;
-  private rightView: Float32Array | null = null;
-
-  /**
-   * Binds `Float32Array` views for `processor` over `memory`.
-   *
-   * @param memory The Wasm memory from `InitOutput["memory"]`.
-   * @param processor The live `Tunelet` instance that owns the buffers.
-   */
-  constructor(memory: InitOutput["memory"], processor: Tunelet) {
-    this.memory = memory;
-    this.processor = processor;
-    this.maxBlockFrames = processor.maxBlockFrames;
-    this.refresh();
-  }
-
-  /** Returns `true` after `dispose()` clears the cached views. */
-  get disposed(): boolean {
-    return this.processor === null;
-  }
-
-  /**
-   * Returns the `Float32Array` view for mono input and in-place mono output.
-   *
-   * If `memory.buffer` changed, this getter refreshes all three views first.
-   */
-  get input(): Float32Array {
-    this.refresh();
-    return this.inputView!;
-  }
-
-  /**
-   * Returns the `Float32Array` view for the left stereo output channel.
-   *
-   * If `memory.buffer` changed, this getter refreshes all three views first.
-   */
-  get left(): Float32Array {
-    this.refresh();
-    return this.leftView!;
-  }
-
-  /**
-   * Returns the `Float32Array` view for the right stereo output channel.
-   *
-   * If `memory.buffer` changed, this getter refreshes all three views first.
-   */
-  get right(): Float32Array {
-    this.refresh();
-    return this.rightView!;
-  }
-
-  /**
-   * If Wasm memory grew, this method refreshes the three `Float32Array` views
-   * from `memory.buffer`.
-   */
-  refresh(): void {
-    const processor = this.processor;
-    if (processor === null) {
-      throw new Error("TuneletAudioViews is disposed");
-    }
-    const buffer = this.memory.buffer;
-    if (this.cachedBuffer !== buffer) {
-      const frames = this.maxBlockFrames;
-      const inputPtr = processor.inputF32Ptr;
-      const leftPtr = processor.leftF32Ptr;
-      const rightPtr = processor.rightF32Ptr;
-      const input = new Float32Array(buffer, inputPtr, frames);
-      const left = new Float32Array(buffer, leftPtr, frames);
-      const right = new Float32Array(buffer, rightPtr, frames);
-      this.inputView = input;
-      this.leftView = left;
-      this.rightView = right;
-      this.cachedBuffer = buffer;
-    }
-  }
-
-  /** Clears the cached `ArrayBuffer`, `Float32Array` views and processor link. */
-  dispose(): void {
-    this.processor = null;
-    this.cachedBuffer = null;
-    this.inputView = null;
-    this.leftView = null;
-    this.rightView = null;
-  }
-}
-
-export interface TuneletAudioViews {
-  [Symbol.dispose](): void;
-}
-
-if (Symbol.dispose) {
-  TuneletAudioViews.prototype[Symbol.dispose] =
-    TuneletAudioViews.prototype.dispose;
-}
-
-/** The shared initialization promise, which a failure clears. */
-let initialization: Promise<InitOutput> | undefined;
+export { TuneletAudioViews };
 
 /**
  * Initializes the Wasm module one time for this imported package instance.
@@ -143,8 +25,8 @@ let initialization: Promise<InitOutput> | undefined;
  * For a custom deployment, you can give one of these sources:
  *
  * - A URL or URL string.
- * - A fetch Response.
- * - A byte buffer (BufferSource).
+ * - A fetch Request or Response.
+ * - A byte buffer (ArrayBuffer or ArrayBufferView).
  * - A compiled WebAssembly.Module.
  * - A promise for one of these.
  *
@@ -167,61 +49,52 @@ let initialization: Promise<InitOutput> | undefined;
 export function loadTunelet(
   source?: InitInput | Promise<InitInput>,
 ): Promise<InitOutput> {
-  initialization ??= initialize(source).catch((error: unknown) => {
-    initialization = undefined;
-    throw error;
-  });
-  return initialization;
+  return loadOnce(source, initializeIndex);
 }
 
-/** Converts a `file:` URL string or `URL` object into a local `URL` instance. */
-function resolveFileUrl(input: InitInput): URL | undefined {
-  if (typeof URL === "function" && input instanceof URL) {
-    return input.protocol === "file:" ? input : undefined;
-  }
-  if (typeof input === "string") {
-    if (!/^file:/i.test(input)) {
-      return undefined;
-    }
-    const url = new URL(input);
-    return url.protocol === "file:" ? url : undefined;
-  }
-  if (
-    typeof input === "object" &&
-    input !== null &&
-    "protocol" in input &&
-    input.protocol === "file:" &&
-    "href" in input &&
-    typeof input.href === "string"
-  ) {
-    const url = new URL(input.href);
-    return url.protocol === "file:" ? url : undefined;
-  }
-  return undefined;
-}
-
-/** Awaits the source one time, then initializes the Wasm module from it. */
-async function initialize(
-  source: InitInput | Promise<InitInput> | undefined,
+/** Loads the default binary or an explicit source in browsers or Node.js. */
+async function initializeIndex(
+  source: InitInput | undefined,
 ): Promise<InitOutput> {
   const input =
     source === undefined
       ? new URL("../pkg/tunelet_bg.wasm", import.meta.url)
-      : await source;
+      : source;
 
-  const fileUrl = resolveFileUrl(input);
-  if (fileUrl !== undefined) {
-    // Keep the Node.js built-in module out of browser bundles. TypeScript
-    // removes the type-only import. The runtime import runs only for `file:`
-    // URLs.
-    const moduleName = "node:fs/promises";
-    const fs: typeof import("node:fs/promises") = await import(
-      /* webpackIgnore: true */ /* @vite-ignore */ moduleName
-    );
-    return init({ module_or_path: await fs.readFile(fileUrl) });
+  if (typeof input === "string") {
+    if (/^file:/i.test(input)) {
+      const url = new URL(input);
+      if (url.protocol === "file:") {
+        return readFileUrl(url);
+      }
+    }
+    return init({ module_or_path: input });
+  }
+
+  if (isUrlLike(input)) {
+    const url =
+      typeof URL === "function" && input instanceof URL
+        ? input
+        : new URL(input.href);
+    if (url.protocol === "file:") {
+      return readFileUrl(url);
+    }
+    return init({ module_or_path: url });
   }
 
   return init({ module_or_path: input });
+}
+
+/** Reads a `file:` URL in Node.js without static Node.js imports. */
+async function readFileUrl(fileUrl: URL): Promise<InitOutput> {
+  // Keep the Node.js built-in module out of browser bundles. TypeScript
+  // removes the type-only import. The runtime import runs only for `file:`
+  // URLs.
+  const moduleName = "node:fs/promises";
+  const fs: typeof import("node:fs/promises") = await import(
+    /* webpackIgnore: true */ /* @vite-ignore */ moduleName
+  );
+  return init({ module_or_path: await fs.readFile(fileUrl) });
 }
 
 /** The default export is the same function as `loadTunelet`. */

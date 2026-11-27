@@ -1,8 +1,8 @@
 /**
  * This script builds the package one time and packs `tunelet` and
- * `@bytelandtechnology/tunelet`. For each archive, it checks the eight files,
- * `loadTunelet()`, the HTTP Wasm loaders, the `NodeNext` TypeScript
- * declarations and the JSDoc comments.
+ * `@bytelandtechnology/tunelet`. For each archive, it checks the fourteen
+ * files, runtime Node.js behavior, HTTP Wasm loaders, strict TypeScript
+ * profiles and the JSDoc comments.
  *
  * If you give `--ignore-scripts`, the script checks the pre-built `pkg/` and
  * `dist/` files without a build. If you give `--out-dir <dir>`, the script
@@ -22,12 +22,19 @@ import { normalizeJsDoc } from "./normalize-jsdoc.mjs";
 
 const UNSCOPED_PACKAGE_NAME = "tunelet";
 const SCOPED_PACKAGE_NAME = "@bytelandtechnology/tunelet";
+const DISPOSABLE_LIB_REFERENCE = '/// <reference lib="esnext.disposable" />';
 
 const EXPECTED_ARCHIVE_PATHS = [
   "package/LICENSE",
   "package/README.md",
+  "package/dist/browser.d.ts",
+  "package/dist/browser.js",
   "package/dist/index.d.ts",
   "package/dist/index.js",
+  "package/dist/node.d.ts",
+  "package/dist/node.js",
+  "package/dist/shared.d.ts",
+  "package/dist/shared.js",
   "package/package.json",
   "package/pkg/tunelet.d.ts",
   "package/pkg/tunelet.js",
@@ -213,7 +220,7 @@ function packArchive(
   return path.posix.join("pack", archives[0]);
 }
 
-/** Check that the archive contains only the eight expected files. */
+/** Check that the archive contains only the fourteen expected files. */
 function verifyArchiveEntries(tempDir, relativeArchivePath) {
   const rawList = execFileSync("tar", ["-tzf", relativeArchivePath], {
     cwd: tempDir,
@@ -261,6 +268,8 @@ function installArchive(
     fs.readFileSync(path.join(installedDir, "package.json"), "utf8"),
   );
   assert.equal(packedMetadata.name, packageName);
+  assert.equal(packedMetadata.main, "./dist/index.js");
+  assert.equal(packedMetadata.types, "./dist/index.d.ts");
 
   fs.writeFileSync(
     path.join(consumerDir, "package.json"),
@@ -270,40 +279,183 @@ function installArchive(
       type: "module",
     }),
   );
+
+  return installedDir;
 }
 
-/** Import the installed package in Node.js and check Wasm, PCM and Float32 paths. */
-function verifyRuntimeImport(consumerDir, packageName) {
-  const checkDefaultPath = path.join(consumerDir, "check-default.mjs");
-  fs.writeFileSync(
-    checkDefaultPath,
+/** Remove comments from JavaScript or TypeScript source text. */
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^(?!\s*\/\/\/\s*<reference).*\/\/.*$/gm, "");
+}
+
+/** Check browser bundle isolation and declaration parity on packed files. */
+function verifyInstalledFiles(installedDir) {
+  const browserJs = fs.readFileSync(
+    path.join(installedDir, "dist", "browser.js"),
+    "utf8",
+  );
+  const indexJs = fs.readFileSync(
+    path.join(installedDir, "dist", "index.js"),
+    "utf8",
+  );
+  const sharedJs = fs.readFileSync(
+    path.join(installedDir, "dist", "shared.js"),
+    "utf8",
+  );
+  assert.doesNotMatch(browserJs, /node:fs\/promises/);
+  assert.doesNotMatch(browserJs, /\bnode:/);
+  assert.doesNotMatch(sharedJs, /node:fs\/promises/);
+  assert.doesNotMatch(sharedJs, /\bnode:/);
+  assert.doesNotMatch(indexJs, /^\s*import\b[^;]*["']node:/m);
+
+  const indexDts = fs.readFileSync(
+    path.join(installedDir, "dist", "index.d.ts"),
+    "utf8",
+  );
+  const nodeDts = fs.readFileSync(
+    path.join(installedDir, "dist", "node.d.ts"),
+    "utf8",
+  );
+  const browserDts = fs.readFileSync(
+    path.join(installedDir, "dist", "browser.d.ts"),
+    "utf8",
+  );
+  const sharedDts = fs.readFileSync(
+    path.join(installedDir, "dist", "shared.d.ts"),
+    "utf8",
+  );
+  const wasmDts = fs.readFileSync(
+    path.join(installedDir, "pkg", "tunelet.d.ts"),
+    "utf8",
+  );
+
+  const strippedIndexDts = stripComments(indexDts).trim();
+  assert.equal(
+    stripComments(nodeDts).trim(),
+    strippedIndexDts,
+    "dist/node.d.ts and dist/index.d.ts must expose identical signatures",
+  );
+  assert.equal(
+    stripComments(browserDts).trim(),
+    strippedIndexDts,
+    "dist/browser.d.ts and dist/index.d.ts must expose identical signatures",
+  );
+
+  const normalizedWasmDts = wasmDts.replace(/\r\n/g, "\n");
+  const wasmReferenceDirectives =
+    normalizedWasmDts.match(/\/\/\/\s*<reference\b[^\n]*/g) ?? [];
+  assert.deepEqual(wasmReferenceDirectives, [DISPOSABLE_LIB_REFERENCE]);
+  assert.ok(
+    normalizedWasmDts.startsWith(`${DISPOSABLE_LIB_REFERENCE}\n`),
+    "pkg/tunelet.d.ts must start with /// <reference lib=\"esnext.disposable\" />",
+  );
+  assert.match(wasmDts, /\[Symbol\.dispose\]\(\): void;/);
+  assert.match(wasmDts, /humanize\?: number \| undefined;/);
+  assert.match(wasmDts, /flexTune\?: number \| undefined;/);
+  assert.match(wasmDts, /voices\?: number \| undefined;/);
+  assert.match(wasmDts, /toFixedLengthBuffer\(\): ArrayBuffer;/);
+  assert.match(wasmDts, /toResizableBuffer\(\): ArrayBuffer;/);
+
+  for (const [label, content] of [
+    ["dist/index.d.ts", indexDts],
+    ["dist/node.d.ts", nodeDts],
+    ["dist/browser.d.ts", browserDts],
+    ["dist/shared.d.ts", sharedDts],
+  ]) {
+    const directives =
+      stripComments(content).match(/\/\/\/\s*<reference\b[^\n]*/g) ?? [];
+    for (const directive of directives) {
+      assert.equal(
+        directive,
+        DISPOSABLE_LIB_REFERENCE,
+        `Unexpected triple-slash reference in ${label}: ${directive}`,
+      );
+    }
+  }
+
+  for (const [label, content] of [
+    ["dist/index.d.ts", indexDts],
+    ["dist/node.d.ts", nodeDts],
+    ["dist/browser.d.ts", browserDts],
+    ["dist/shared.d.ts", sharedDts],
+    ["pkg/tunelet.d.ts", wasmDts],
+  ]) {
+    const code = stripComments(content);
+    for (const forbidden of [
+      /\bWebAssembly\b/,
+      /\bRequestInfo\b/,
+      /\bResponse\b/,
+      /\bURL\b/,
+      /\bBufferSource\b/,
+      /\bdeclare\s+global\b/,
+      /\bnode:/,
+    ]) {
+      assert.doesNotMatch(
+        code,
+        forbidden,
+        `Unexpected ${forbidden} in ${label}`,
+      );
+    }
+  }
+}
+
+/** Run a short Node.js module script in `consumerDir`. */
+function runNodeCheck(consumerDir, filename, lines, args = []) {
+  const scriptPath = path.join(consumerDir, filename);
+  fs.writeFileSync(scriptPath, `${lines.join("\n")}\n`, "utf8");
+  execFileSync(process.execPath, [scriptPath, ...args], {
+    cwd: consumerDir,
+    stdio: "inherit",
+  });
+}
+
+/** Check Node.js exports, `dist/index.js`, Float32 views, disposal and bundles. */
+function verifyRuntimeImport(consumerDir, installedDir, packageName) {
+  runNodeCheck(
+    consumerDir,
+    "check-default.mjs",
     [
       'import assert from "node:assert/strict";',
       'import fs from "node:fs";',
       'import { createRequire } from "node:module";',
-      'import { fileURLToPath } from "node:url";',
+      'import { fileURLToPath, pathToFileURL } from "node:url";',
       "",
       "const packageName = process.argv[2];",
+      "const installedDir = process.argv[3];",
       "const require = createRequire(import.meta.url);",
-      "const pkgWasmSubpath = `${packageName}/pkg/tunelet_bg.wasm`;",
-      "const rootWasmSubpath = `${packageName}/tunelet_bg.wasm`;",
-      "const resolvedPkgWasm = import.meta.resolve(pkgWasmSubpath);",
-      "const resolvedRootWasm = import.meta.resolve(rootWasmSubpath);",
-      'assert.match(resolvedPkgWasm, /^file:/);',
-      "assert.equal(resolvedPkgWasm, resolvedRootWasm);",
-      "const wasmFilePath = fileURLToPath(resolvedPkgWasm);",
+      "",
+      "const rootResolved = import.meta.resolve(packageName);",
+      "const wasmJsResolved = import.meta.resolve(`${packageName}/wasm`);",
+      "const pkgWasmResolved = import.meta.resolve(`${packageName}/pkg/tunelet_bg.wasm`);",
+      "const shortWasmResolved = import.meta.resolve(`${packageName}/tunelet_bg.wasm`);",
+      'assert.match(rootResolved, /\\/dist\\/node\\.js$/);',
+      'assert.match(wasmJsResolved, /\\/pkg\\/tunelet\\.js$/);',
+      'assert.match(pkgWasmResolved, /^file:.*\\/pkg\\/tunelet_bg\\.wasm$/);',
+      "assert.equal(shortWasmResolved, pkgWasmResolved);",
+      "const wasmFilePath = fileURLToPath(pkgWasmResolved);",
       "assert.ok(fs.statSync(wasmFilePath).isFile());",
-      "assert.equal(require.resolve(pkgWasmSubpath), wasmFilePath);",
-      "assert.equal(require.resolve(rootWasmSubpath), wasmFilePath);",
+      "assert.equal(require.resolve(`${packageName}/pkg/tunelet_bg.wasm`), wasmFilePath);",
+      "assert.equal(require.resolve(`${packageName}/tunelet_bg.wasm`), wasmFilePath);",
+      "assert.match(require.resolve(packageName), /dist[\\\\/]node\\.js$/);",
       "",
       "const rootModule = await import(packageName);",
+      "const indexModule = await import(pathToFileURL(`${installedDir}/dist/index.js`).href);",
+      "const browserModule = await import(pathToFileURL(`${installedDir}/dist/browser.js`).href);",
       "const wasmModule = await import(`${packageName}/wasm`);",
       "",
+      "assert.deepEqual(Object.keys(rootModule).sort(), Object.keys(indexModule).sort());",
+      "assert.deepEqual(Object.keys(rootModule).sort(), Object.keys(browserModule).sort());",
       'assert.equal(typeof rootModule.loadTunelet, "function");',
       "assert.equal(rootModule.default, rootModule.loadTunelet);",
+      "assert.equal(indexModule.default, indexModule.loadTunelet);",
+      "assert.equal(browserModule.default, browserModule.loadTunelet);",
       'assert.equal(typeof rootModule.initSync, "function");',
       'assert.equal(typeof rootModule.Tunelet, "function");',
       'assert.equal(typeof rootModule.TuneletAudioViews, "function");',
+      "assert.equal(rootModule.TuneletAudioViews, indexModule.TuneletAudioViews);",
+      "assert.equal(rootModule.TuneletAudioViews, browserModule.TuneletAudioViews);",
       'assert.equal(typeof rootModule.defaultConfig, "function");',
       'assert.equal(typeof wasmModule.default, "function");',
       'assert.equal(typeof wasmModule.initSync, "function");',
@@ -312,16 +464,30 @@ function verifyRuntimeImport(consumerDir, packageName) {
       "assert.ok(wasmExports);",
       "assert.ok(wasmExports.memory instanceof WebAssembly.Memory);",
       "",
-      "const initialConfig = rootModule.defaultConfig();",
-      "initialConfig.resynthesis.correction.humanize = undefined;",
-      "initialConfig.resynthesis.correction.flexTune = undefined;",
-      "initialConfig.resynthesis.harmony.voices = undefined;",
-      "const processor = new rootModule.Tunelet(48000, 128, initialConfig);",
+      "const baseConfig = rootModule.defaultConfig();",
+      "assert.equal(baseConfig.resynthesis.harmony.voices, 4);",
+      "",
+      "const constructConfig = {",
+      "  ...baseConfig,",
+      "  resynthesis: {",
+      "    ...baseConfig.resynthesis,",
+      "    correction: {",
+      "      ...baseConfig.resynthesis.correction,",
+      "      humanize: undefined,",
+      "      flexTune: undefined,",
+      "    },",
+      "    harmony: {",
+      "      ...baseConfig.resynthesis.harmony,",
+      "      voices: undefined,",
+      "    },",
+      "  },",
+      "};",
+      "const processor = new rootModule.Tunelet(48000, 128, constructConfig);",
       "try {",
       "  assert.equal(processor.config().resynthesis.correction.humanize, 0);",
       "  assert.equal(processor.config().resynthesis.correction.flexTune, 0);",
       "  assert.equal(processor.config().resynthesis.harmony.voices, 4);",
-      "  assert.equal(typeof processor.controlActivity().choirVoices, \"boolean\");",
+      '  assert.equal(typeof processor.controlActivity().choirVoices, "boolean");',
       "  const initialTelemetry = processor.telemetry();",
       "  assert.ok(initialTelemetry.voiceRatios instanceof Float32Array);",
       "  assert.ok(initialTelemetry.voiceGains instanceof Float32Array);",
@@ -329,17 +495,17 @@ function verifyRuntimeImport(consumerDir, packageName) {
       "  assert.equal(initialTelemetry.voiced, false);",
       "  assert.equal(initialTelemetry.targetMidiNote, undefined);",
       "",
-      "  const twoVoiceConfig = processor.config();",
+      "  const twoVoiceConfig = rootModule.defaultConfig();",
       "  twoVoiceConfig.resynthesis.harmony.voices = 2;",
       "  processor.setConfig(twoVoiceConfig);",
       "  assert.equal(processor.config().resynthesis.harmony.voices, 2);",
       "",
-      "  const undefinedVoiceConfig = processor.config();",
-      "  undefinedVoiceConfig.resynthesis.harmony.voices = undefined;",
-      "  processor.setConfig(undefinedVoiceConfig);",
+      "  processor.setConfig(constructConfig);",
+      "  assert.equal(processor.config().resynthesis.correction.humanize, 0);",
+      "  assert.equal(processor.config().resynthesis.correction.flexTune, 0);",
       "  assert.equal(processor.config().resynthesis.harmony.voices, 4);",
       "",
-      "  const oneVoiceConfig = processor.config();",
+      "  const oneVoiceConfig = rootModule.defaultConfig();",
       "  oneVoiceConfig.resynthesis.harmony.voices = 1;",
       "  processor.setConfig(oneVoiceConfig);",
       "  assert.equal(processor.config().resynthesis.harmony.voices, 1);",
@@ -370,10 +536,26 @@ function verifyRuntimeImport(consumerDir, packageName) {
       "  assert.equal(processor.config().resynthesis.correction.flexTune, 0);",
       "  assert.equal(processor.config().resynthesis.harmony.voices, 4);",
       "",
+      "  processor.setConfig(twoVoiceConfig);",
+      "  assert.equal(processor.config().resynthesis.harmony.voices, 2);",
+      "",
       "  const input = new Int16Array(128);",
       "  const left = new Int16Array(128);",
       "  const right = new Int16Array(128);",
-      '  processor.process(input, left, right, [',
+      "  processor.process(input, left, right, [",
+      "    {",
+      "      offset: 0,",
+      "      event: {",
+      '        type: "configure",',
+      "        value: constructConfig,",
+      "      },",
+      "    },",
+      "  ]);",
+      "  assert.equal(processor.config().resynthesis.correction.humanize, 0);",
+      "  assert.equal(processor.config().resynthesis.correction.flexTune, 0);",
+      "  assert.equal(processor.config().resynthesis.harmony.voices, 4);",
+      "",
+      "  processor.process(input, left, right, [",
       '    { offset: 0, event: { type: "parameter", value: { type: "dryMix", value: 0.25 } } },',
       '    { offset: 0, event: { type: "parameter", value: { type: "humanize", value: 0.5 } } },',
       '    { offset: 0, event: { type: "parameter", value: { type: "flexTune", value: 0.25 } } },',
@@ -560,74 +742,96 @@ function verifyRuntimeImport(consumerDir, packageName) {
       "assert.equal(disposableViews.disposed, true);",
       'assert.equal(typeof disposableProcessor[Symbol.dispose], "function");',
       "disposableProcessor[Symbol.dispose]();",
-      "",
-    ].join("\n"),
+    ],
+    [packageName, installedDir],
   );
 
-  execFileSync(process.execPath, [checkDefaultPath, packageName], {
-    cwd: consumerDir,
-    stdio: "inherit",
-  });
+  runNodeCheck(
+    consumerDir,
+    "check-index-entry.mjs",
+    [
+      'import assert from "node:assert/strict";',
+      'import { pathToFileURL } from "node:url";',
+      "",
+      "const installedDir = process.argv[2];",
+      "const indexModule = await import(pathToFileURL(`${installedDir}/dist/index.js`).href);",
+      "const wasmExports = await indexModule.loadTunelet();",
+      "assert.ok(wasmExports);",
+      "const processor = new indexModule.Tunelet(48000, 64);",
+      "const views = new indexModule.TuneletAudioViews(wasmExports.memory, processor);",
+      "assert.equal(views.maxBlockFrames, 64);",
+      'assert.equal(typeof views[Symbol.dispose], "function");',
+      "views[Symbol.dispose]();",
+      "assert.equal(processor.sampleRate, 48000);",
+      'assert.equal(typeof processor[Symbol.dispose], "function");',
+      "processor[Symbol.dispose]();",
+    ],
+    [installedDir],
+  );
 
-  const checkFileStringPath = path.join(consumerDir, "check-file-string.mjs");
-  fs.writeFileSync(
-    checkFileStringPath,
+  runNodeCheck(
+    consumerDir,
+    "check-index-file-string.mjs",
+    [
+      'import assert from "node:assert/strict";',
+      'import { pathToFileURL } from "node:url";',
+      "",
+      "const packageName = process.argv[2];",
+      "const installedDir = process.argv[3];",
+      "const indexModule = await import(pathToFileURL(`${installedDir}/dist/index.js`).href);",
+      'const absentUrl = new URL("./absent-tunelet.wasm", import.meta.url).href;',
+      "await assert.rejects(() => indexModule.loadTunelet(absentUrl));",
+      "const fileString = import.meta.resolve(`${packageName}/pkg/tunelet_bg.wasm`);",
+      "await indexModule.loadTunelet(fileString);",
+      "assert.equal(indexModule.defaultConfig().resynthesis.harmony.voices, 4);",
+    ],
+    [packageName, installedDir],
+  );
+
+  runNodeCheck(
+    consumerDir,
+    "check-file-string.mjs",
     [
       'import assert from "node:assert/strict";',
       "",
       "const packageName = process.argv[2];",
-      "const wasmHref = import.meta.resolve(`${packageName}/pkg/tunelet_bg.wasm`);",
-      'assert.equal(typeof wasmHref, "string");',
-      'assert.match(wasmHref, /^file:/);',
-      "const { loadTunelet, Tunelet } = await import(packageName);",
-      "const exportsFromString = await loadTunelet(wasmHref);",
-      "assert.ok(exportsFromString);",
-      "const processor = new Tunelet(48000, 128);",
-      "try {",
-      "  assert.equal(processor.config().resynthesis.harmony.voices, 4);",
-      "} finally {",
-      "  processor.free();",
-      "}",
+      "const rootModule = await import(packageName);",
+      'const absentUrl = new URL("./absent-tunelet.wasm", import.meta.url).href;',
+      "await assert.rejects(() => rootModule.loadTunelet(absentUrl));",
       "",
-    ].join("\n"),
-  );
-
-  execFileSync(process.execPath, [checkFileStringPath, packageName], {
-    cwd: consumerDir,
-    stdio: "inherit",
-  });
-
-  const checkCrossRealmPath = path.join(consumerDir, "check-cross-realm.mjs");
-  fs.writeFileSync(
-    checkCrossRealmPath,
-    [
-      'import assert from "node:assert/strict";',
-      "",
-      "const packageName = process.argv[2];",
-      "const wasmHref = import.meta.resolve(`${packageName}/tunelet_bg.wasm`);",
-      'const crossRealmUrl = { href: wasmHref, protocol: "file:" };',
-      "assert.equal(crossRealmUrl instanceof URL, false);",
-      "const { loadTunelet, Tunelet } = await import(packageName);",
-      "const exportsFromObject = await loadTunelet(crossRealmUrl);",
-      "assert.ok(exportsFromObject);",
-      "const processor = new Tunelet(48000, 128);",
+      "const fileString = import.meta.resolve(`${packageName}/pkg/tunelet_bg.wasm`);",
+      'assert.match(fileString, /^file:/);',
+      "await rootModule.loadTunelet(fileString);",
+      "const processor = new rootModule.Tunelet(48000, 64);",
       "try {",
       "  assert.equal(processor.sampleRate, 48000);",
       "} finally {",
       "  processor.free();",
       "}",
-      "",
-    ].join("\n"),
+    ],
+    [packageName],
   );
 
-  execFileSync(process.execPath, [checkCrossRealmPath, packageName], {
-    cwd: consumerDir,
-    stdio: "inherit",
-  });
+  runNodeCheck(
+    consumerDir,
+    "check-cross-realm-url.mjs",
+    [
+      'import assert from "node:assert/strict";',
+      "",
+      "const packageName = process.argv[2];",
+      "const rootModule = await import(packageName);",
+      "const href = import.meta.resolve(`${packageName}/tunelet_bg.wasm`);",
+      'const crossRealmUrl = { href, protocol: "file:" };',
+      "assert.equal(crossRealmUrl instanceof URL, false);",
+      "await rootModule.loadTunelet(crossRealmUrl);",
+      "assert.equal(rootModule.defaultConfig().resynthesis.harmony.voices, 4);",
+    ],
+    [packageName],
+  );
 
-  const checkWasmInitPath = path.join(consumerDir, "check-wasm-init.mjs");
-  fs.writeFileSync(
-    checkWasmInitPath,
+  runNodeCheck(
+    consumerDir,
+    "check-wasm-init.mjs",
     [
       'import assert from "node:assert/strict";',
       'import fs from "node:fs";',
@@ -648,18 +852,13 @@ function verifyRuntimeImport(consumerDir, packageName) {
       "} finally {",
       "  processor.free();",
       "}",
-      "",
-    ].join("\n"),
+    ],
+    [packageName],
   );
 
-  execFileSync(process.execPath, [checkWasmInitPath, packageName], {
-    cwd: consumerDir,
-    stdio: "inherit",
-  });
-
-  const checkInitSyncPath = path.join(consumerDir, "check-init-sync.mjs");
-  fs.writeFileSync(
-    checkInitSyncPath,
+  runNodeCheck(
+    consumerDir,
+    "check-init-sync.mjs",
     [
       'import assert from "node:assert/strict";',
       'import fs from "node:fs";',
@@ -678,21 +877,13 @@ function verifyRuntimeImport(consumerDir, packageName) {
       "} finally {",
       "  processor.free();",
       "}",
-      "",
-    ].join("\n"),
+    ],
+    [packageName],
   );
 
-  execFileSync(process.execPath, [checkInitSyncPath, packageName], {
-    cwd: consumerDir,
-    stdio: "inherit",
-  });
-
-  const checkWasmInitSyncPath = path.join(
+  runNodeCheck(
     consumerDir,
     "check-wasm-init-sync.mjs",
-  );
-  fs.writeFileSync(
-    checkWasmInitSyncPath,
     [
       'import assert from "node:assert/strict";',
       'import fs from "node:fs";',
@@ -711,378 +902,101 @@ function verifyRuntimeImport(consumerDir, packageName) {
       "} finally {",
       "  processor.free();",
       "}",
-      "",
-    ].join("\n"),
+    ],
+    [packageName],
   );
 
-  execFileSync(process.execPath, [checkWasmInitSyncPath, packageName], {
-    cwd: consumerDir,
-    stdio: "inherit",
-  });
-}
-
-/** Check strict TypeScript consumer profiles without ambient leakage. */
-function verifyTypeDeclarations(consumerDir, packageName) {
-  const pkgLiteral = JSON.stringify(packageName);
-  const wasmLiteral = JSON.stringify(`${packageName}/wasm`);
-  const pkgWasmLiteral = JSON.stringify(`${packageName}/pkg/tunelet_bg.wasm`);
-  const rootWasmLiteral = JSON.stringify(`${packageName}/tunelet_bg.wasm`);
-  const typeRoots = [path.join(repoRoot, "node_modules", "@types")];
-
-  const sharedImportsAndHarmonyChecks = [
-    "import loadTunelet, {",
-    "  defaultConfig,",
-    "  initSync as rootInitSync,",
-    "  loadTunelet as namedLoadTunelet,",
-    "  Tunelet,",
-    "  TuneletAudioViews,",
-    "  type ControlActivity,",
-    "  type ControlEvent,",
-    "  type ParameterControl,",
-    "  type ProcessorConfig,",
-    "  type ResynthesisConfig,",
-    "  type SyncInitInput as RootSyncInitInput,",
-    "  type Telemetry,",
-    `} from ${pkgLiteral};`,
-    "import init, {",
-    "  initSync as wasmInitSync,",
-    "  type InitInput,",
-    "  type InitOutput,",
-    "  type ParameterControl as WasmParameterControl,",
-    "  type SyncInitInput,",
-    `} from ${wasmLiteral};`,
-    "",
-    "async function verifySharedApi(",
-    "  source: InitInput | undefined,",
-    "  syncSource: SyncInitInput & RootSyncInitInput,",
-    "  optionalVoices: number | undefined,",
-    "): Promise<InitOutput> {",
-    "  const exportsFromRoot: InitOutput = await loadTunelet(source);",
-    "  const exportsFromNamed: InitOutput = await namedLoadTunelet(source);",
-    "  const exportsFromWasm: InitOutput =",
-    "    source === undefined",
-    "      ? await init()",
-    "      : await init({ module_or_path: source });",
-    "  const syncExportsFromRoot: InitOutput = rootInitSync({",
-    "    module: syncSource,",
-    "  });",
-    "  const syncExportsFromWasm: InitOutput = wasmInitSync({",
-    "    module: syncSource,",
-    "  });",
-    "  const baseConfig: ProcessorConfig = defaultConfig();",
-    "  const configWithUndefined: ProcessorConfig = {",
-    "    ...baseConfig,",
-    "    resynthesis: {",
-    "      ...baseConfig.resynthesis,",
-    "      correction: {",
-    "        ...baseConfig.resynthesis.correction,",
-    "        humanize: optionalVoices,",
-    "        flexTune: optionalVoices,",
-    "      },",
-    "      harmony: {",
-    "        ...baseConfig.resynthesis.harmony,",
-    "        voices: optionalVoices,",
-    "      },",
-    "    },",
-    "  };",
-    "  {",
-    "    using disposableProcessor = new Tunelet(",
-    "      48000,",
-    "      128,",
-    "      configWithUndefined,",
-    "    );",
-    "    using disposableViews = new TuneletAudioViews(",
-    "      exportsFromRoot.memory,",
-    "      disposableProcessor,",
-    "    );",
-    "    disposableViews.input.fill(0);",
-    "    disposableProcessor.reset();",
-    "  }",
-    "  const processor = new Tunelet(48000, 128, configWithUndefined);",
-    "  processor.setConfig(configWithUndefined);",
-    "  const activity: ControlActivity = processor.controlActivity();",
-    "  const telemetry: Telemetry = processor.telemetry();",
-    "  const voiceSlices: [Float32Array, Float32Array] = [",
-    "    telemetry.voiceRatios,",
-    "    telemetry.voiceGains,",
-    "  ];",
-    "  const views = new TuneletAudioViews(exportsFromRoot.memory, processor);",
-    "  const ptrs: [number, number, number] = [",
-    "    processor.inputF32Ptr,",
-    "    processor.leftF32Ptr,",
-    "    processor.rightF32Ptr,",
-    "  ];",
-    "  views.input.fill(0);",
-    "  processor.processF32InPlace(128);",
-    "  const stereoOut: [Float32Array, Float32Array] = [views.left, views.right];",
-    "  processor.processMonoF32InPlace(128);",
-    "  processor.beginDrain();",
-    "  const stereoTail: number = processor.drainF32InPlace(128);",
-    "  const monoTail: number = processor.drainMonoF32InPlace(128);",
-    "  views.refresh();",
-    "  const resynthesisUpdate: ResynthesisConfig = {",
-    "    ...configWithUndefined.resynthesis,",
-    "    correction: {",
-    "      enabled: configWithUndefined.resynthesis.correction.enabled,",
-    "      notes: configWithUndefined.resynthesis.correction.notes,",
-    "      retuneMs: configWithUndefined.resynthesis.correction.retuneMs,",
-    "    },",
-    "    harmony: {",
-    "      ...configWithUndefined.resynthesis.harmony,",
-    "      voices: undefined,",
-    "    },",
-    "  };",
-    "  const input = new Int16Array(128);",
-    "  const left = new Int16Array(128);",
-    "  const right = new Int16Array(128);",
-    "  processor.processMono(input, [",
-    '    { offset: 0, event: { type: "resynthesis", value: resynthesisUpdate } },',
-    "  ]);",
-    '  const dryMixParameter: ParameterControl & WasmParameterControl = { type: "dryMix", value: 0.25 };',
-    '  const humanizeParameter: ParameterControl & WasmParameterControl = { type: "humanize", value: 0.5 };',
-    '  const flexTuneParameter: ParameterControl & WasmParameterControl = { type: "flexTune", value: 0.25 };',
-    '  const parameterEvent: ControlEvent = { type: "parameter", value: dryMixParameter };',
-    "  processor.process(input, left, right, [",
-    "    { offset: 0, event: parameterEvent },",
-    '    { offset: 0, event: { type: "parameter", value: humanizeParameter } },',
-    '    { offset: 0, event: { type: "parameter", value: flexTuneParameter } },',
-    "  ]);",
-    "  processor.beginDrain();",
-    "  const drained: number = processor.drain(left, right);",
-    "  const drainedMono: number = processor.drainMono(input);",
-    "  const inputF32 = new Float32Array(128);",
-    "  const leftF32 = new Float32Array(128);",
-    "  const rightF32 = new Float32Array(128);",
-    "  processor.processF32(inputF32, leftF32, rightF32);",
-    "  processor.processF32(inputF32, leftF32, rightF32, [",
-    '    { offset: 0, event: { type: "outputGain", value: 1 } },',
-    "    { offset: 0, event: parameterEvent },",
-    "  ]);",
-    "  processor.processMonoF32(inputF32);",
-    "  processor.beginDrain();",
-    "  const drainedF32: number = processor.drainF32(leftF32, rightF32);",
-    "  const drainedMonoF32: number = processor.drainMonoF32(inputF32);",
-    "  views.dispose();",
-    "  processor.free();",
-    "  void activity;",
-    "  void voiceSlices;",
-    "  void ptrs;",
-    "  void stereoOut;",
-    "  void stereoTail;",
-    "  void monoTail;",
-    "  void drained;",
-    "  void drainedMono;",
-    "  void drainedF32;",
-    "  void drainedMonoF32;",
-    "  void exportsFromNamed;",
-    "  void exportsFromWasm;",
-    "  void syncExportsFromRoot;",
-    "  void syncExportsFromWasm;",
-    "  return exportsFromRoot;",
-    "}",
-  ];
-
-  const profiles = [
-    {
-      name: "node",
-      compilerOptions: {
-        target: "ES2022",
-        module: "NodeNext",
-        moduleResolution: "NodeNext",
-        lib: ["ES2022"],
-        typeRoots,
-        types: ["node"],
-        strict: true,
-        exactOptionalPropertyTypes: true,
-        skipLibCheck: false,
-      },
-      lines: [
-        'import fs from "node:fs/promises";',
-        ...sharedImportsAndHarmonyChecks,
-        "",
-        "export async function verifyNodeProfile(",
-        "  req: Request,",
-        "  res: Response,",
-        "  url: URL,",
-        "  voices?: number,",
-        "): Promise<void> {",
-        `  const pkgWasmHref: string = import.meta.resolve(${pkgWasmLiteral});`,
-        `  const rootWasmHref: string = import.meta.resolve(${rootWasmLiteral});`,
-        "  await loadTunelet(pkgWasmHref);",
-        "  await loadTunelet(rootWasmHref);",
-        "  await loadTunelet(url);",
-        "  await loadTunelet(req);",
-        "  await loadTunelet(res);",
-        '  await loadTunelet(fetch("https://example.com/tunelet_bg.wasm"));',
-        "  const bytes = await fs.readFile(url);",
-        "  await verifySharedApi(bytes, bytes, voices);",
-        "  // @ts-expect-error window must not leak into Node.js scope",
-        "  void window;",
-        "}",
-        "",
-      ],
-    },
-    {
-      name: "es2023",
-      compilerOptions: {
-        target: "ES2022",
-        module: "NodeNext",
-        moduleResolution: "NodeNext",
-        lib: ["ES2023"],
-        types: [],
-        strict: true,
-        exactOptionalPropertyTypes: true,
-        skipLibCheck: false,
-      },
-      lines: [
-        ...sharedImportsAndHarmonyChecks,
-        "",
-        "export async function verifyEs2023Profile(voices?: number): Promise<void> {",
-        "  const bytes = new Uint8Array(16);",
-        "  await loadTunelet(bytes.buffer);",
-        '  await loadTunelet({ href: "file:///tunelet_bg.wasm", protocol: "file:" });',
-        "  await verifySharedApi(bytes, bytes, voices);",
-        "  // @ts-expect-error window must not leak into pure ES2023 scope",
-        "  void window;",
-        "}",
-        "",
-      ],
-    },
-    {
-      name: "dom",
-      compilerOptions: {
-        target: "ES2022",
-        module: "NodeNext",
-        moduleResolution: "NodeNext",
-        lib: ["ES2022", "DOM"],
-        types: [],
-        strict: true,
-        exactOptionalPropertyTypes: true,
-        skipLibCheck: false,
-      },
-      lines: [
-        ...sharedImportsAndHarmonyChecks,
-        "",
-        "export async function verifyDomProfile(",
-        "  reqInfo: RequestInfo,",
-        "  req: Request,",
-        "  res: Response,",
-        "  url: URL,",
-        "  bufferSource: BufferSource,",
-        "  wasmModule: WebAssembly.Module,",
-        "  wasmMemory: WebAssembly.Memory,",
-        "  voices?: number,",
-        "): Promise<WebAssembly.Memory> {",
-        "  await loadTunelet(reqInfo);",
-        "  await loadTunelet(req);",
-        "  await loadTunelet(res);",
-        '  await loadTunelet(fetch("/tunelet_bg.wasm"));',
-        "  await loadTunelet(url);",
-        "  await loadTunelet(bufferSource);",
-        "  const out = await verifySharedApi(wasmModule, wasmModule, voices);",
-        "  const domProc = new Tunelet(48000, 128);",
-        "  const domViews = new TuneletAudioViews(wasmMemory, domProc);",
-        "  domViews.dispose();",
-        "  domProc.free();",
-        "  const table: WebAssembly.Table = out.__wbindgen_externrefs;",
-        "  void table;",
-        "  void window;",
-        "  return out.memory;",
-        "}",
-        "",
-      ],
-    },
-    {
-      name: "webworker",
-      compilerOptions: {
-        target: "ES2022",
-        module: "NodeNext",
-        moduleResolution: "NodeNext",
-        lib: ["ES2022", "WebWorker"],
-        types: [],
-        strict: true,
-        exactOptionalPropertyTypes: true,
-        skipLibCheck: false,
-      },
-      lines: [
-        ...sharedImportsAndHarmonyChecks,
-        "",
-        "export async function verifyWebWorkerProfile(",
-        "  reqInfo: RequestInfo,",
-        "  res: Response,",
-        "  url: URL,",
-        "  bufferSource: BufferSource,",
-        "  wasmModule: WebAssembly.Module,",
-        "  wasmMemory: WebAssembly.Memory,",
-        "  voices?: number,",
-        "): Promise<WebAssembly.Memory> {",
-        "  await loadTunelet(reqInfo);",
-        "  await loadTunelet(res);",
-        '  await loadTunelet(fetch("/tunelet_bg.wasm"));',
-        "  await loadTunelet(url);",
-        "  await loadTunelet(bufferSource);",
-        "  const out = await verifySharedApi(wasmModule, wasmModule, voices);",
-        "  const workerProc = new Tunelet(48000, 128);",
-        "  const workerViews = new TuneletAudioViews(wasmMemory, workerProc);",
-        "  workerViews.dispose();",
-        "  workerProc.free();",
-        "  const table: WebAssembly.Table = out.__wbindgen_externrefs;",
-        "  void table;",
-        "  void self;",
-        "  // @ts-expect-error window must not leak into WebWorker scope",
-        "  void window;",
-        "  return out.memory;",
-        "}",
-        "",
-      ],
-    },
-  ];
-
-  const tscBin = path.join(
-    repoRoot,
-    "node_modules",
-    "typescript",
-    "bin",
-    "tsc",
-  );
-
-  for (const profile of profiles) {
-    const sourceFile = `check-${profile.name}.ts`;
-    const sourcePath = path.join(consumerDir, sourceFile);
-    const configPath = path.join(consumerDir, `tsconfig.${profile.name}.json`);
-    fs.writeFileSync(sourcePath, profile.lines.join("\n"));
-    fs.writeFileSync(
-      configPath,
-      JSON.stringify({
-        compilerOptions: profile.compilerOptions,
-        files: [sourceFile],
-      }),
-    );
-    execFileSync(
-      process.execPath,
-      [
-        tscBin,
-        "--noEmit",
-        "--strict",
-        "--exactOptionalPropertyTypes",
-        "-p",
-        configPath,
-      ],
-      { cwd: consumerDir, stdio: "inherit" },
+  const relocatedDir = path.join(consumerDir, "relocated");
+  fs.mkdirSync(path.join(relocatedDir, "dist"), { recursive: true });
+  fs.mkdirSync(path.join(relocatedDir, "pkg"), { recursive: true });
+  for (const file of ["node.js", "shared.js"]) {
+    fs.copyFileSync(
+      path.join(installedDir, "dist", file),
+      path.join(relocatedDir, "dist", file),
     );
   }
-}
+  fs.copyFileSync(
+    path.join(installedDir, "pkg", "tunelet.js"),
+    path.join(relocatedDir, "pkg", "tunelet.js"),
+  );
 
-/** Check the archive list, runtime imports and TypeScript declarations. */
-async function verifyPackedArchive(workDir, relativeArchivePath, packageName) {
-  const consumerDir = path.join(workDir, "consumer");
-  fs.mkdirSync(consumerDir);
-  verifyArchiveEntries(workDir, relativeArchivePath);
-  installArchive(workDir, relativeArchivePath, consumerDir, packageName);
-  verifyRuntimeImport(consumerDir, packageName);
-  await verifyHttpLoaders(consumerDir, packageName);
-  verifyTypeDeclarations(consumerDir, packageName);
-  verifyNormalizedJsDoc(consumerDir, packageName);
+  const flatBundlePath = path.join(consumerDir, "flat-node-bundle.mjs");
+  const wasmGlue = fs
+    .readFileSync(path.join(installedDir, "pkg", "tunelet.js"), "utf8")
+    .replace(
+      "export { initSync, __wbg_init as default };",
+      "const init = __wbg_init;\nexport { initSync };",
+    );
+  const sharedGlue = fs
+    .readFileSync(path.join(installedDir, "dist", "shared.js"), "utf8")
+    .replace(/^import init from "\.\.\/pkg\/tunelet\.js";\r?\n/m, "")
+    .replace(/^export \{ init \};\r?\n/m, "")
+    .replace(/^export function loadOnce\(/m, "function loadOnce(")
+    .replace(/^export function isUrlLike\(/m, "function isUrlLike(");
+  const nodeGlue = fs
+    .readFileSync(path.join(installedDir, "dist", "node.js"), "utf8")
+    .replace(
+      /^import \{ init, isUrlLike, loadOnce, TuneletAudioViews \} from "\.\/shared\.js";\r?\n/m,
+      "",
+    )
+    .replace(/^export \* from "\.\.\/pkg\/tunelet\.js";\r?\n/m, "")
+    .replace(/^export \{ TuneletAudioViews \};\r?\n/m, "");
+  fs.writeFileSync(
+    flatBundlePath,
+    `${wasmGlue}\n${sharedGlue}\n${nodeGlue}\n`,
+    "utf8",
+  );
+
+  runNodeCheck(consumerDir, "check-flat-bundle.mjs", [
+    'import assert from "node:assert/strict";',
+    'import * as relocated from "./relocated/dist/node.js";',
+    "",
+    "await relocated.loadTunelet();",
+    "assert.equal(relocated.defaultConfig().resynthesis.harmony.voices, 4);",
+  ]);
+
+  runNodeCheck(consumerDir, "check-inlined-flat-bundle.mjs", [
+    'import assert from "node:assert/strict";',
+    'import * as flatBundle from "./flat-node-bundle.mjs";',
+    "",
+    "const wasmExports = await flatBundle.loadTunelet();",
+    "const processor = new flatBundle.Tunelet(48000, 64);",
+    "const views = new flatBundle.TuneletAudioViews(wasmExports.memory, processor);",
+    "try {",
+    "  views.input.fill(0);",
+    "  processor.processMonoF32InPlace(64);",
+    "  const audio = new Int16Array(64);",
+    "  processor.processMono(audio);",
+    "} finally {",
+    "  views.dispose();",
+    "  processor.free();",
+    "}",
+  ]);
+
+  const corruptDir = path.join(consumerDir, "corrupt");
+  fs.mkdirSync(path.join(corruptDir, "dist"), { recursive: true });
+  fs.mkdirSync(path.join(corruptDir, "pkg"), { recursive: true });
+  for (const file of ["node.js", "shared.js"]) {
+    fs.copyFileSync(
+      path.join(installedDir, "dist", file),
+      path.join(corruptDir, "dist", file),
+    );
+  }
+  fs.copyFileSync(
+    path.join(installedDir, "pkg", "tunelet.js"),
+    path.join(corruptDir, "pkg", "tunelet.js"),
+  );
+  fs.writeFileSync(
+    path.join(corruptDir, "pkg", "tunelet_bg.wasm"),
+    Uint8Array.of(0, 97, 115, 109, 99),
+  );
+
+  runNodeCheck(consumerDir, "check-corrupt-wasm.mjs", [
+    'import assert from "node:assert/strict";',
+    'import * as corrupt from "./corrupt/dist/node.js";',
+    "",
+    "await assert.rejects(() => corrupt.loadTunelet(), WebAssembly.CompileError);",
+  ]);
 }
 
 /** Extract JSDoc comment blocks from a file and strip their comment markers. */
@@ -1109,15 +1023,16 @@ function extractMemberJsDoc(source, pattern, label) {
 }
 
 /** Check that packed JSDoc comments contain clean TypeScript documentation. */
-function verifyNormalizedJsDoc(consumerDir, packageName) {
-  const installedDir = path.join(
-    consumerDir,
-    "node_modules",
-    ...packageName.split("/"),
-  );
+function verifyNormalizedJsDoc(installedDir) {
   const filesToCheck = [
+    path.join(installedDir, "dist", "browser.d.ts"),
+    path.join(installedDir, "dist", "browser.js"),
     path.join(installedDir, "dist", "index.d.ts"),
     path.join(installedDir, "dist", "index.js"),
+    path.join(installedDir, "dist", "node.d.ts"),
+    path.join(installedDir, "dist", "node.js"),
+    path.join(installedDir, "dist", "shared.d.ts"),
+    path.join(installedDir, "dist", "shared.js"),
     path.join(installedDir, "pkg", "tunelet.d.ts"),
     path.join(installedDir, "pkg", "tunelet.js"),
   ];
@@ -1337,12 +1252,7 @@ function startWasmServer(wasmBytes) {
 }
 
 /** Check the HTTP Wasm loaders in isolated Node.js child processes. */
-async function verifyHttpLoaders(consumerDir, packageName) {
-  const installedDir = path.join(
-    consumerDir,
-    "node_modules",
-    ...packageName.split("/"),
-  );
+async function verifyHttpLoaders(consumerDir, installedDir, packageName) {
   const wasmBytes = fs.readFileSync(
     path.join(installedDir, "pkg", "tunelet_bg.wasm"),
   );
@@ -1352,9 +1262,9 @@ async function verifyHttpLoaders(consumerDir, packageName) {
     checkHttpPath,
     [
       'import assert from "node:assert/strict";',
+      'import { pathToFileURL } from "node:url";',
       "",
-      "const [packageName, mode, baseUrl] = process.argv.slice(2);",
-      "const rootModule = await import(packageName);",
+      "const [packageName, installedDir, mode, baseUrl] = process.argv.slice(2);",
       "",
       "function verifyPcmBlock(moduleNamespace) {",
       "  const config = moduleNamespace.defaultConfig();",
@@ -1377,6 +1287,7 @@ async function verifyHttpLoaders(consumerDir, packageName) {
       "}",
       "",
       'if (mode === "http-404-retry") {',
+      "  const rootModule = await import(packageName);",
       "  await assert.rejects(",
       "    () => rootModule.loadTunelet(`${baseUrl}/missing.wasm`),",
       "    /404/,",
@@ -1387,6 +1298,7 @@ async function verifyHttpLoaders(consumerDir, packageName) {
       "  assert.equal(cachedExports, wasmExports);",
       "  verifyPcmBlock(rootModule);",
       '} else if (mode === "http-response-wasm") {',
+      "  const rootModule = await import(packageName);",
       "  const response = await fetch(`${baseUrl}/tunelet.wasm`);",
       "  assert.equal(response.ok, true);",
       '  assert.equal(response.headers.get("Content-Type"), "application/wasm");',
@@ -1420,6 +1332,7 @@ async function verifyHttpLoaders(consumerDir, packageName) {
       "  assert.equal(warnings.length, 0);",
       "  verifyPcmBlock(rootModule);",
       '} else if (mode === "http-response-octet-stream") {',
+      "  const rootModule = await import(packageName);",
       "  const response = await fetch(`${baseUrl}/octet-stream.wasm`);",
       "  assert.equal(response.ok, true);",
       '  assert.equal(response.headers.get("Content-Type"), "application/octet-stream");',
@@ -1460,6 +1373,18 @@ async function verifyHttpLoaders(consumerDir, packageName) {
       "  assert.equal(warnings.length, 1);",
       "  assert.match(String(warnings[0][0]), /application\\/wasm/);",
       "  verifyPcmBlock(rootModule);",
+      '} else if (mode === "browser-entry-http") {',
+      "  const browserModule = await import(pathToFileURL(`${installedDir}/dist/browser.js`).href);",
+      "  const crossRealmHttpUrl = { href: `${baseUrl}/tunelet.wasm`, protocol: \"http:\" };",
+      "  assert.equal(crossRealmHttpUrl instanceof URL, false);",
+      "  const wasmExports = await browserModule.loadTunelet(crossRealmHttpUrl);",
+      "  assert.ok(wasmExports);",
+      "  verifyPcmBlock(browserModule);",
+      '} else if (mode === "index-entry-http") {',
+      "  const indexModule = await import(pathToFileURL(`${installedDir}/dist/index.js`).href);",
+      "  const wasmExports = await indexModule.loadTunelet(`${baseUrl}/tunelet.wasm`);",
+      "  assert.ok(wasmExports);",
+      "  verifyPcmBlock(indexModule);",
       "} else {",
       "  throw new Error(`Unknown HTTP loader mode: ${mode}`);",
       "}",
@@ -1473,20 +1398,436 @@ async function verifyHttpLoaders(consumerDir, packageName) {
       "http-404-retry",
       "http-response-wasm",
       "http-response-octet-stream",
+      "browser-entry-http",
+      "index-entry-http",
     ];
     for (const mode of modes) {
       await runNodeScript(
         checkHttpPath,
-        [packageName, mode, server.baseUrl],
+        [packageName, installedDir, mode, server.baseUrl],
         consumerDir,
       );
     }
     assert.equal(server.requestCounts.get("/missing.wasm"), 1);
-    assert.equal(server.requestCounts.get("/tunelet.wasm"), 2);
+    assert.equal(server.requestCounts.get("/tunelet.wasm"), 4);
     assert.equal(server.requestCounts.get("/octet-stream.wasm"), 1);
   } finally {
     await server.close();
   }
+}
+
+/** Run `tsc` with a strict profile configuration and zero `skipLibCheck`. */
+function runTscProfile(consumerDir, tscBin, profileName, compilerOptions, code) {
+  const tsPath = path.join(consumerDir, `check-${profileName}.ts`);
+  const configPath = path.join(consumerDir, `tsconfig.${profileName}.json`);
+  fs.writeFileSync(tsPath, `${code.join("\n")}\n`, "utf8");
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify(
+      {
+        compilerOptions: {
+          strict: true,
+          exactOptionalPropertyTypes: true,
+          skipLibCheck: false,
+          noEmit: true,
+          ...compilerOptions,
+        },
+        files: [tsPath],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  execFileSync(process.execPath, [tscBin, "-p", configPath], {
+    cwd: consumerDir,
+    stdio: "inherit",
+  });
+}
+
+/** Check strict TypeScript resolution across Node, ES2023, DOM and WebWorker. */
+function verifyTypeDeclarations(consumerDir, installedDir, packageName) {
+  const pkgLiteral = JSON.stringify(packageName);
+  const wasmLiteral = JSON.stringify(`${packageName}/wasm`);
+  const pkgWasmLiteral = JSON.stringify(`${packageName}/pkg/tunelet_bg.wasm`);
+  const rootWasmLiteral = JSON.stringify(`${packageName}/tunelet_bg.wasm`);
+  const directIndexLiteral = JSON.stringify(
+    `./${path.posix.join(...path.relative(consumerDir, path.join(installedDir, "dist", "index.js")).split(path.sep))}`,
+  );
+  const tscBin = path.join(
+    repoRoot,
+    "node_modules",
+    "typescript",
+    "bin",
+    "tsc",
+  );
+  const typeRoots = [path.join(repoRoot, "node_modules", "@types")];
+
+  const sharedAssertions = [
+    "import loadTunelet, {",
+    "  defaultConfig,",
+    "  initSync as rootInitSync,",
+    "  loadTunelet as namedLoadTunelet,",
+    "  Tunelet,",
+    "  TuneletAudioViews,",
+    "  type ControlActivity,",
+    "  type ControlEvent,",
+    "  type HarmonyConfig,",
+    "  type ParameterControl,",
+    "  type ProcessorConfig,",
+    "  type ResynthesisConfig,",
+    "  type SyncInitInput as RootSyncInitInput,",
+    "  type Telemetry,",
+    `} from ${pkgLiteral};`,
+    `import indexDefaultLoad, { loadTunelet as indexLoadTunelet, Tunelet as IndexTunelet, TuneletAudioViews as IndexTuneletAudioViews, type ParameterControl as IndexParameterControl } from ${directIndexLiteral};`,
+    "import init, {",
+    "  initSync as wasmInitSync,",
+    "  type InitInput,",
+    "  type InitOutput,",
+    "  type ParameterControl as WasmParameterControl,",
+    "  type SyncInitInput,",
+    `} from ${wasmLiteral};`,
+    "",
+    "export async function verifyShared(",
+    "  source?: InitInput,",
+    "  syncSource?: SyncInitInput & RootSyncInitInput,",
+    "  optionalVoices?: number,",
+    "): Promise<InitOutput> {",
+    "  const exportsFromRoot: InitOutput = await loadTunelet(source);",
+    "  const exportsFromNamed: InitOutput = await namedLoadTunelet(source);",
+    "  const exportsFromIndex: InitOutput = await indexLoadTunelet(source);",
+    "  const exportsFromIndexDefault: InitOutput = await indexDefaultLoad(source);",
+    "  const exportsFromWasm: InitOutput =",
+    "    source === undefined",
+    "      ? await init()",
+    "      : await init({ module_or_path: source });",
+    "  const baseConfig: ProcessorConfig = defaultConfig();",
+    "  const harmony: HarmonyConfig = {",
+    "    ...baseConfig.resynthesis.harmony,",
+    "    voices: optionalVoices,",
+    "  };",
+    "  const config: ProcessorConfig = {",
+    "    ...baseConfig,",
+    "    resynthesis: {",
+    "      ...baseConfig.resynthesis,",
+    "      correction: {",
+    "        ...baseConfig.resynthesis.correction,",
+    "        humanize: optionalVoices,",
+    "        flexTune: optionalVoices,",
+    "      },",
+    "      harmony,",
+    "    },",
+    "  };",
+    "  config.resynthesis.harmony.voices = undefined;",
+    "  {",
+    "    using disposableProcessor = new Tunelet(48000, 128, config);",
+    "    using disposableViews = new TuneletAudioViews(",
+    "      exportsFromRoot.memory,",
+    "      disposableProcessor,",
+    "    );",
+    "    const activity: ControlActivity = disposableProcessor.controlActivity();",
+    "    void activity;",
+    "    disposableViews.input.fill(0);",
+    "    disposableProcessor.reset();",
+    "  }",
+    "  {",
+    "    using disposableIndexProcessor = new IndexTunelet(48000, 128, config);",
+    "    using disposableIndexViews = new IndexTuneletAudioViews(",
+    "      exportsFromIndex.memory,",
+    "      disposableIndexProcessor,",
+    "    );",
+    "    disposableIndexViews.input.fill(0);",
+    "    disposableIndexProcessor.reset();",
+    "  }",
+    "  const processor = new Tunelet(48000, 128, config);",
+    "  processor.setConfig(config);",
+    "  const telemetry: Telemetry = processor.telemetry();",
+    "  const voiceSlices: [Float32Array, Float32Array] = [",
+    "    telemetry.voiceRatios,",
+    "    telemetry.voiceGains,",
+    "  ];",
+    "  const views = new TuneletAudioViews(exportsFromRoot.memory, processor);",
+    "  const ptrs: [number, number, number] = [",
+    "    processor.inputF32Ptr,",
+    "    processor.leftF32Ptr,",
+    "    processor.rightF32Ptr,",
+    "  ];",
+    "  views.input.fill(0);",
+    "  processor.processF32InPlace(128);",
+    "  const stereoOut: [Float32Array, Float32Array] = [views.left, views.right];",
+    "  processor.processMonoF32InPlace(128);",
+    "  processor.beginDrain();",
+    "  const stereoTail: number = processor.drainF32InPlace(128);",
+    "  const monoTail: number = processor.drainMonoF32InPlace(128);",
+    "  views.refresh();",
+    "  const resynthesisUpdate: ResynthesisConfig = {",
+    "    ...config.resynthesis,",
+    "    correction: {",
+    "      enabled: config.resynthesis.correction.enabled,",
+    "      notes: config.resynthesis.correction.notes,",
+    "      retuneMs: config.resynthesis.correction.retuneMs,",
+    "    },",
+    "    harmony: {",
+    "      ...config.resynthesis.harmony,",
+    "      voices: optionalVoices,",
+    "    },",
+    "  };",
+    "  const input = new Int16Array(128);",
+    "  const left = new Int16Array(128);",
+    "  const right = new Int16Array(128);",
+    "  processor.processMono(input, [",
+    '    { offset: 0, event: { type: "resynthesis", value: resynthesisUpdate } },',
+    "  ]);",
+    '  const dryMixParameter: ParameterControl & IndexParameterControl & WasmParameterControl = { type: "dryMix", value: 0.25 };',
+    '  const humanizeParameter: ParameterControl & WasmParameterControl = { type: "humanize", value: 0.5 };',
+    '  const flexTuneParameter: ParameterControl & WasmParameterControl = { type: "flexTune", value: 0.25 };',
+    '  const parameterEvent: ControlEvent = { type: "parameter", value: dryMixParameter };',
+    "  processor.process(input, left, right, [",
+    "    { offset: 0, event: parameterEvent },",
+    '    { offset: 0, event: { type: "parameter", value: humanizeParameter } },',
+    '    { offset: 0, event: { type: "parameter", value: flexTuneParameter } },',
+    "  ]);",
+    "  processor.beginDrain();",
+    "  const drained: number = processor.drain(left, right);",
+    "  const drainedMono: number = processor.drainMono(input);",
+    "  const inputF32 = new Float32Array(128);",
+    "  const leftF32 = new Float32Array(128);",
+    "  const rightF32 = new Float32Array(128);",
+    "  processor.processF32(inputF32, leftF32, rightF32);",
+    "  processor.processF32(inputF32, leftF32, rightF32, [",
+    '    { offset: 0, event: { type: "outputGain", value: 1 } },',
+    "    { offset: 0, event: parameterEvent },",
+    "  ]);",
+    "  processor.processMonoF32(inputF32);",
+    "  processor.beginDrain();",
+    "  const drainedF32: number = processor.drainF32(leftF32, rightF32);",
+    "  const drainedMonoF32: number = processor.drainMonoF32(inputF32);",
+    "  views.dispose();",
+    "  processor.free();",
+    "  if (syncSource !== undefined) {",
+    "    const syncExportsFromRoot: InitOutput = rootInitSync({",
+    "      module: syncSource,",
+    "    });",
+    "    const syncExportsFromWasm: InitOutput = wasmInitSync({",
+    "      module: syncSource,",
+    "    });",
+    "    void syncExportsFromRoot;",
+    "    void syncExportsFromWasm;",
+    "  }",
+    "  const fixedBuffer: ArrayBuffer = exportsFromRoot.memory.toFixedLengthBuffer();",
+    "  const resizableBuffer: ArrayBuffer = exportsFromRoot.memory.toResizableBuffer();",
+    "  void voiceSlices;",
+    "  void ptrs;",
+    "  void stereoOut;",
+    "  void stereoTail;",
+    "  void monoTail;",
+    "  void drained;",
+    "  void drainedMono;",
+    "  void drainedF32;",
+    "  void drainedMonoF32;",
+    "  void fixedBuffer;",
+    "  void resizableBuffer;",
+    "  void exportsFromNamed;",
+    "  void exportsFromIndex;",
+    "  void exportsFromIndexDefault;",
+    "  void exportsFromWasm;",
+    "  return exportsFromRoot;",
+    "}",
+  ];
+
+  runTscProfile(
+    consumerDir,
+    tscBin,
+    "node",
+    {
+      target: "ES2022",
+      module: "NodeNext",
+      moduleResolution: "NodeNext",
+      lib: ["ES2022"],
+      typeRoots,
+      types: ["node"],
+    },
+    [
+      'import fs from "node:fs/promises";',
+      ...sharedAssertions,
+      "",
+      "export async function verifyNodeInputs(",
+      "  req: Request,",
+      "  res: Response,",
+      "  url: URL,",
+      "  voices?: number,",
+      "): Promise<void> {",
+      `  const pkgWasmHref: string = import.meta.resolve(${pkgWasmLiteral});`,
+      `  const rootWasmHref: string = import.meta.resolve(${rootWasmLiteral});`,
+      "  await loadTunelet(pkgWasmHref);",
+      "  await loadTunelet(rootWasmHref);",
+      '  await loadTunelet("file:///tmp/tunelet_bg.wasm");',
+      "  await loadTunelet(url);",
+      "  await loadTunelet(req);",
+      "  await loadTunelet(res);",
+      '  await loadTunelet(fetch("https://example.com/tunelet_bg.wasm"));',
+      "  const bytes = await fs.readFile(url);",
+      "  await verifyShared(bytes, bytes, voices);",
+      "  // @ts-expect-error window must not leak into Node.js scope",
+      "  void window;",
+      "}",
+    ],
+  );
+
+  runTscProfile(
+    consumerDir,
+    tscBin,
+    "es2023-bundler",
+    {
+      target: "ES2022",
+      module: "ES2022",
+      moduleResolution: "Bundler",
+      lib: ["ES2023"],
+      types: [],
+    },
+    [
+      ...sharedAssertions,
+      "",
+      "export async function verifyEs2023Inputs(voices?: number): Promise<void> {",
+      "  const bytes = new Uint8Array(8);",
+      '  await loadTunelet("https://example.com/tunelet_bg.wasm");',
+      '  await loadTunelet({ href: "file:///tunelet_bg.wasm", protocol: "file:" });',
+      "  await loadTunelet(bytes);",
+      "  await loadTunelet(bytes.buffer);",
+      "  await verifyShared(bytes, bytes, voices);",
+      "  // @ts-expect-error window must not leak into pure ES2023 scope",
+      "  void window;",
+      "}",
+    ],
+  );
+
+  runTscProfile(
+    consumerDir,
+    tscBin,
+    "es2023-nodenext",
+    {
+      target: "ES2022",
+      module: "NodeNext",
+      moduleResolution: "NodeNext",
+      lib: ["ES2023"],
+      types: [],
+    },
+    [
+      ...sharedAssertions,
+      "",
+      "export async function verifyEs2023NodeNext(voices?: number): Promise<void> {",
+      "  const bytes = new Uint8Array(16);",
+      "  await verifyShared(bytes, bytes, voices);",
+      "  // @ts-expect-error window must not leak into pure ES2023 scope",
+      "  void window;",
+      "}",
+    ],
+  );
+
+  runTscProfile(
+    consumerDir,
+    tscBin,
+    "dom",
+    {
+      target: "ES2022",
+      module: "ES2022",
+      moduleResolution: "Bundler",
+      customConditions: ["browser"],
+      lib: ["ES2022", "DOM"],
+      types: [],
+    },
+    [
+      ...sharedAssertions,
+      "",
+      "export async function verifyDomInputs(",
+      "  reqInfo: RequestInfo,",
+      "  req: Request,",
+      "  res: Response,",
+      "  bufferSource: BufferSource,",
+      "  compiled: WebAssembly.Module,",
+      "  wasmMemory: WebAssembly.Memory,",
+      "  voices?: number,",
+      "): Promise<WebAssembly.Memory> {",
+      "  await loadTunelet(reqInfo);",
+      "  await loadTunelet(req);",
+      "  await loadTunelet(res);",
+      "  await loadTunelet(bufferSource);",
+      '  await loadTunelet(new URL("./tunelet_bg.wasm", import.meta.url));',
+      '  await loadTunelet(fetch("https://example.com/tunelet_bg.wasm"));',
+      "  const out = await verifyShared(compiled, compiled, voices);",
+      "  const domProc = new Tunelet(48000, 128);",
+      "  const domViews = new TuneletAudioViews(wasmMemory, domProc);",
+      "  domViews.dispose();",
+      "  domProc.free();",
+      "  const table: WebAssembly.Table = out.__wbindgen_externrefs;",
+      "  void table;",
+      "  void window;",
+      "  return out.memory;",
+      "}",
+    ],
+  );
+
+  runTscProfile(
+    consumerDir,
+    tscBin,
+    "webworker",
+    {
+      target: "ES2022",
+      module: "ES2022",
+      moduleResolution: "Bundler",
+      lib: ["ES2022", "WebWorker"],
+      types: [],
+    },
+    [
+      ...sharedAssertions,
+      "",
+      "export async function verifyWorkerInputs(",
+      "  reqInfo: RequestInfo,",
+      "  req: Request,",
+      "  res: Response,",
+      "  bufferSource: BufferSource,",
+      "  compiled: WebAssembly.Module,",
+      "  wasmMemory: WebAssembly.Memory,",
+      "  voices?: number,",
+      "): Promise<WebAssembly.Memory> {",
+      "  await loadTunelet(reqInfo);",
+      "  await loadTunelet(req);",
+      "  await loadTunelet(res);",
+      "  await loadTunelet(bufferSource);",
+      '  await loadTunelet(new URL("./tunelet_bg.wasm", self.location.href));',
+      '  await loadTunelet(fetch("https://example.com/tunelet_bg.wasm"));',
+      "  const out = await verifyShared(compiled, compiled, voices);",
+      "  const workerProc = new Tunelet(48000, 128);",
+      "  const workerViews = new TuneletAudioViews(wasmMemory, workerProc);",
+      "  workerViews.dispose();",
+      "  workerProc.free();",
+      "  const table: WebAssembly.Table = out.__wbindgen_externrefs;",
+      "  void table;",
+      "  void self;",
+      "  // @ts-expect-error window must not leak into WebWorker scope",
+      "  void window;",
+      "  return out.memory;",
+      "}",
+    ],
+  );
+}
+
+/** Check the archive list, runtime imports, HTTP loaders, types and JSDoc. */
+async function verifyPackedArchive(workDir, relativeArchivePath, packageName) {
+  const consumerDir = path.join(workDir, "consumer");
+  fs.mkdirSync(consumerDir);
+  verifyArchiveEntries(workDir, relativeArchivePath);
+  const installedDir = installArchive(
+    workDir,
+    relativeArchivePath,
+    consumerDir,
+    packageName,
+  );
+  verifyInstalledFiles(installedDir);
+  verifyRuntimeImport(consumerDir, installedDir, packageName);
+  await verifyHttpLoaders(consumerDir, installedDir, packageName);
+  verifyTypeDeclarations(consumerDir, installedDir, packageName);
+  verifyNormalizedJsDoc(installedDir);
 }
 
 /** Copy both verified archives and write `SHA256SUMS.txt` in `outDir`. */

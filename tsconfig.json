@@ -12,5 +12,5 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "include": ["src/index.ts"]
+  "include": ["src/browser.ts", "src/index.ts", "src/node.ts", "src/shared.ts"]
 }

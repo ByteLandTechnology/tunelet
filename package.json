@@ -12,8 +12,19 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "browser": {
+        "types": "./dist/browser.d.ts",
+        "import": "./dist/browser.js",
+        "default": "./dist/browser.js"
+      },
+      "node": {
+        "types": "./dist/node.d.ts",
+        "import": "./dist/node.js",
+        "default": "./dist/node.js"
+      },
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js",
+      "default": "./dist/browser.js"
     },
     "./wasm": {
       "types": "./pkg/tunelet.d.ts",
@@ -32,7 +43,7 @@
   "scripts": {
     "build": "npm run build:wasm && npm run build:ts",
     "build:wasm": "wasm-pack build --target web --out-dir pkg --release --no-pack --features wasm --locked && node scripts/postbuild-wasm.mjs && node scripts/normalize-jsdoc.mjs",
-    "build:ts": "tsc",
+    "build:ts": "node --input-type=module -e \"import fs from 'node:fs'; fs.rmSync('dist', { recursive: true, force: true })\" && tsc",
     "check:wasm": "cargo clippy --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings && cargo rustdoc --locked --release --lib --target wasm32-unknown-unknown --features wasm -- -D warnings",
     "prepack": "npm run build",
     "prepare": "git config core.hooksPath .githooks || true",

@@ -429,12 +429,13 @@ For `wasm32-unknown-unknown`, the optional `wasm` feature of the crate gives
 JavaScript bindings and generated TypeScript declarations. The npm package
 contains these bindings.
 
-The npm package is one ES module for both browsers and Node.js. It contains
-these items:
+The npm package gives conditional ES module entries for Node.js and browsers,
+and keeps the shared `dist/index.js` entry. It contains these items:
 
 - One Wasm binary.
 - The generated bindings.
-- A shared `loadTunelet` entry point.
+- Conditional `node` (`dist/node.js`) and `browser` (`dist/browser.js`)
+  `loadTunelet` entries, and `dist/index.js`, with the same API.
 
 ### Load the module
 
@@ -442,18 +443,22 @@ Both environments use the same imports and the same initialization call. An
 import of the package does not load the binary. Call `loadTunelet()` before
 you use `Tunelet` or `defaultConfig()`.
 
-- Node.js reads the packaged binary from a file URL relative to the module.
-- Browsers fetch the served Wasm asset.
+- Node.js reads `../pkg/tunelet_bg.wasm` relative to `dist/node.js`. If a
+  bundler moves the entry, Node.js resolves `pkg/tunelet_bg.wasm` from the
+  installed package.
+- Browsers and bundlers use `dist/browser.js` and fetch the served Wasm asset
+  without Node.js imports.
+- `dist/index.js` keeps the `main` entry and supports direct browser imports.
 
 Concurrent calls share one initialization promise. The package keeps the
 result of a successful initialization. If a load fails, the promise rejects,
-and you can try again. A Node.js file error goes to the caller.
+and you can try again. File, network and Wasm errors go to the caller.
 
 For a custom asset location, give one of these sources to
 `loadTunelet(source)`:
 
 - A URL or URL string.
-- A fetch Response.
+- A fetch Request or Response.
 - A byte buffer.
 - A compiled `WebAssembly.Module`.
 - A promise for one of these.
@@ -476,11 +481,12 @@ The package gives only ESM exports. CommonJS applications can use
 ### Deployment
 
 Browser bundlers must keep or emit the Wasm asset that
-`new URL(..., import.meta.url)` refers to. For a browser deployment without a
-bundler, do these steps:
+`new URL(..., import.meta.url)` refers to, or resolve `tunelet/tunelet_bg.wasm`.
+For a browser deployment without a bundler, do these steps:
 
 1. Serve `dist/` and `pkg/`, and keep their relative layout.
-2. Map the `tunelet` import to `dist/index.js`, or import that URL directly.
+2. Map the `tunelet` import to `dist/index.js` or `dist/browser.js`, or
+   import that URL directly.
 
 Serve the assets over HTTP(S). The package does not support a local `file:`
 page that opens the JavaScript.
@@ -705,7 +711,7 @@ npm pack
 
 `npm run check:wasm` runs Clippy and rustdoc in release mode for
 `wasm32-unknown-unknown`. `npm pack` builds the Wasm bindings and the
-TypeScript entry point. Then it creates `tunelet-<version>.tgz`. To use
+TypeScript entries. Then it creates `tunelet-<version>.tgz`. To use
 this archive in a browser project or a Node.js project, install it with
 this command:
 
@@ -714,10 +720,11 @@ npm install /path/to/tunelet-<version>.tgz
 ```
 
 To build without an archive, run `npm run build`. The build writes one
-`web`-target binding into `pkg/` and the shared entry into `dist/`. Git
+`web`-target binding into `pkg/` and compiles `src/browser.ts`,
+`src/node.ts`, `src/index.ts` and `src/shared.ts` into `dist/`. Git
 ignores both directories. The archive contains only these items:
 
-- The runtime entry.
+- The runtime entries.
 - The declarations.
 - The bindings.
 - The binary.
