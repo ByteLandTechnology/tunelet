@@ -205,8 +205,15 @@ The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
 voices. The other voices release with the usual gain envelope. The chord
 and MIDI sources ignore this field.
 
-`resynthesis.harmony_gain` scales the four harmony voices in mono and in
-stereo. It does not scale the lead voice.
+`resynthesis.lead_gain` (`0..=1`, default `1`) scales the lead voice in
+`Harmony` mode. `resynthesis.harmony_gain` (`0..=1`, default `0.5`) sets the
+master gain of the four harmony voices in mono and in stereo. In
+`resynthesis.harmony`, `voice_gains` (`0..=1`), `voice_pans` (`-1..=1`, when
+`stereo_output` is `true`) and `voice_mutes` control the mix of each harmony
+voice. When `resynthesis.formant.enabled` is `true`, `voice_formant_stretch`
+and `voice_formant_width` (`0.5..=2`, default `[1, 1, 1, 1]`) shape an
+independent LPC synthesis filter for each harmony voice before the stereo pan
+sum.
 
 ## Process audio
 
@@ -364,9 +371,10 @@ These calls read the state of the processor. They do not change the audio.
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
 
 `Processor::control_activity()` and `ProcessorConfig::control_activity()`
-return a `ControlActivity` struct. A `false` flag means that the related
-control makes no sample change in the active voice mode, harmony source or
-reverb network.
+return a `ControlActivity` struct. Its boolean flags cover the conditional
+choir controls, `lead_gain`, `harmony_gain`, the `HarmonyConfig` fields and the
+`ReverbConfig` fields. A `false` flag means that the related control makes no
+sample change in the active voice, stereo, harmony, formant or reverb settings.
 
 The telemetry includes these items:
 
@@ -386,11 +394,14 @@ choir delays and effects use different delays.
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
 
 - The vocal-tract envelope from the analysis.
-- The envelope after the width and stretch controls.
+- The lead (slot 0) synthesis envelope after `formant.width` and
+  `formant.stretch`.
 
-The values are linear and have no absolute level. The formant stage must be
-enabled. The envelopes are those of the model that the audio used for the
-last frame. The method returns `Result<bool, Error>`:
+The output envelope reflects the lead vocal-tract model, not
+`voice_formant_width` or `voice_formant_stretch`. The values are linear and
+have no absolute level. The formant stage must be enabled. The envelopes are
+those of the model that the audio used for the last frame. The method returns
+`Result<bool, Error>`:
 
 | Result      | Description                                                      |
 | ----------- | ---------------------------------------------------------------- |
@@ -579,11 +590,19 @@ and show enums as string literals. To change the configuration, do these steps:
 
 If a required field is absent or a value is not valid, the call throws a
 JavaScript `Error`. If an optional field is absent or `undefined`, it gets its
-default. `resynthesis.correction.humanize` and
-`resynthesis.correction.flexTune` default to 0, and
-`resynthesis.harmony.voices` defaults to 4. The conversion ignores extra object
-properties. The generated declarations contain the parameter documentation from
-the Rust types.
+default:
+
+- `resynthesis.correction.humanize` and `resynthesis.correction.flexTune`
+  default to `0`.
+- `resynthesis.leadGain` defaults to `1`.
+- `resynthesis.harmony.voices` defaults to `4`.
+- `resynthesis.harmony.voiceGains`, `voiceFormantStretch` and
+  `voiceFormantWidth` default to `[1, 1, 1, 1]`.
+- `resynthesis.harmony.voicePans` defaults to `[-1/3, 1/3, -1, 1]`.
+- `resynthesis.harmony.voiceMutes` defaults to `[false, false, false, false]`.
+
+The conversion ignores extra object properties. The generated declarations
+contain the parameter documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
@@ -631,7 +650,8 @@ which are also the cases where `voiced` is `false`:
   `resynthesis.pitch.minFrequencyHz` and `resynthesis.pitch.maxFrequencyHz`.
 
 `formantEnvelope(maxFrequencyHz, input, output)` fills two `Float32Array`
-buffers of equal length and returns `false` if no envelope is available.
+buffers of equal length with the analysis envelope and the lead (slot 0)
+synthesis envelope. It returns `false` if no envelope is available.
 In that case, it fills both buffers with zeros. If the lengths are not equal
 or the frequency is not valid, it throws and does not change the buffers. The
 frequency must be finite, more than zero and not more than half of the sample

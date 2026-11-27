@@ -504,8 +504,8 @@ impl Processor {
     /// the current configuration.
     ///
     /// A `false` flag means that the related control makes no sample change in
-    /// the active voice mode, harmony source or reverb network. This method
-    /// does not allocate memory and does not change state.
+    /// the active voice, stereo, harmony, formant or reverb settings. This
+    /// method does not allocate memory and does not change state.
     pub fn control_activity(&self) -> ControlActivity {
         self.config.control_activity()
     }
@@ -604,14 +604,18 @@ impl Processor {
         self.reverb.clear_wet_peak();
     }
 
-    /// Writes the formant envelopes of the model that the audio used for the
+    /// Writes the formant envelopes of the lead vocal-tract model from the
     /// last frame.
     ///
     /// `input` gets the vocal-tract envelope that the LPC analysis found.
-    /// `output` gets the envelope after the width and stretch controls. Point
-    /// `k` of `n` is at the frequency `max_frequency_hz * k / (n - 1)`. The
-    /// values are linear magnitudes. They have no absolute level, because the
-    /// analysis normalizes the signal energy. Scale them for a display.
+    /// `output` gets the lead (slot 0) synthesis envelope after
+    /// [`crate::FormantConfig::width`] and [`crate::FormantConfig::stretch`].
+    /// It does not include [`crate::HarmonyConfig::voice_formant_width`] or
+    /// [`crate::HarmonyConfig::voice_formant_stretch`].
+    ///
+    /// Point `k` of `n` is at the frequency `max_frequency_hz * k / (n - 1)`.
+    /// The values are linear magnitudes. They have no absolute level, because
+    /// the analysis normalizes the signal energy. Scale them for a display.
     ///
     /// `max_frequency_hz` must be finite, more than zero and not more than
     /// half of the sample rate. The two slices must have the same length.
@@ -1267,12 +1271,16 @@ pub struct Telemetry {
     /// [`voice_ratios`](Self::voice_ratios).
     ///
     /// The lead and the choir voices have a gain of 1. The gain of a harmony
-    /// voice includes the MIDI velocity gain, in 0..=3.98095703125. MIDI
-    /// velocity 127 gives the maximum, approximately +12 dB. The gain is zero
-    /// for a voice that does not sound. It does not include the configured
-    /// harmony level or the pan. The harmony controller updates it every 101
-    /// frames. In JavaScript, this field is a `Float32Array` of length
-    /// `voiceCount`.
+    /// voice is its controller envelope, in 0..=3.98095703125. This envelope
+    /// includes the MIDI velocity gain, where velocity 127 gives the maximum,
+    /// approximately +12 dB. The envelope is zero for an inactive harmony
+    /// voice. The harmony controller updates its envelopes every 101 frames.
+    ///
+    /// These values are before [`crate::ResynthesisConfig::lead_gain`],
+    /// [`crate::ResynthesisConfig::harmony_gain`],
+    /// [`crate::HarmonyConfig::voice_gains`],
+    /// [`crate::HarmonyConfig::voice_mutes`] and the stereo pan. In JavaScript,
+    /// this field is a `Float32Array` of length `voiceCount`.
     #[cfg_attr(
         all(feature = "wasm", target_arch = "wasm32"),
         serde(deserialize_with = "crate::wasm::deserialize_voice_array"),

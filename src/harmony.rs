@@ -240,6 +240,9 @@ pub enum Inversion {
 /// - A register of 50%.
 /// - A closed voicing and zero portamento.
 /// - Four voices for the interval sources.
+/// - Unity voice gains and no voice mutes.
+/// - Stereo voice pans of -1/3, 1/3, -1 and 1.
+/// - Unity voice formant stretch and width.
 ///
 /// These settings configure all sources. Only the fields for the selected
 /// source change the target notes. Validation always checks all fields.
@@ -328,7 +331,87 @@ pub struct HarmonyConfig {
         tsify(optional, type = "number | undefined")
     )]
     pub voices: u8,
+    /// Four linear gains for the harmony voices, each in 0..=1. The default
+    /// is `[1.0; 4]`.
+    ///
+    /// Each value multiplies [`crate::ResynthesisConfig::harmony_gain`] and
+    /// the envelope of that voice. A value of zero mutes that voice. In
+    /// JavaScript, the field is optional and an absent or `undefined` value
+    /// gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(
+            default = "default_voice_unity",
+            deserialize_with = "deserialize_voice_unity"
+        ),
+        tsify(optional, type = "[number, number, number, number] | undefined")
+    )]
+    pub voice_gains: [f32; HARMONY_VOICES],
+    /// Four stereo pan positions for the harmony voices, each in -1..=1. The
+    /// default is `[-1.0 / 3.0, 1.0 / 3.0, -1.0, 1.0]`.
+    ///
+    /// A value of -1 sends the voice to the left channel. A value of 0
+    /// centers the voice, and 1 sends it to the right channel. This control
+    /// applies only if [`crate::ResynthesisConfig::stereo_output`] is `true`.
+    /// In JavaScript, the field is optional and an absent or `undefined` value
+    /// gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(
+            default = "default_voice_pans",
+            deserialize_with = "deserialize_voice_pans"
+        ),
+        tsify(optional, type = "[number, number, number, number] | undefined")
+    )]
+    pub voice_pans: [f32; HARMONY_VOICES],
+    /// Four mutes for the harmony voices. The default is `[false; 4]`.
+    ///
+    /// If an entry is `true`, that voice outputs zero amplitude immediately.
+    /// In JavaScript, the field is optional and an absent or `undefined` value
+    /// gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default, deserialize_with = "deserialize_voice_mutes"),
+        tsify(optional, type = "[boolean, boolean, boolean, boolean] | undefined")
+    )]
+    pub voice_mutes: [bool; HARMONY_VOICES],
+    /// Four vocal-tract length factors for the harmony voices, each in
+    /// 0.5..=2. The default is `[1.0; 4]`.
+    ///
+    /// Each value multiplies [`crate::FormantConfig::stretch`] for that
+    /// voice, and the stage clamps the product to 0.5..=2. This control
+    /// applies only if [`crate::FormantConfig::enabled`] is `true`. In
+    /// JavaScript, the field is optional and an absent or `undefined` value
+    /// gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(
+            default = "default_voice_unity",
+            deserialize_with = "deserialize_voice_unity"
+        ),
+        tsify(optional, type = "[number, number, number, number] | undefined")
+    )]
+    pub voice_formant_stretch: [f32; HARMONY_VOICES],
+    /// Four vocal-tract width factors for the harmony voices, each in
+    /// 0.5..=2. The default is `[1.0; 4]`.
+    ///
+    /// Each value multiplies [`crate::FormantConfig::width`] for that voice,
+    /// and the stage clamps the product to 0.5..=2. This control applies only
+    /// if [`crate::FormantConfig::enabled`] is `true`. In JavaScript, the
+    /// field is optional and an absent or `undefined` value gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(
+            default = "default_voice_unity",
+            deserialize_with = "deserialize_voice_unity"
+        ),
+        tsify(optional, type = "[number, number, number, number] | undefined")
+    )]
+    pub voice_formant_width: [f32; HARMONY_VOICES],
 }
+
+/// The default stereo pan positions for the four harmony voices.
+const DEFAULT_VOICE_PANS: [f32; HARMONY_VOICES] = [-1.0 / 3.0, 1.0 / 3.0, -1.0, 1.0];
 
 /// The default count of interval voices: all of them.
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
@@ -341,6 +424,47 @@ fn default_voices() -> u8 {
 fn deserialize_voices<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
     use serde::Deserialize;
     Ok(Option::<u8>::deserialize(deserializer)?.unwrap_or_else(default_voices))
+}
+
+/// The default unity multipliers for the four harmony voices.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn default_voice_unity() -> [f32; HARMONY_VOICES] {
+    [1.0; HARMONY_VOICES]
+}
+
+/// Decodes optional unity multipliers and maps `undefined` to `[1.0; 4]`.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn deserialize_voice_unity<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<[f32; HARMONY_VOICES], D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<[f32; HARMONY_VOICES]>::deserialize(deserializer)?
+        .unwrap_or_else(default_voice_unity))
+}
+
+/// The default stereo pan positions for JavaScript deserialization.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn default_voice_pans() -> [f32; HARMONY_VOICES] {
+    DEFAULT_VOICE_PANS
+}
+
+/// Decodes optional stereo voice pans and maps `undefined` to the defaults.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn deserialize_voice_pans<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<[f32; HARMONY_VOICES], D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<[f32; HARMONY_VOICES]>::deserialize(deserializer)?
+        .unwrap_or_else(default_voice_pans))
+}
+
+/// Decodes optional voice mutes and maps `undefined` to `[false; 4]`.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn deserialize_voice_mutes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<[bool; HARMONY_VOICES], D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<[bool; HARMONY_VOICES]>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl Default for HarmonyConfig {
@@ -358,6 +482,11 @@ impl Default for HarmonyConfig {
             voicing_spread_percent: 0.0,
             portamento_ms: 0.0,
             voices: HARMONY_VOICES as u8,
+            voice_gains: [1.0; HARMONY_VOICES],
+            voice_pans: DEFAULT_VOICE_PANS,
+            voice_mutes: [false; HARMONY_VOICES],
+            voice_formant_stretch: [1.0; HARMONY_VOICES],
+            voice_formant_width: [1.0; HARMONY_VOICES],
         }
     }
 }
@@ -382,8 +511,48 @@ impl HarmonyConfig {
         validate_voices(self.voices)?;
         validate_register_percent(self.register_percent)?;
         validate_voicing_spread_percent(self.voicing_spread_percent)?;
-        validate_portamento_ms(self.portamento_ms)
+        validate_portamento_ms(self.portamento_ms)?;
+        validate_voice_gains(self.voice_gains)?;
+        validate_voice_pans(self.voice_pans)?;
+        validate_voice_formant_stretch(self.voice_formant_stretch)?;
+        validate_voice_formant_width(self.voice_formant_width)
     }
+}
+
+/// Checks the four linear voice gains of harmony.
+fn validate_voice_gains(voice_gains: [f32; HARMONY_VOICES]) -> Result<(), Error> {
+    for gain in voice_gains {
+        check_range("resynthesis.harmony.voice_gains", gain, 0.0, 1.0)?;
+    }
+    Ok(())
+}
+
+/// Checks the four stereo voice pan positions of harmony.
+fn validate_voice_pans(voice_pans: [f32; HARMONY_VOICES]) -> Result<(), Error> {
+    for pan in voice_pans {
+        check_range("resynthesis.harmony.voice_pans", pan, -1.0, 1.0)?;
+    }
+    Ok(())
+}
+
+/// Checks the four vocal-tract length factors of harmony.
+fn validate_voice_formant_stretch(
+    voice_formant_stretch: [f32; HARMONY_VOICES],
+) -> Result<(), Error> {
+    for stretch in voice_formant_stretch {
+        let field = "resynthesis.harmony.voice_formant_stretch";
+        check_range(field, stretch, 0.5, 2.0)?;
+    }
+    Ok(())
+}
+
+/// Checks the four vocal-tract width factors of harmony.
+fn validate_voice_formant_width(voice_formant_width: [f32; HARMONY_VOICES]) -> Result<(), Error> {
+    for width in voice_formant_width {
+        let field = "resynthesis.harmony.voice_formant_width";
+        check_range(field, width, 0.5, 2.0)?;
+    }
+    Ok(())
 }
 
 /// Checks the four fixed semitone offsets of harmony.

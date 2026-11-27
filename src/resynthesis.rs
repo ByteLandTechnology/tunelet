@@ -12,8 +12,8 @@
 //!
 //! Choir renders the lead voice first. Then it makes delayed secondary voices
 //! with drift from the lead history. Harmony renders the lead voice and four
-//! readers with independent controls. It applies formant synthesis after the
-//! voices are mixed.
+//! readers with independent controls. It applies formant synthesis to each
+//! active voice before the stereo pan sum.
 //!
 //! A reader jumps by one pitch period to stay in a range behind the writer.
 //! The choir lead uses a crossfade across these jumps. Harmonic modulation
@@ -277,11 +277,29 @@ pub struct ResynthesisConfig {
     /// Validation applies to these controls, and they can receive MIDI, also
     /// while Choir is selected.
     pub harmony: HarmonyConfig,
-    /// The linear gain of the four harmony voices, 0..=1. The default is 0.5.
+    /// The linear gain of the lead voice in Harmony mode, 0..=1. The default
+    /// is 1.
     ///
-    /// If `stereo_output` is `true`, the stereo pan gains include this gain.
-    /// If `stereo_output` is `false`, this gain scales each harmony voice
-    /// directly. It does not scale the lead voice.
+    /// A value of zero mutes the lead voice so only the harmony voices sound.
+    /// Choir does not use this value. In JavaScript, the field is optional
+    /// and an absent or `undefined` value gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(
+            default = "default_lead_gain",
+            deserialize_with = "deserialize_lead_gain"
+        ),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub lead_gain: f32,
+    /// The master linear gain of the four harmony voices, 0..=1. The default
+    /// is 0.5.
+    ///
+    /// Each harmony voice multiplies this value by its entry in
+    /// [`HarmonyConfig::voice_gains`]. If `stereo_output` is `true`, the
+    /// stereo pan gains include this product. If `stereo_output` is `false`,
+    /// this product scales each harmony voice directly. It does not scale the
+    /// lead voice.
     pub harmony_gain: f32,
     /// The modulation depth, 0..=24, without a unit. The default is 0 (off).
     ///
@@ -307,6 +325,21 @@ pub struct ResynthesisConfig {
     pub random_seed: u64,
 }
 
+/// The default linear gain of the lead voice in Harmony mode.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn default_lead_gain() -> f32 {
+    1.0
+}
+
+/// Decodes an optional lead gain and maps `undefined` to 1.0.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+fn deserialize_lead_gain<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<f32, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<f32>::deserialize(deserializer)?.unwrap_or_else(default_lead_gain))
+}
+
 impl Default for ResynthesisConfig {
     fn default() -> Self {
         Self {
@@ -321,6 +354,7 @@ impl Default for ResynthesisConfig {
             choir_spread_percent: 100.0,
             stereo_output: false,
             harmony: HarmonyConfig::default(),
+            lead_gain: 1.0,
             harmony_gain: 0.5,
             harmonic_modulation: 0.0,
             dry_mix: 0.0,
@@ -351,11 +385,17 @@ impl ResynthesisConfig {
         validate_choir_detune(self.choir_detune)?;
         validate_choir_delay(self.choir_delay)?;
         validate_choir_spread_percent(self.choir_spread_percent)?;
+        validate_lead_gain(self.lead_gain)?;
         validate_harmony_gain(self.harmony_gain)?;
         validate_harmonic_modulation(self.harmonic_modulation)?;
         validate_dry_mix(self.dry_mix)?;
         validate_choir_voices(self.choir_voices)
     }
+}
+
+/// Checks the range of the linear gain of the lead voice in Harmony mode.
+fn validate_lead_gain(lead_gain: f32) -> Result<(), Error> {
+    check_range("resynthesis.lead_gain", lead_gain, 0.0, 1.0)
 }
 
 /// Checks the range of the global pitch multiplier.
@@ -515,10 +555,12 @@ pub(crate) struct Resynthesis {
     /// The Q14 left and right gains of the choir voices. The code reads them
     /// only if the stereo pan is enabled.
     pan: [[Q14; 2]; 16],
-    /// If stereo pan is off, the Q14 linear gain of the harmony voices.
-    harmony_gain: Q14,
-    /// The Q14 pan gains of the harmony voices. They include the configured
-    /// harmony level.
+    /// The Q14 linear gain of the lead voice in Harmony mode.
+    lead_gain: Q14,
+    /// If stereo pan is off, the Q14 linear gain of each harmony voice.
+    harmony_voice_gain: [Q14; HARMONY_VOICES],
+    /// The Q14 pan gains of the harmony voices. They include the master
+    /// harmony gain, the voice gain and the mute.
     harmony_pan: [[Q14; 2]; HARMONY_VOICES],
     /// The last Q14 target ratios from the harmony controller.
     harmony_ratios: [Q14; HARMONY_VOICES],
@@ -598,9 +640,9 @@ pub(crate) struct Resynthesis {
     /// The Q14 weight of new drift, from the choir detune and the drift
     /// decay.
     drift_amount: Q14,
-    /// The previous Q14 synthesized output for each channel. The glottal
+    /// The previous Q14 synthesized output for each voice slot. The glottal
     /// envelope uses it.
-    previous_output: [Q14; 2],
+    previous_output: [Q14; HARMONY_VOICES + 1],
 }
 
 impl Resynthesis {
@@ -620,7 +662,12 @@ impl Resynthesis {
                     value
                 })
             },
-            formant: Formant::new(rate, config.formant),
+            formant: Formant::new(
+                rate,
+                config.formant,
+                config.harmony.voice_formant_width,
+                config.harmony.voice_formant_stretch,
+            ),
             harmony: HarmonyState::new(rate, config.harmony),
             scale: CorrectionTable::new(rate, config.correction.notes),
             filtered: prepare_history(Q14::ZERO),
@@ -635,7 +682,8 @@ impl Resynthesis {
             drift: [Q14::ZERO; 16],
             drift_ratio: [Q14::ONE; 16],
             pan: [[Q14::ONE; 2]; 16],
-            harmony_gain: Q14::ZERO,
+            lead_gain: Q14::ONE,
+            harmony_voice_gain: [Q14::ZERO; HARMONY_VOICES],
             harmony_pan: [[Q14::ZERO; 2]; HARMONY_VOICES],
             harmony_ratios: [Q14::ONE; HARMONY_VOICES],
             harmony_gains: [Q12::ZERO; HARMONY_VOICES],
@@ -667,7 +715,7 @@ impl Resynthesis {
             control_counter: CONTROL_DUE,
             drift_decay: Q14::ZERO,
             drift_amount: Q14::ZERO,
-            previous_output: [Q14::ZERO; 2],
+            previous_output: [Q14::ZERO; HARMONY_VOICES + 1],
         };
         result.configure_all();
         result.configure_shift_filters();
@@ -755,23 +803,34 @@ impl Resynthesis {
         }
     }
 
-    /// Quantizes the harmony gain and calculates the stereo pan gains for the
+    /// Quantizes the linear gain of the lead voice in Harmony mode
+    /// unconditionally.
+    fn configure_lead_gain(&mut self) {
+        self.lead_gain = Q14::from_f64(f64::from(self.config.lead_gain));
+    }
+
+    /// Quantizes the voice gains and calculates the stereo pan gains for the
     /// harmony voices unconditionally.
     ///
-    /// The stereo pan gains include the harmony gain. The mono harmony path
-    /// uses a separate Q14 gain.
+    /// Each stereo pan gain includes the master harmony gain, the voice gain
+    /// and the mute. The mono harmony path uses a separate Q14 gain for each
+    /// voice.
     fn configure_harmony_gain(&mut self) {
-        self.harmony_gain = Q14::from_f64(self.config.harmony_gain as f64);
-        for (voice, fraction) in [0.3333333333333333, 0.6666666666666666, 0.0, 1.0]
-            .into_iter()
-            .enumerate()
-        {
-            let angle: f64 = 1.57079632713 * fraction;
-            let gain = self.config.harmony_gain as f64;
-            self.harmony_pan[voice] = [
-                Q14::from_f64(gain * angle.cos()),
-                Q14::from_f64(gain * angle.sin()),
-            ];
+        for voice in 0..HARMONY_VOICES {
+            if self.config.harmony.voice_mutes[voice] {
+                self.harmony_voice_gain[voice] = Q14::ZERO;
+                self.harmony_pan[voice] = [Q14::ZERO; 2];
+            } else {
+                let gain = f64::from(self.config.harmony_gain)
+                    * f64::from(self.config.harmony.voice_gains[voice]);
+                self.harmony_voice_gain[voice] = Q14::from_f64(gain);
+                let fraction = (f64::from(self.config.harmony.voice_pans[voice]) + 1.0) * 0.5;
+                let angle: f64 = 1.57079632713 * fraction;
+                self.harmony_pan[voice] = [
+                    Q14::from_f64(gain * angle.cos()),
+                    Q14::from_f64(gain * angle.sin()),
+                ];
+            }
         }
     }
 
@@ -787,6 +846,7 @@ impl Resynthesis {
         self.configure_flex_tune();
         self.configure_choir_drift();
         self.configure_choir_pan();
+        self.configure_lead_gain();
         self.configure_harmony_gain();
     }
 
@@ -833,8 +893,15 @@ impl Resynthesis {
         if old.pitch.threshold != config.pitch.threshold {
             self.pitch.set_config(config.pitch);
         }
-        if old.formant != config.formant {
-            self.formant.set_config(config.formant);
+        if old.formant != config.formant
+            || old.harmony.voice_formant_width != config.harmony.voice_formant_width
+            || old.harmony.voice_formant_stretch != config.harmony.voice_formant_stretch
+        {
+            self.formant.set_config(
+                config.formant,
+                config.harmony.voice_formant_width,
+                config.harmony.voice_formant_stretch,
+            );
         }
         if old.harmony != config.harmony {
             self.harmony.apply_config(config.harmony);
@@ -865,6 +932,12 @@ impl Resynthesis {
         if old.mode != config.mode || old.choir_delay != config.choir_delay {
             self.create_delays();
         }
+        if old.mode != config.mode {
+            self.previous_output[1..].fill(Q14::ZERO);
+            for slot in 1..5 {
+                self.formant.bypass_voice(slot);
+            }
+        }
         if old.choir_voices < config.choir_voices {
             for voice in old.choir_voices as usize..config.choir_voices as usize {
                 self.positions[voice] = self.positions[0];
@@ -878,7 +951,14 @@ impl Resynthesis {
         if old.choir_detune != config.choir_detune {
             self.configure_choir_drift();
         }
-        if old.harmony_gain != config.harmony_gain {
+        if old.lead_gain != config.lead_gain {
+            self.configure_lead_gain();
+        }
+        if old.harmony_gain != config.harmony_gain
+            || old.harmony.voice_gains != config.harmony.voice_gains
+            || old.harmony.voice_pans != config.harmony.voice_pans
+            || old.harmony.voice_mutes != config.harmony.voice_mutes
+        {
             self.configure_harmony_gain();
         }
         if old.harmonic_modulation != config.harmonic_modulation {
@@ -1127,7 +1207,7 @@ impl Resynthesis {
         self.harmony.reset();
         clear_dirty_ring(self.overlap.as_mut_slice(), written, Q14::ZERO);
         self.overlap_index = 0;
-        self.previous_output = [Q14::ZERO; 2];
+        self.previous_output = [Q14::ZERO; HARMONY_VOICES + 1];
         for filter in &mut self.post {
             filter.reset();
         }
@@ -1546,16 +1626,16 @@ impl Resynthesis {
     }
 
     /// Applies the glottal envelope to `sample` and updates `previous_output`
-    /// for `channel`.
+    /// for `slot`.
     ///
-    /// `channel` must be `0` or `1`.
+    /// `slot` must be less than `HARMONY_VOICES + 1`.
     #[inline]
-    fn apply_glottal(&mut self, channel: usize, sample: Q14) -> Q14 {
+    fn apply_glottal(&mut self, slot: usize, sample: Q14) -> Q14 {
         let output = Q14::from_bits(
             self.formant
-                .model_glottal(sample.to_bits(), self.previous_output[channel].to_bits()),
+                .model_glottal(sample.to_bits(), self.previous_output[slot].to_bits()),
         );
-        self.previous_output[channel] = output;
+        self.previous_output[slot] = output;
         output
     }
 
@@ -1703,7 +1783,7 @@ impl Resynthesis {
         let delayed = ring(write as i32 - OVERLAP_FRAMES as i32);
         let dry = self.raw[ring(write as i32 - LATENCY_FRAMES as i32)];
         let mut mix = [Q14::ZERO; 2];
-        let mut mono = !self.config.stereo_output;
+        let mono = !self.config.stereo_output;
         let mut final_ratio = Q14::ONE;
         if self.config.mode == MultiVoiceMode::Choir {
             let voice_count = self.config.choir_voices as usize;
@@ -1779,6 +1859,11 @@ impl Resynthesis {
                     self.harmony_gains[voice] = gain;
                 }
             }
+            let frame_noise = if self.config.formant.enabled {
+                self.formant.prepare_noise(numeric)
+            } else {
+                None
+            };
             let bounds = self.reader_bounds(period, 0);
             for slot in 0..5 {
                 let mut current: Q14 = if slot == 0 {
@@ -1793,66 +1878,61 @@ impl Resynthesis {
                 final_ratio = current;
                 self.voice_ratios[slot] = current;
                 let position = self.step_reader(slot, current, bounds, false);
-                // If the Q12 gain or the stereo pan is zero, the voice adds
-                // zero to the mix.
-                if slot > 0 {
+                if slot == 0 && self.config.formant.enabled {
+                    self.formant_position = history::center_of(position) - FORMANT_OFFSET_FRAMES;
+                }
+                // If the voice gain, the mute or the stereo pan gives zero
+                // output, skip interpolation and synthesis for that voice.
+                let silent = if slot == 0 {
+                    self.lead_gain == Q14::ZERO
+                } else {
                     let voice = slot - 1;
-                    let pan = self.harmony_pan[voice];
-                    let silent_pan =
-                        self.config.stereo_output && (pan[0].to_bits() | pan[1].to_bits()) == 0;
-                    if self.harmony_gains[voice] == Q12::ZERO || silent_pan {
-                        continue;
+                    let silent_level = if self.config.stereo_output {
+                        let pan = self.harmony_pan[voice];
+                        (pan[0].to_bits() | pan[1].to_bits()) == 0
+                    } else {
+                        self.harmony_voice_gain[voice] == Q14::ZERO
+                    };
+                    self.harmony_gains[voice] == Q12::ZERO || silent_level
+                };
+                if silent {
+                    if self.config.formant.enabled {
+                        self.formant.bypass_voice(slot);
                     }
+                    self.previous_output[slot] = Q14::ZERO;
+                    continue;
                 }
-                let (mut value, _) = history::interpolation(&self.filtered, position);
-                if slot > 0 {
-                    value = value.mul(self.harmony_gains[slot - 1]);
-                    if !self.config.stereo_output {
-                        value = value.mul(self.harmony_gain);
-                    }
-                }
-                if self.config.stereo_output {
-                    for (channel, sum) in mix.iter_mut().enumerate() {
-                        *sum = *sum
-                            + if slot > 0 {
-                                value.mul(self.harmony_pan[slot - 1][channel])
-                            } else {
-                                value
-                            };
-                    }
-                } else {
-                    mix[0] = mix[0] + value;
-                }
-            }
-            if self.config.formant.enabled {
-                self.formant_position = (self.positions[0].to_bits() >> 14) - FORMANT_OFFSET_FRAMES;
-                // If Choir changed only channel zero before a switch to
-                // Harmony, synthesize the two channels until their histories
-                // are equal.
-                if mono
-                    && self.formant.histories_match()
-                    && self.previous_output[0] == self.previous_output[1]
-                {
-                    let value = Q14::from_bits(self.formant.forward_mono(
-                        mix[0].to_bits(),
-                        self.formant_position,
-                        numeric,
+                let (mut value, center) = history::interpolation(&self.filtered, position);
+                if self.config.formant.enabled {
+                    let formant_position = center - FORMANT_OFFSET_FRAMES;
+                    value = Q14::from_bits(self.formant.forward_voice(
+                        slot,
+                        value.to_bits(),
+                        formant_position,
+                        frame_noise,
                     ));
-                    let value = self.apply_glottal(0, value);
-                    self.previous_output[1] = value;
-                    mix[0] = value;
+                    value = self.apply_glottal(slot, value);
+                }
+                if slot == 0 {
+                    value = value.mul(self.lead_gain);
+                    if self.config.stereo_output {
+                        for sum in &mut mix {
+                            *sum = *sum + value;
+                        }
+                    } else {
+                        mix[0] = mix[0] + value;
+                    }
                 } else {
-                    if mono {
-                        mix[1] = mix[0];
+                    let voice = slot - 1;
+                    value = value.mul(self.harmony_gains[voice]);
+                    if self.config.stereo_output {
+                        for (channel, sum) in mix.iter_mut().enumerate() {
+                            *sum = *sum + value.mul(self.harmony_pan[voice][channel]);
+                        }
+                    } else {
+                        value = value.mul(self.harmony_voice_gain[voice]);
+                        mix[0] = mix[0] + value;
                     }
-                    mix = self
-                        .formant
-                        .forward_stereo(mix.map(Q14::to_bits), self.formant_position, numeric)
-                        .map(Q14::from_bits);
-                    for (channel, value) in mix.iter_mut().enumerate() {
-                        *value = self.apply_glottal(channel, *value);
-                    }
-                    mono = mono && mix[0] == mix[1];
                 }
             }
         }

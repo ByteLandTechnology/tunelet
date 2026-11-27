@@ -72,9 +72,9 @@
 //! pitch, the voice ratios and gains, the peaks, the clarity and the effect
 //! state. In mono calls, the feedback and telemetry peaks measure the audio
 //! after the downmix. [`Processor::take_telemetry`] also clears the peak
-//! windows of the telemetry. [`Processor::formant_envelope`] writes the LPC
-//! envelopes before and after the formant controls. These calls do not change
-//! the audio.
+//! windows of the telemetry. [`Processor::formant_envelope`] writes the lead
+//! LPC envelopes before and after the global formant controls. These calls do
+//! not change the audio.
 //!
 //! After the last input block, call [`Processor::begin_drain`] one time. Then
 //! render drain blocks until a call returns zero. Each call fills the unused

@@ -82,24 +82,32 @@ fn interpolation_taps<T: Copy>(buffer: &[T; HISTORY], center: i32) -> [T; 3] {
     }
 }
 
+/// Returns the integer center frame for a Q14 reader position without wrap.
+///
+/// The function adds a half frame to a positive position. For other
+/// positions, it subtracts a half frame, then truncates toward zero.
+#[inline]
+pub(super) fn center_of(position: Q14) -> i32 {
+    let bits = position.to_bits();
+    if position > Q14::ZERO {
+        bits.wrapping_add(8192) >> 14
+    } else {
+        -(8192_i32.wrapping_sub(bits) >> 14)
+    }
+}
+
 /// Returns the value of a three-point parabola at a Q14 frame position.
 ///
 /// The result has two parts: the Q14 sample and the integer center frame
 /// without wrap. The formant model uses this center for alignment. To find
-/// the center, the function adds a half frame to a positive position. For
-/// other positions, it subtracts a half frame.
+/// the center, [`center_of`] rounds to the nearest integer frame.
 ///
-/// Then it truncates the result toward zero. The fraction that is left is
-/// relative to that center. The taps wrap through the history, but the
-/// returned center does not. Coordinate offsets wrap at 32 bits. Sample
-/// products use `i64` arithmetic and clamp to `i32`.
+/// The fraction that is left is relative to that center. The taps wrap
+/// through the history, but the returned center does not. Coordinate offsets
+/// wrap at 32 bits. Sample products use `i64` arithmetic and clamp to `i32`.
 pub(super) fn interpolation(buffer: &[Q14; HISTORY], position: Q14) -> (Q14, i32) {
     let bits = position.to_bits();
-    let center = if position > Q14::ZERO {
-        bits.wrapping_add(8192) >> 14
-    } else {
-        -(8192_i32.wrapping_sub(bits) >> 14)
-    };
+    let center = center_of(position);
     let fraction = Q14::from_bits(bits.wrapping_sub(center.wrapping_shl(14)));
     let [left, middle, right] = interpolation_taps(buffer, center);
     (quadratic(left, middle, right, fraction), center)

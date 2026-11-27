@@ -210,8 +210,8 @@ impl ProcessorConfig {
     /// the active modes.
     ///
     /// A `false` flag means that the related control makes no sample change in
-    /// the active voice mode, harmony source or reverb network. This method
-    /// does not allocate memory and does not validate ranges.
+    /// the active voice, stereo, harmony, formant or reverb settings. This
+    /// method does not allocate memory and does not validate ranges.
     pub fn control_activity(self) -> ControlActivity {
         let choir = self.resynthesis.mode == MultiVoiceMode::Choir;
         let multi_choir = choir && self.resynthesis.choir_voices > 1;
@@ -222,11 +222,13 @@ impl ProcessorConfig {
             HarmonySource::FixedInterval | HarmonySource::SmartInterval
         );
         let interval_voices = self.resynthesis.harmony.voices > 0;
+        let harmony_voices = harmony && (!interval || interval_voices);
         let named_or_degree = matches!(
             source,
             HarmonySource::ChordByDegree | HarmonySource::ChordByName
         );
         let chord = named_or_degree || source == HarmonySource::ChordViaMidi;
+        let formant = self.resynthesis.formant.enabled;
         let reverb = self.reverb.enabled;
         let reverb_mode = self.reverb.mode;
         ControlActivity {
@@ -251,9 +253,15 @@ impl ProcessorConfig {
             harmony_inversion: harmony && named_or_degree,
             harmony_register_percent: harmony && chord,
             harmony_voicing_spread_percent: harmony && chord,
-            harmony_portamento_ms: harmony && (!interval || interval_voices),
+            harmony_portamento_ms: harmony_voices,
             harmony_voices: harmony && interval,
-            harmony_gain: harmony && (!interval || interval_voices),
+            harmony_voice_gains: harmony_voices,
+            harmony_voice_pans: harmony_voices && self.resynthesis.stereo_output,
+            harmony_voice_mutes: harmony_voices,
+            harmony_voice_formant_stretch: harmony_voices && formant,
+            harmony_voice_formant_width: harmony_voices && formant,
+            lead_gain: harmony,
+            harmony_gain: harmony_voices,
             reverb_mode: reverb,
             reverb_mix: reverb,
             reverb_diffusion: reverb
@@ -270,8 +278,8 @@ impl ProcessorConfig {
 ///
 /// Get this snapshot from [`ProcessorConfig::control_activity`] or
 /// [`crate::Processor::control_activity`]. A `false` flag means that the
-/// related control makes no sample change in the active voice mode, harmony
-/// source or reverb network. `Default` sets all flags to `false`.
+/// related control makes no sample change in the active voice, stereo,
+/// harmony, formant or reverb settings. `Default` sets all flags to `false`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -312,6 +320,18 @@ pub struct ControlActivity {
     pub harmony_portamento_ms: bool,
     /// `true` if [`crate::HarmonyConfig::voices`] is active.
     pub harmony_voices: bool,
+    /// `true` if [`crate::HarmonyConfig::voice_gains`] is active.
+    pub harmony_voice_gains: bool,
+    /// `true` if [`crate::HarmonyConfig::voice_pans`] is active.
+    pub harmony_voice_pans: bool,
+    /// `true` if [`crate::HarmonyConfig::voice_mutes`] is active.
+    pub harmony_voice_mutes: bool,
+    /// `true` if [`crate::HarmonyConfig::voice_formant_stretch`] is active.
+    pub harmony_voice_formant_stretch: bool,
+    /// `true` if [`crate::HarmonyConfig::voice_formant_width`] is active.
+    pub harmony_voice_formant_width: bool,
+    /// `true` if [`ResynthesisConfig::lead_gain`] is active.
+    pub lead_gain: bool,
     /// `true` if [`ResynthesisConfig::harmony_gain`] is active.
     pub harmony_gain: bool,
     /// `true` if [`ReverbConfig::mode`] is active.
