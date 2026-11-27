@@ -1,6 +1,6 @@
 //! Controls for a block, which the processor validates before any change.
 
-use crate::config::validate_output_gain;
+use crate::config::{validate_mix, validate_output_gain};
 use crate::effects::alien::AlienConfig;
 use crate::effects::punch::{self, PunchConfig};
 use crate::effects::reverb::{self, ReverbConfig};
@@ -229,6 +229,16 @@ pub enum ControlEvent {
     /// The quantization and the mute behavior are the same as for
     /// [`ProcessorConfig::output_gain`]. The value must be finite.
     OutputGain(f32),
+    /// This event sets the global wet fraction, 0..=1.
+    ///
+    /// The quantization and the dry delay are the same as for
+    /// [`ProcessorConfig::mix`]. The value must be finite.
+    Mix(f32),
+    /// This event sets the global bypass state.
+    ///
+    /// If the value changes, the processor crossfades over 200 frames, as
+    /// [`ProcessorConfig::bypass`] describes.
+    Bypass(bool),
     /// This event updates one scalar parameter without a copy of the full stage
     /// structure.
     ///
@@ -265,9 +275,9 @@ impl ControlEvent {
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfig`] for an invalid configuration, scalar
-    /// parameter or gain. Returns [`Error::InvalidMidi`] for invalid MIDI
-    /// fields. Reset is always valid. The process call that contains the event
-    /// checks the offset and the order.
+    /// parameter, gain or mix. Returns [`Error::InvalidMidi`] for invalid MIDI
+    /// fields. Bypass and reset are always valid. The process call that
+    /// contains the event checks the offset and the order.
     pub fn validate(self) -> Result<(), Error> {
         match self {
             Self::Configure(config) => config.validate(),
@@ -277,6 +287,8 @@ impl ControlEvent {
             Self::Alien(config) => config.validate(),
             Self::Reverb(config) => config.validate(),
             Self::OutputGain(gain) => validate_output_gain(gain),
+            Self::Mix(mix) => validate_mix(mix),
+            Self::Bypass(_) => Ok(()),
             Self::Parameter(parameter) => parameter.validate(),
             Self::Midi(event) | Self::CorrectionMidi(event) => event.validate(),
             Self::Reset => Ok(()),
@@ -417,6 +429,15 @@ fn validate_in_sequence(event: ControlEvent, config: &mut ProcessorConfig) -> Re
         ControlEvent::OutputGain(gain) => {
             validate_output_gain(gain)?;
             config.output_gain = gain;
+            Ok(())
+        }
+        ControlEvent::Mix(mix) => {
+            validate_mix(mix)?;
+            config.mix = mix;
+            Ok(())
+        }
+        ControlEvent::Bypass(bypass) => {
+            config.bypass = bypass;
             Ok(())
         }
         ControlEvent::Parameter(parameter) => parameter.apply_to(config),

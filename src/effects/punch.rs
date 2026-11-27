@@ -66,6 +66,21 @@ pub struct PunchConfig {
     /// The default is 10 ms. Each enabled frame updates both followers with
     /// per-sample coefficients.
     pub attack_ms: f32,
+    /// The wet fraction, 0..=1.
+    ///
+    /// The default is 1. The dry weight is `1 - mix` in Q14. If Punch is
+    /// enabled, a zero mix still advances the peak hold, the envelopes and the
+    /// drive. In JavaScript, this field is optional and an absent or
+    /// `undefined` value gives 1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(
+            default = "crate::wasm::default_mix",
+            deserialize_with = "crate::wasm::deserialize_mix"
+        ),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub mix: f32,
 }
 impl Default for PunchConfig {
     fn default() -> Self {
@@ -75,6 +90,7 @@ impl Default for PunchConfig {
             impact: 0.5,
             ceiling_db: -3.0,
             attack_ms: 10.0,
+            mix: 1.0,
         }
     }
 }
@@ -93,7 +109,8 @@ impl PunchConfig {
         validate_gain_db(self.gain_db)?;
         validate_impact(self.impact)?;
         validate_ceiling_db(self.ceiling_db)?;
-        validate_attack_ms(self.attack_ms)
+        validate_attack_ms(self.attack_ms)?;
+        validate_mix(self.mix)
     }
 }
 
@@ -115,6 +132,11 @@ pub(crate) fn validate_ceiling_db(ceiling_db: f32) -> Result<(), Error> {
 /// Checks the range of the attack half-life of Punch.
 pub(crate) fn validate_attack_ms(attack_ms: f32) -> Result<(), Error> {
     check_range("punch.attack_ms", attack_ms, 0.01, 5000.0)
+}
+
+/// Checks the range of the wet mix of Punch.
+fn validate_mix(mix: f32) -> Result<(), Error> {
+    check_range("punch.mix", mix, 0.0, 1.0)
 }
 
 /// Two peak followers that control an arctangent saturator, with all buffers
@@ -148,6 +170,8 @@ pub(crate) struct Punch {
     gain: Q28,
     /// The linear output ceiling in Q28, nonzero across -96..=0 dBFS.
     ceiling_gain: Q28,
+    /// The Q14 wet weight. The dry weight is `1 - mix`.
+    mix: Q14,
     /// The smoothed Q24 drive: base drive × envelope ratio × input gain.
     drive: Q24,
 }
@@ -172,6 +196,7 @@ impl Punch {
             drive_decay,
             gain: Q28::ONE,
             ceiling_gain: Q28::ONE,
+            mix: Q14::ONE,
             drive: BASE_DRIVE,
         };
         result.configure_all();
@@ -217,12 +242,17 @@ impl Punch {
         self.ceiling_gain =
             Q28::from_f64(db_to_gain(self.config.ceiling_db as f64)).max(Q28::from_bits(1));
     }
+    /// Updates the quantized wet mix.
+    fn configure_mix(&mut self) {
+        self.mix = Q14::from_f64((self.config.mix * 100.0) as f64 / 100.0);
+    }
     /// Initializes all configurable coefficients unconditionally.
     fn configure_all(&mut self) {
         self.configure_impact();
         self.configure_attack_ms();
         self.configure_gain_db();
         self.configure_ceiling_db();
+        self.configure_mix();
     }
     /// Calculates the changed quantized controls again, and keeps the
     /// envelopes and the current drive.
@@ -243,6 +273,9 @@ impl Punch {
         }
         if old.ceiling_db != config.ceiling_db {
             self.configure_ceiling_db();
+        }
+        if old.mix != config.mix {
+            self.configure_mix();
         }
     }
     /// Stores the input gain. If the value changed, quantizes it again.
@@ -327,8 +360,8 @@ impl Punch {
     /// While the adaptive envelope is zero, the envelope ratio is 1. The stage
     /// limits this ratio to 16, then multiplies it by the input gain. Next, it
     /// divides the driven sample by the ceiling gain and clamps the quotient in
-    /// `i64` before the arctangent lookup. Finally, the PCM output clips
-    /// symmetrically.
+    /// `i64` before the arctangent lookup. Finally, it mixes the dry input and
+    /// the wet output in Q14 and clips the PCM output symmetrically.
     pub(crate) fn process_sample(&mut self, input: i16, context: &mut NumericContext) -> i16 {
         let sample: Q28 = Fixed::<15>::from_bits(i32::from(input)).rescale();
         let held = self.push_hold(sample.abs());
@@ -357,6 +390,10 @@ impl Punch {
         } else {
             -((-scaled_bits + 4096) >> 13)
         };
-        pcm.clamp(-32767, 32767) as i16
+        let wet = pcm.clamp(-32767, 32767);
+        let dry = i64::from(input);
+        let wet_w = i64::from(self.mix.to_bits());
+        let dry_w = i64::from((Q14::ONE - self.mix).to_bits());
+        (((dry * dry_w + wet * wet_w) >> 14).clamp(-32767, 32767)) as i16
     }
 }

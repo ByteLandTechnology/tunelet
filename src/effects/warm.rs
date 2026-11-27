@@ -6,11 +6,12 @@ use crate::numeric::fixed::{Fixed, Q14, Q22, Q24, Q28, Q30};
 use crate::numeric::{db_to_gain, envelope_decay};
 use crate::{Error, SampleRate};
 
-/// Asymmetric input saturation, followed by a 50 Hz high-pass filter.
+/// Asymmetric input saturation, with a 50 Hz high-pass filter on the wet path.
 ///
 /// Warm operates after Punch and before pitch detection. Its adaptive
 /// normalization updates on each enabled frame with an immediate attack and a
-/// 200 ms release half-life. When Warm is disabled, the envelope and filter
+/// 200 ms release half-life. The 50 Hz high-pass filter applies only to the wet
+/// path, not to the dry path. When Warm is disabled, the envelope and filter
 /// histories do not change. When Warm is enabled again, they continue from
 /// their last state, unless the processor was reset.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -27,34 +28,57 @@ pub struct WarmConfig {
     /// The output gain changes by -0.35 dB for each dB of drive. At 0 dB, the
     /// envelope normalization and the output high-pass filter still operate.
     pub drive_db: f32,
+    /// The wet fraction, 0..=1.
+    ///
+    /// The default is 1. The dry weight is `1 - mix` in Q14. The 50 Hz
+    /// high-pass filter applies only to the wet signal before the blend. If
+    /// Warm is enabled, a zero mix still advances the envelope and the filter.
+    /// In JavaScript, this field is optional and an absent or `undefined`
+    /// value gives 1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(
+            default = "crate::wasm::default_mix",
+            deserialize_with = "crate::wasm::deserialize_mix"
+        ),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub mix: f32,
 }
 impl Default for WarmConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             drive_db: 3.0,
+            mix: 1.0,
         }
     }
 }
 impl WarmConfig {
     /// Validates all fields, also when Warm is disabled.
     ///
-    /// `drive_db` must be finite and in its documented inclusive range.
-    /// Validation does not clamp values. It does not change the processor
-    /// state.
+    /// The floating-point controls must be finite and in their documented
+    /// inclusive ranges. Validation does not clamp values. It does not change
+    /// the processor state.
     ///
     /// # Errors
     ///
     /// Returns the first [`Error::InvalidConfig`] with its dotted field path
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        validate_drive_db(self.drive_db)
+        validate_drive_db(self.drive_db)?;
+        validate_mix(self.mix)
     }
 }
 
 /// Checks the range of the drive of Warm.
 pub(crate) fn validate_drive_db(drive_db: f32) -> Result<(), Error> {
     check_range("warm.drive_db", drive_db, 0.0, 6.0)
+}
+
+/// Checks the range of the wet mix of Warm.
+fn validate_mix(mix: f32) -> Result<(), Error> {
+    check_range("warm.mix", mix, 0.0, 1.0)
 }
 
 /// An adaptive asymmetric saturator with one persistent high-pass output
@@ -76,6 +100,8 @@ pub(crate) struct Warm {
     drive: Q24,
     /// The Q28 compensation from the configured drive.
     output_gain: Q28,
+    /// The Q14 wet weight. The dry weight is `1 - mix`.
+    mix: Q14,
     /// The Q28 threshold of -30 dB. If the peak envelope is not above it, the
     /// normalization targets a fixed headroom.
     input_threshold: Q28,
@@ -83,8 +109,9 @@ pub(crate) struct Warm {
     output_headroom: Q22,
 }
 impl Warm {
-    /// Prepares the fixed high-pass filter and the initial normalization
-    /// state.
+    /// Prepares the fixed 50 Hz high-pass filter on the wet path and the
+    /// initial normalization state. The dry path does not go through this
+    /// filter.
     pub(crate) fn new(rate: SampleRate, config: WarmConfig) -> Self {
         let mut filter = Biquad::new();
         filter.set_design(Design::high_pass_one_pole(rate.hz(), 50.0));
@@ -96,10 +123,12 @@ impl Warm {
             smooth: Q30::from_f64(envelope_decay(200.0, rate.hz() as f64, 1)),
             drive: Q24::ZERO,
             output_gain: Q28::ZERO,
+            mix: Q14::ONE,
             input_threshold: Q28::from_f64(db_to_gain(-30.0)),
             output_headroom: Q22::from_f64(db_to_gain(30.0)),
         };
         result.configure_drive_db();
+        result.configure_mix();
         result
     }
     /// Returns the Q22 normalization gain as f32. The stage state does not
@@ -112,13 +141,20 @@ impl Warm {
         self.drive = Q24::from_f64(db_to_gain(self.config.drive_db as f64));
         self.output_gain = Q28::from_f64(db_to_gain(-(self.config.drive_db as f64) * 0.35));
     }
-    /// Stores the configuration. If the drive changed, updates the drive and
-    /// the output compensation, and keeps the envelope and filter state.
+    /// Quantizes the wet mix unconditionally.
+    fn configure_mix(&mut self) {
+        self.mix = Q14::from_f64((self.config.mix * 100.0) as f64 / 100.0);
+    }
+    /// Stores the configuration. If the drive or the mix changed, updates the
+    /// changed coefficients and keeps the envelope and filter state.
     pub(crate) fn set_config(&mut self, config: WarmConfig) {
         let old = self.config;
         self.config = config;
         if old.drive_db != config.drive_db {
             self.configure_drive_db();
+        }
+        if old.mix != config.mix {
+            self.configure_mix();
         }
     }
     /// Stores the drive. If the value changed, updates the quantized drive and
@@ -146,7 +182,7 @@ impl Warm {
     /// 2. Normalize the sample.
     /// 3. Shape the positive and negative halves differently.
     /// 4. Remove the normalization.
-    /// 5. Apply the high-pass filter and clip the result.
+    /// 5. Apply the high-pass filter to the wet signal, mix in Q14 and clip.
     ///
     /// If an attack increases the peak, the gain decreases immediately.
     /// During release, the gain moves smoothly toward the target.
@@ -179,9 +215,15 @@ impl Warm {
         }
         sample = sample.div(self.compression.max(Q22::ONE));
         let output = Q14::from_bits(self.output_gain.mul::<28, 15>(sample).to_bits());
-        self.filter
-            .process_sample(output)
-            .to_bits()
-            .clamp(-32767, 32767) as i16
+        let wet = i64::from(
+            self.filter
+                .process_sample(output)
+                .to_bits()
+                .clamp(-32767, 32767),
+        );
+        let dry = i64::from(input);
+        let wet_w = i64::from(self.mix.to_bits());
+        let dry_w = i64::from((Q14::ONE - self.mix).to_bits());
+        (((dry * dry_w + wet * wet_w) >> 14).clamp(-32767, 32767)) as i16
     }
 }

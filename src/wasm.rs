@@ -21,6 +21,9 @@
 //! - Field names use camelCase.
 //! - Enum values are strings.
 //! - Each object must contain all required fields.
+//! - If an optional field is absent or `undefined`, it gets its default.
+//! - The optional `mix`, `punch.mix`, `warm.mix` and `alien.mix` fields
+//!   default to 1, and `bypass` defaults to `false`.
 //! - The optional correction `humanize` and `flexTune` fields default to 0.
 //! - The optional harmony `voices` field defaults to 4.
 //!
@@ -74,10 +77,13 @@ pub struct BlockEvents(Vec<TimedEvent>);
 
 /// Returns a complete, independent default configuration for JavaScript.
 ///
-/// Change its fields and give it to `Tunelet` or to `setConfig`. The
-/// `randomSeed` field is a JavaScript `bigint`, so it keeps all 64 bits. After
-/// the binding decodes them, floating-point controls have the precision of the
-/// Rust `f32` type.
+/// The returned object includes all optional fields (`mix`, `bypass`,
+/// `punch.mix`, `warm.mix`, `alien.mix`, `resynthesis.correction.humanize`,
+/// `resynthesis.correction.flexTune` and `resynthesis.harmony.voices`) with
+/// their default values. Change its fields and give it to `Tunelet` or to
+/// `setConfig`. The `randomSeed` field is a JavaScript `bigint`, so it keeps
+/// all 64 bits. After the binding decodes them, floating-point controls have
+/// the precision of the Rust `f32` type.
 ///
 /// # Errors
 ///
@@ -86,6 +92,25 @@ pub struct BlockEvents(Vec<TimedEvent>);
 #[wasm_bindgen(js_name = defaultConfig)]
 pub fn default_config() -> Result<Ts<ProcessorConfig>, JsError> {
     Ok(ProcessorConfig::default().into_ts()?)
+}
+
+/// Returns the default wet mix of 1.0 for optional JavaScript fields.
+pub(crate) fn default_mix() -> f32 {
+    1.0
+}
+
+/// Decodes an optional wet mix and maps an absent value to 1.0.
+pub(crate) fn deserialize_mix<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<f32, D::Error> {
+    Ok(Option::<f32>::deserialize(deserializer)?.unwrap_or_else(default_mix))
+}
+
+/// Decodes an optional boolean flag and maps an absent value to `false`.
+pub(crate) fn deserialize_false<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(false))
 }
 
 /// A stateful vocal processor that JavaScript uses as the `Tunelet` class.
@@ -260,9 +285,9 @@ impl WasmProcessor {
 
     /// The nominal resynthesis latency: 1,593 frames at both sample rates.
     ///
-    /// The dry path also has a delay of 1,593 frames. Resampled voices, choir
-    /// delays and effects have their own timing. Thus, this value does not
-    /// align all paths.
+    /// The resynthesis dry path and the global `mix` and `bypass` dry path also
+    /// have a delay of 1,593 frames. Resampled voices, choir delays and effects
+    /// have their own timing. Thus, this value does not align all paths.
     #[wasm_bindgen(getter, js_name = latencyFrames)]
     pub fn latency_frames(&self) -> usize {
         self.processor.latency_frames()
@@ -858,6 +883,8 @@ struct EventKeys {
     midi: JsValue,
     correction_midi: JsValue,
     output_gain: JsValue,
+    mix: JsValue,
+    bypass: JsValue,
     parameter: JsValue,
     reset: JsValue,
     configure: JsValue,
@@ -887,6 +914,8 @@ impl EventKeys {
             midi: JsValue::from_str("midi"),
             correction_midi: JsValue::from_str("correctionMidi"),
             output_gain: JsValue::from_str("outputGain"),
+            mix: JsValue::from_str("mix"),
+            bypass: JsValue::from_str("bypass"),
             parameter: JsValue::from_str("parameter"),
             reset: JsValue::from_str("reset"),
             configure: JsValue::from_str("configure"),
@@ -1089,6 +1118,15 @@ fn decode_control_event(event: &JsValue, keys: &EventKeys) -> Result<ControlEven
             &value,
             "outputGain value",
         )?))
+    } else if kind == keys.mix {
+        let value = get_property(event, &keys.value)?;
+        Ok(ControlEvent::Mix(decode_f32(&value, "mix value")?))
+    } else if kind == keys.bypass {
+        let value = get_property(event, &keys.value)?;
+        let Some(bypass) = value.as_bool() else {
+            return Err(JsError::new("bypass value must be a boolean"));
+        };
+        Ok(ControlEvent::Bypass(bypass))
     } else if kind == keys.parameter {
         let value = get_property(event, &keys.value)?;
         Ok(ControlEvent::Parameter(decode_parameter_control(
