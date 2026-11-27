@@ -1,6 +1,6 @@
 {
   "name": "tunelet",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "Vocal pitch correction, choir, harmony, formant control and effects for WebAssembly",
   "license": "MIT",
   "repository": {
