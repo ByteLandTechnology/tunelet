@@ -347,7 +347,9 @@ sets the configuration cancels the drain. `reset()` also cancels the drain.
 ### Reset
 
 `reset()` keeps the configuration, the random stream and some controller and
-filter state. If you need a fully new state, construct a new processor.
+filter state. Configuration changes keep the audio histories, also when
+`resynthesis.stereo_output` changes the voice pan. If you need a fully new
+state, construct a new processor.
 
 ## Feedback and telemetry
 
@@ -507,7 +509,7 @@ page that opens the JavaScript.
 | `Int16Array` finite tail          | `beginDrain()`, `drain(left, right)`, `drainMono(audio)`                 |
 | `Float32Array` finite tail        | `beginDrain()`, `drainF32(left, right)`, `drainMonoF32(audio)`           |
 | Zero-copy `Float32` tail          | `beginDrain()`, `drainF32InPlace(frames)`, `drainMonoF32InPlace(frames)` |
-| Configured tail budget            | `tailFrames()`                                                           |
+| Tail budget                       | `tailFrames()`                                                           |
 | Reset or release memory           | `reset()`, `free()`, `views.dispose()`                                   |
 
 ### Audio buffers

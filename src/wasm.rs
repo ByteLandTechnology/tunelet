@@ -526,8 +526,11 @@ impl WasmProcessor {
         self.processor.begin_drain()
     }
 
-    /// Returns the tail budget of the current configuration, not the remaining
-    /// drain count.
+    /// Returns the finite tail budget for the current configuration and active
+    /// stage transitions.
+    ///
+    /// This value includes active Alien ramps, reverb mode fades and reverb
+    /// bypass tails. It is not the number of drain frames that are left.
     #[wasm_bindgen(js_name = tailFrames)]
     pub fn tail_frames(&self) -> usize {
         self.processor.tail_frames()

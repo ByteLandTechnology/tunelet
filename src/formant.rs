@@ -287,6 +287,8 @@ pub(crate) struct Formant {
     /// If `true`, the next call to `smooth` clears the state of the
     /// correlation average.
     smooth_reset: bool,
+    /// If `true`, the next model design sets `blend` to 1.0 immediately.
+    snap_blend: bool,
     /// If `true`, the stage changed state since construction or the last reset.
     dirty: bool,
     /// The Q14 first-order coefficient for pre-emphasis and de-emphasis.
@@ -372,6 +374,7 @@ impl Formant {
             smooth_index: 0,
             smooth_filled: 0,
             smooth_reset: true,
+            snap_blend: false,
             dirty: false,
             glottal: (0.5_f64.powf(1.0 / d2) * 16384.0) as i32,
             width: 16384,
@@ -509,15 +512,48 @@ impl Formant {
         self.input.fill(0_i32);
 
         self.stamps.fill(Stamp::default());
-        self.history = [[0; MAX_ORDER * 2]; 2];
-        self.histories_match = true;
-        self.history_index = 0;
+        self.reset_synthesis();
         self.stamp.current = (BANKS - 1) as u8;
         self.next_filter();
         self.next_filter();
         self.design_counter = 0;
-        self.noise_filter.reset();
         self.smooth_reset = true;
+        self.snap_blend = false;
+    }
+    /// Clears the synthesis feedback history and the aspiration filter memory.
+    pub(crate) fn reset_synthesis(&mut self) {
+        self.history = [[0; MAX_ORDER * 2]; 2];
+        self.histories_match = true;
+        self.history_index = 0;
+        self.noise_filter.reset();
+    }
+    /// Prepares the analysis history from `raw` when the formant stage becomes
+    /// active, and keeps active synthesis banks intact.
+    pub(crate) fn prepare_enable(&mut self, raw: &[Q14; HISTORY], write: usize) {
+        self.dirty = true;
+        let max_period = (self.rate.as_u32() as usize / 40).max(1);
+        let extra = (max_period / 10).max(1);
+        let count = (ANALYSIS_FRAMES + ORDER)
+            .max(2 * max_period + extra + 2)
+            .min(HISTORY - 1);
+        for offset in (1..=count).rev() {
+            let index = (write + HISTORY - offset) % HISTORY;
+            let previous = ring(index as i32 - 1);
+            let filtered = self.remove_glottal(raw[index].to_bits(), raw[previous].to_bits());
+            let reverse_index = HISTORY - 1 - index;
+            self.input[reverse_index] = filtered;
+            if reverse_index < ORDER {
+                self.input[reverse_index + HISTORY] = filtered;
+            }
+        }
+        self.design_counter = 0;
+        self.smooth_reset = true;
+        self.snap_blend = true;
+    }
+    /// Copies the synthesis feedback history from channel zero to channel one.
+    pub(crate) fn copy_channel_zero(&mut self) {
+        self.history[1] = self.history[0];
+        self.histories_match = true;
     }
     /// Starts a new model and a new correlation window when pitch acquisition
     /// locks.
@@ -813,7 +849,10 @@ impl Formant {
                 self.smooth_reset = true;
             }
         }
-        if self.stamp.blend < 16384 {
+        if self.snap_blend {
+            self.stamp.blend = 16384;
+            self.snap_blend = false;
+        } else if self.stamp.blend < 16384 {
             self.stamp.blend = (self.stamp.blend + 1638).min(16384);
         }
         self.stamps[position] = self.stamp;

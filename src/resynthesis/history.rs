@@ -60,7 +60,7 @@ pub(crate) fn clear_dirty_ring<T: Copy>(buffer: &mut [T], written: usize, value:
 ///
 /// The center can be negative or more than one full history length.
 #[inline]
-fn interpolation_indices(center: i32) -> [usize; 3] {
+pub(super) fn interpolation_indices(center: i32) -> [usize; 3] {
     let middle = ring(center);
     let left = if middle == 0 { HISTORY - 1 } else { middle - 1 };
     let right = if middle + 1 == HISTORY { 0 } else { middle + 1 };
@@ -82,6 +82,17 @@ fn interpolation_taps<T: Copy>(buffer: &[T; HISTORY], center: i32) -> [T; 3] {
     }
 }
 
+/// Returns the integer center frame of a Q14 position without wrap.
+#[inline]
+pub(super) fn center(position: Q14) -> i32 {
+    let bits = position.to_bits();
+    if position > Q14::ZERO {
+        bits.wrapping_add(8192) >> 14
+    } else {
+        -(8192_i32.wrapping_sub(bits) >> 14)
+    }
+}
+
 /// Returns the value of a three-point parabola at a Q14 frame position.
 ///
 /// The result has two parts: the Q14 sample and the integer center frame
@@ -95,11 +106,7 @@ fn interpolation_taps<T: Copy>(buffer: &[T; HISTORY], center: i32) -> [T; 3] {
 /// products use `i64` arithmetic and clamp to `i32`.
 pub(super) fn interpolation(buffer: &[Q14; HISTORY], position: Q14) -> (Q14, i32) {
     let bits = position.to_bits();
-    let center = if position > Q14::ZERO {
-        bits.wrapping_add(8192) >> 14
-    } else {
-        -(8192_i32.wrapping_sub(bits) >> 14)
-    };
+    let center = center(position);
     let fraction = Q14::from_bits(bits.wrapping_sub(center.wrapping_shl(14)));
     let [left, middle, right] = interpolation_taps(buffer, center);
     (quadratic(left, middle, right, fraction), center)

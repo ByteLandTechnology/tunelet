@@ -1,8 +1,8 @@
 //! The processor: audio blocks, timed controls, host feedback and the tail.
 
-use crate::effects::alien::{self, Alien};
+use crate::effects::alien::Alien;
 use crate::effects::punch::Punch;
-use crate::effects::reverb::{self, Reverb};
+use crate::effects::reverb::Reverb;
 use crate::effects::warm::Warm;
 use crate::events::{ValidatedEvent, ValidatedEvents};
 use crate::numeric::rng::RandomStream;
@@ -65,12 +65,12 @@ pub struct Processor {
     /// The pitch tracking and voice histories, in a box to keep the handle
     /// small.
     resynthesis: Box<Resynthesis>,
-    /// The reverse-loop history, which records also while its wet output is
-    /// disabled.
+    /// The reverse-loop history, with a captured loop and wet mix ramps.
     alien: Alien,
     /// The delay network and the damping filters.
     ///
-    /// In bypass, their histories do not change.
+    /// When you disable reverb, the network input ramps to zero over 256
+    /// frames and an active tail decays before a clear.
     reverb: Reverb,
     /// The random sequence of this instance and the cached arctangent position.
     numeric: NumericContext,
@@ -84,8 +84,7 @@ pub struct Processor {
     output_peaks: [i32; 2],
     /// The last ratio from correction only.
     ///
-    /// It is zero before the first `process` call, after a reset or after a
-    /// change of stereo output.
+    /// It is zero before the first `process` call or after a reset.
     last_resample_ratio: f32,
     /// The count of rendered frames since reset, with drain frames included.
     ///
@@ -469,20 +468,18 @@ impl Processor {
         Ok(count)
     }
 
-    /// Returns the finite tail budget for the current configuration.
+    /// Returns the finite tail budget for the current configuration and active
+    /// stage transitions.
     ///
-    /// This value is a configured limit. It is not the number of drain frames
-    /// that are left, and it is not a measured decay time. It can include
-    /// silence. It can also stop filter output that continues for a long
-    /// time.
+    /// The budget includes active Alien ramps, reverb mode fades and reverb
+    /// bypass tails. It is not the number of drain frames that are left. It is
+    /// not a measured decay time. It can include silence. It can also stop
+    /// filter output that continues for a long time.
     pub fn tail_frames(&self) -> usize {
         self.resynthesis
             .tail_frames()
-            .saturating_add(alien::tail_frames(self.config.alien))
-            .saturating_add(reverb::tail_frames(
-                self.preparation.sample_rate,
-                self.config.reverb,
-            ))
+            .saturating_add(self.alien.tail_frames())
+            .saturating_add(self.reverb.tail_frames())
     }
 
     /// Returns the fixed sample rate and block limit.
@@ -684,17 +681,21 @@ impl Processor {
     ///
     /// The validation also examines the fields of disabled stages. A stage
     /// that does not change keeps its state. A change of `stereo_output`
-    /// resets the resynthesis audio state, Alien, the reverb delays, the peak
-    /// and the reported ratio. It also releases the harmony MIDI notes. It
-    /// keeps Punch, Warm, the correction keys, the random stream, the reverb
-    /// low-pass memories and the frame count. A change of `random_seed` starts
-    /// the random stream again.
+    /// ramps the voice pan weights over 256 frames and keeps the audio
+    /// histories, the feedback and the held MIDI notes. A change of
+    /// `random_seed` starts the random stream again.
     ///
     /// Each successful call cancels a drain, also for an identical
-    /// configuration. A change of reverb mode keeps the delay contents. If you
-    /// disable Punch, Warm or reverb, the history of that stage stops. Alien
-    /// continues to record. A change in either half of the `u64` seed starts
-    /// the stream again, but the new sequence uses only the low 32 bits.
+    /// configuration. If the reverb mode changes, the stage ramps the wet gain
+    /// to zero over 256 frames. Then it clears the delay buffer and the
+    /// damping filters, and ramps the new mode over 256 frames.
+    ///
+    /// If you disable Punch or Warm, the history of that stage stops. If you
+    /// disable reverb, its input ramps to zero over 256 frames and its active
+    /// tail decays before a clear. When you enable Alien, it captures a fresh
+    /// loop and ramps the wet mix over 200 frames. A change in either half of
+    /// the `u64` seed starts the stream again, but the new sequence uses only
+    /// the low 32 bits.
     ///
     /// # Errors
     ///
@@ -716,10 +717,6 @@ impl Processor {
         }
         if self.config.resynthesis != config.resynthesis {
             self.resynthesis.apply_config(config.resynthesis);
-        }
-        if self.config.resynthesis.stereo_output != config.resynthesis.stereo_output {
-            // Resynthesis resets its histories if its stereo setting changes.
-            self.reset_post_resynthesis();
         }
         if self.config.resynthesis.random_seed != config.resynthesis.random_seed {
             self.numeric.random = RandomStream::new(config.resynthesis.random_seed as u32);
@@ -767,8 +764,7 @@ impl Processor {
 
     /// Clears the stages, the peak windows and the ratio after resynthesis.
     ///
-    /// Both a full reset and a change of stereo output clear this state. The
-    /// frame count does not change here.
+    /// The frame count does not change here.
     fn reset_post_resynthesis(&mut self) {
         self.alien.reset();
         self.reverb.reset();
@@ -1095,8 +1091,8 @@ pub struct Feedback {
     /// unity.
     ///
     /// It does not include the configured pitch shift or the ratios of
-    /// individual voices. It is zero before processing, after a reset or after
-    /// a change of stereo output.
+    /// individual voices. It is zero before the first `process` call or after a
+    /// reset.
     pub resample_ratio: f32,
     /// The reported input pitch period in samples, with fractional samples.
     ///
@@ -1135,10 +1131,10 @@ pub struct Feedback {
     pub voiced: bool,
     /// The largest absolute clipped output sample, divided by 32768.
     ///
-    /// The peak window starts at construction, at a reset, at a change of
-    /// stereo output or at a call to [`Processor::take_feedback`]. The value
-    /// is in 0..=32767/32768. Mono calls measure the sample after the downmix.
-    /// [`Processor::feedback`] does not clear the value.
+    /// The peak window starts at construction, at a reset or at a call to
+    /// [`Processor::take_feedback`]. The value is in 0..=32767/32768. Mono
+    /// calls measure the sample after the downmix. [`Processor::feedback`] does
+    /// not clear the value.
     pub peak_level: f32,
     /// The number of frames processed since construction or the last reset,
     /// with drain frames included.
@@ -1163,9 +1159,8 @@ pub struct Feedback {
 /// `Default` gives a snapshot with all zeros and no target.
 ///
 /// The three peak fields measure a window. The window starts at
-/// construction, at a reset, at a change of stereo output or at a call to
-/// [`Processor::take_telemetry`]. This window is independent of the peak
-/// window of [`Feedback`].
+/// construction, at a reset or at a call to [`Processor::take_telemetry`].
+/// This window is independent of the peak window of [`Feedback`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -1194,15 +1189,15 @@ pub struct Telemetry {
     ///
     /// The contribution is the wet signal times the mix, before the output
     /// gain. Stereo calls measure the larger of the two channels. Mono calls
-    /// measure the wet signal after the downmix. While the reverb is disabled,
-    /// the window gets no new values.
+    /// measure the wet signal after the downmix. Active bypass tails also
+    /// update this peak. While the reverb is idle in bypass, the window gets no
+    /// new values.
     pub reverb_wet_peak: f32,
     /// The pitch-correction ratio from the last processed frame, where 1 is
     /// unity, as [`Feedback::resample_ratio`] gives.
     ///
     /// It does not include the configured pitch shift or the ratios of
-    /// individual voices. It is zero before the first frame, after a reset or
-    /// after a change of stereo output.
+    /// individual voices. It is zero before the first frame or after a reset.
     pub resample_ratio: f32,
     /// The reported input pitch period in samples, with fractional samples, as
     /// [`Feedback::period_samples`] gives.
@@ -1294,14 +1289,16 @@ pub struct Telemetry {
     /// it during release and updates it on each enabled frame. The value is 1
     /// while Warm is disabled.
     pub warm_gain: f32,
-    /// The length of the Alien loop in frames, as
-    /// [`crate::AlienConfig::loop_frames`] gives.
+    /// The active length of the Alien loop in frames.
+    ///
+    /// It equals [`crate::AlienConfig::loop_frames`] after any active wet fade
+    /// to zero finishes.
     pub alien_loop_frames: u32,
     /// The current frame in the Alien loop. It is less than
     /// [`alien_loop_frames`](Self::alien_loop_frames).
     ///
     /// The reverse reader is two times this number of frames behind the
-    /// recording position. The value advances also while Alien is disabled.
+    /// write position after loop capture completes.
     pub alien_phase_frames: u32,
     /// The wrapping count of formant analyses since construction.
     ///

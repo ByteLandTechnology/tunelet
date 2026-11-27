@@ -6,12 +6,22 @@ use crate::numeric::fixed::{Fixed, Q14};
 use crate::processor::OutputLayout;
 use crate::{Error, SampleRate};
 
+/// The step for a 256-frame Q14 gain ramp (`16384 / 256`).
+const RAMP_STEP: Q14 = Q14::from_bits(64);
+
+/// Returns the frames that remain for a 256-frame Q14 ramp to reach zero.
+#[inline]
+fn ramp_frames(fade: Q14) -> usize {
+    (fade.to_bits().max(0) as usize).div_ceil(64)
+}
+
 /// The echo or reverberation network. The default is [`Self::Echo`].
 ///
-/// All modes share one delay buffer. A mode change uses the same buffer
-/// contents and damping filter memories. Thus a transition can play audio
-/// from the previous network. All modes keep the stereo dry input. Schroeder
-/// adds the same wet signal to the two channels.
+/// All modes share one delay buffer. If the mode changes while the reverb is
+/// active, the stage ramps the wet gain to zero over 256 frames. Then it
+/// clears the delay buffer and the damping filters, and ramps the new mode
+/// over 256 frames. All modes keep the stereo dry input. Schroeder adds the
+/// same wet signal to the two channels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
@@ -36,12 +46,14 @@ pub enum ReverbMode {
 /// The reverb after Alien, with controls for the network, the wet mix and the
 /// decay.
 ///
-/// The reverb is disabled by default. In bypass, the stage returns the input
-/// and does not advance the delay network or the damping filters. If the
-/// stage is enabled and the mix is zero, the network still operates. A reset
-/// clears the delay buffer but keeps the memories of the damping filters. The
-/// mix, diffusion and decay controls are quantized to Q14. The function of
-/// each control changes with the network.
+/// The reverb is disabled by default. If you disable an active reverb, the
+/// stage ramps the network input to zero over 256 frames. Then the decay tail
+/// finishes before the stage clears the delay buffer and the damping filters.
+/// If the stage is enabled and the mix is zero, the network still operates.
+///
+/// A reset clears the delay buffer and keeps the memories of the damping
+/// filters. The mix, diffusion and decay controls are quantized to Q14. The
+/// function of each control changes with the network.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -50,8 +62,9 @@ pub enum ReverbMode {
     serde(rename_all = "camelCase")
 )]
 pub struct ReverbConfig {
-    /// Enables the selected network. The default is `false`. In bypass, the
-    /// histories do not change.
+    /// Enables the selected network. The default is `false`. If you set this
+    /// field to `false`, the network input ramps to zero over 256 frames and
+    /// any active tail decays before a clear.
     pub enabled: bool,
     /// The topology of the delay network. The default is
     /// [`ReverbMode::Echo`].
@@ -141,20 +154,24 @@ pub(crate) fn validate_brightness_hz(brightness_hz: f32) -> Result<(), Error> {
 pub(crate) struct Reverb {
     /// The prepared sample rate for the cutoff and tap calculations.
     rate: SampleRate,
-    /// The validated controls and the selected network.
+    /// The validated controls that the host requested.
     config: ReverbConfig,
+    /// The controls that currently drive the delay topology.
+    active_config: ReverbConfig,
     /// The shared circular storage for all network topologies.
     delay: DelayLine,
-    /// The first damping filter. A delay reset or a mode change does not
-    /// clear its memories.
+    /// The first damping filter. A processor reset keeps its memories, while a
+    /// mode switch or a completed bypass tail clears them.
     lpf1: Biquad,
-    /// The second damping filter. It keeps its memories in the same way as
-    /// the first filter.
+    /// The second damping filter. It keeps and clears its memories in the same
+    /// way as the first filter.
     lpf2: Biquad,
     /// 67 prepared frame offsets into the shared ring.
     taps: [usize; 67],
-    /// The Q14 wet contribution.
+    /// The Q14 wet contribution of `active_config`.
     mix: Q14,
+    /// The Q14 wet contribution of `config`, for dry transitions across modes.
+    target_mix: Q14,
     /// The Q14 control for the diffusion or the echo distance.
     diffuse: Q14,
     /// The Q14 feedback coefficient, scaled by 100/105.
@@ -162,6 +179,17 @@ pub(crate) struct Reverb {
     /// The Q14 allpass coefficients of MediumHall and LargeHall, scaled by
     /// `diffuse`.
     hall_diffuse: [Q14; 6],
+    /// The Q14 ramp for the network input and the dry blend, in 0..=1.
+    enable_fade: Q14,
+    /// The Q14 wet gain scale for mode switches, in 0..=1.
+    mode_fade: Q14,
+    /// If `true`, `mode_fade` moves to zero before the network clears.
+    fading_out_mode: bool,
+    /// The frames of silent-input decay that are left in bypass.
+    bypass_remaining: usize,
+    /// Consecutive bypass frames within the two-unit fixed-point limit-cycle
+    /// floor.
+    bypass_quiet_frames: usize,
     /// The Binaural delay of approximately 0.8 ms between the tap that gets
     /// the early sum and the filtered tap. Both channels use it.
     binaural_offset: usize,
@@ -182,6 +210,12 @@ fn q14(coefficient: f64) -> Q14 {
     Q14::from_f64(coefficient)
 }
 
+/// Quantizes a public mix control to Q14 after single-precision multiplication.
+#[inline]
+fn quantize_mix(mix: f32) -> Q14 {
+    Q14::from_f64((mix * 100.0) as f64 / 100.0)
+}
+
 /// Multiplies two Q14 values in `i64` and clamps the shifted result to `i32`.
 #[inline]
 fn mul(left: Q14, right: Q14) -> Q14 {
@@ -200,17 +234,25 @@ impl Reverb {
     /// validated controls.
     pub(crate) fn new(rate: SampleRate, config: ReverbConfig) -> Self {
         let layout = reverb_layout(rate.hz());
+        let enable_fade = if config.enabled { Q14::ONE } else { Q14::ZERO };
         let mut result = Self {
             rate,
             config,
+            active_config: config,
             delay: DelayLine::new(),
             lpf1: Biquad::new(),
             lpf2: Biquad::new(),
             taps: layout.taps,
             mix: Q14::default(),
+            target_mix: quantize_mix(config.mix),
             diffuse: Q14::default(),
             decay: Q14::default(),
             hall_diffuse: [Q14::default(); 6],
+            enable_fade,
+            mode_fade: Q14::ONE,
+            fading_out_mode: false,
+            bypass_remaining: 0,
+            bypass_quiet_frames: 0,
             binaural_offset: layout.binaural_offset,
             wet_peak: 0,
             dirty: false,
@@ -218,24 +260,24 @@ impl Reverb {
         result.configure_all();
         result
     }
-    /// Quantizes the wet contribution unconditionally.
+    /// Quantizes the wet contribution of `active_config` unconditionally.
     fn configure_mix(&mut self) {
-        self.mix = Q14::from_f64((self.config.mix * 100.0) as f64 / 100.0);
+        self.mix = quantize_mix(self.active_config.mix);
     }
     /// Quantizes the diffusion control and the hall allpass coefficients
     /// unconditionally.
     fn configure_diffusion(&mut self) {
-        self.diffuse = Q14::from_f64((self.config.diffusion * 100.0) as f64 / 100.0);
+        self.diffuse = Q14::from_f64((self.active_config.diffusion * 100.0) as f64 / 100.0);
         self.hall_diffuse = [0.4, 0.5, 0.6, 0.8, 0.9, 0.95].map(|g| mul(self.diffuse, q14(g)));
     }
     /// Quantizes the feedback control unconditionally.
     fn configure_decay(&mut self) {
-        self.decay = Q14::from_f64((self.config.decay * 100.0) as f64 / 105.0);
+        self.decay = Q14::from_f64((self.active_config.decay * 100.0) as f64 / 105.0);
     }
     /// Updates the two low-pass filters unconditionally.
     fn configure_brightness_hz(&mut self) {
         let brightness = self
-            .config
+            .active_config
             .brightness_hz
             .min((self.rate.hz() as f64 * 0.49) as f32);
         let design = Design::low_pass_one_pole(self.rate.hz(), brightness);
@@ -249,15 +291,14 @@ impl Reverb {
         self.configure_decay();
         self.configure_brightness_hz();
     }
-    /// Updates the changed coefficients and does not clear the delay or filter
-    /// state.
+    /// Updates `active_config` and quantizes only the controls that changed.
     ///
     /// The f32 multiplication by 100 occurs before the f64 division and the
     /// quantization. If you combine these expressions, the quantized
     /// coefficients can change.
-    pub(crate) fn set_config(&mut self, config: ReverbConfig) {
-        let old = self.config;
-        self.config = config;
+    fn apply_active_config(&mut self, config: ReverbConfig) {
+        let old = self.active_config;
+        self.active_config = config;
         if old.mix != config.mix {
             self.configure_mix();
         }
@@ -271,45 +312,150 @@ impl Reverb {
             self.configure_brightness_hz();
         }
     }
+    /// Returns `true` while the reverb network or a transition fade is active.
+    fn is_running(&self) -> bool {
+        self.config.enabled
+            || self.bypass_remaining > 0
+            || self.fading_out_mode
+            || self.enable_fade > Q14::ZERO
+    }
+    /// Returns `true` if scalar updates apply immediately to `active_config`.
+    fn can_update_active(&self) -> bool {
+        !self.fading_out_mode && (self.config.enabled || !self.is_running())
+    }
+    /// Clears the delay buffer and both damping filters after a transition.
+    fn clear_all(&mut self) {
+        self.delay.reset();
+        self.dirty = false;
+        self.lpf1.reset();
+        self.lpf2.reset();
+        self.bypass_quiet_frames = 0;
+    }
+    /// Applies validated controls and starts mode fades or bypass tails when
+    /// necessary.
+    pub(crate) fn set_config(&mut self, config: ReverbConfig) {
+        let was_running = self.is_running();
+        let prev_enabled = self.config.enabled;
+        let old_mix = self.config.mix;
+        self.config = config;
+        if old_mix != config.mix {
+            self.target_mix = quantize_mix(config.mix);
+        }
+        if !was_running {
+            self.apply_active_config(config);
+            self.fading_out_mode = false;
+            self.mode_fade = Q14::ONE;
+            return;
+        }
+        if config.mode != self.active_config.mode {
+            if prev_enabled && !config.enabled {
+                let mut active = self.active_config;
+                active.enabled = true;
+                let tail = tail_frames(self.rate, active);
+                self.bypass_quiet_frames = 0;
+                if tail == 0 {
+                    self.bypass_remaining = 0;
+                    self.enable_fade = Q14::ZERO;
+                    self.mode_fade = Q14::ONE;
+                    self.fading_out_mode = false;
+                    self.clear_all();
+                    self.apply_active_config(config);
+                    return;
+                }
+                self.bypass_remaining = tail.saturating_add(ramp_frames(self.enable_fade));
+            }
+            self.fading_out_mode = true;
+            return;
+        }
+        self.fading_out_mode = false;
+        if config.enabled {
+            self.apply_active_config(config);
+            self.bypass_remaining = 0;
+            self.bypass_quiet_frames = 0;
+        } else if prev_enabled {
+            let mut active = self.active_config;
+            active.enabled = true;
+            let tail = tail_frames(self.rate, active);
+            self.bypass_quiet_frames = 0;
+            if tail == 0 {
+                self.bypass_remaining = 0;
+                self.enable_fade = Q14::ZERO;
+                self.mode_fade = Q14::ONE;
+                self.clear_all();
+                self.apply_active_config(config);
+            } else {
+                self.bypass_remaining = tail.saturating_add(ramp_frames(self.enable_fade));
+            }
+        }
+    }
     /// Stores the wet contribution. If the value changed, quantizes it again.
     pub(crate) fn set_mix(&mut self, mix: f32) {
         let changed = self.config.mix != mix;
         self.config.mix = mix;
         if changed {
+            self.target_mix = quantize_mix(mix);
+        }
+        if self.can_update_active() && self.active_config.mix != mix {
+            self.active_config.mix = mix;
             self.configure_mix();
         }
     }
     /// Stores the diffusion control. If the value changed, quantizes it again.
     pub(crate) fn set_diffusion(&mut self, diffusion: f32) {
-        let changed = self.config.diffusion != diffusion;
         self.config.diffusion = diffusion;
-        if changed {
+        if self.can_update_active() && self.active_config.diffusion != diffusion {
+            self.active_config.diffusion = diffusion;
             self.configure_diffusion();
         }
     }
     /// Stores the feedback control. If the value changed, quantizes it again.
     pub(crate) fn set_decay(&mut self, decay: f32) {
-        let changed = self.config.decay != decay;
         self.config.decay = decay;
-        if changed {
+        if self.can_update_active() && self.active_config.decay != decay {
+            self.active_config.decay = decay;
             self.configure_decay();
         }
     }
     /// Stores the low-pass cutoff. If the value changed, updates the filter
     /// designs.
     pub(crate) fn set_brightness_hz(&mut self, brightness_hz: f32) {
-        let changed = self.config.brightness_hz != brightness_hz;
         self.config.brightness_hz = brightness_hz;
-        if changed {
+        if self.can_update_active() && self.active_config.brightness_hz != brightness_hz {
+            self.active_config.brightness_hz = brightness_hz;
             self.configure_brightness_hz();
         }
     }
-    /// Clears only the delay contents, and keeps the write cursor and the
-    /// damping memories.
+    /// Clears the delay contents and transition state, while it keeps the
+    /// write cursor and the damping memories.
     pub(crate) fn reset(&mut self) {
         if self.dirty {
             self.delay.reset();
             self.dirty = false;
+        }
+        self.apply_active_config(self.config);
+        self.enable_fade = if self.config.enabled {
+            Q14::ONE
+        } else {
+            Q14::ZERO
+        };
+        self.mode_fade = Q14::ONE;
+        self.fading_out_mode = false;
+        self.bypass_remaining = 0;
+        self.bypass_quiet_frames = 0;
+    }
+    /// Returns the finite tail budget, with active bypass tails included.
+    pub(crate) fn tail_frames(&self) -> usize {
+        if self.config.enabled {
+            let base = tail_frames(self.rate, self.config);
+            if self.fading_out_mode {
+                base.saturating_add(ramp_frames(self.mode_fade))
+            } else {
+                base
+            }
+        } else if self.fading_out_mode {
+            ramp_frames(self.mode_fade).max(ramp_frames(self.enable_fade))
+        } else {
+            self.bypass_remaining.max(ramp_frames(self.enable_fade))
         }
     }
     /// Returns the largest absolute Q14 wet contribution since the last
@@ -321,30 +467,19 @@ impl Reverb {
     pub(crate) fn clear_wet_peak(&mut self) {
         self.wet_peak = 0;
     }
-    /// Calculates the selected network one time and advances the ring by one
-    /// frame.
-    /// In bypass, no delay or filter history advances. The internal mono
-    /// averages use integer division toward zero. `layout` selects the stereo
-    /// or mono wet peak measurement. The mono measurement uses a shift.
-    pub(crate) fn process_sample(&mut self, frame: [Q14; 2], layout: OutputLayout) -> [Q14; 2] {
-        if !self.config.enabled {
-            return frame;
-        }
-        self.dirty = true;
-        let [left, right] = frame;
-        let dry = Q14::ONE - self.mix;
-        let left_dry = mul(left, dry);
-        let right_dry = mul(right, dry);
+    /// Evaluates the active delay topology one time, advances the delay ring
+    /// and returns the scaled wet stereo pair.
+    fn step_network(&mut self, left: Q14, right: Q14, wet_gain: Q14) -> [Q14; 2] {
         let d = &mut self.delay;
-        let result = match self.config.mode {
+        let wet_terms = match self.active_config.mode {
             ReverbMode::Echo => {
                 let t = &self.taps;
                 d.put(mono(left, right), t[0]);
                 let echo: Fixed<0> = Fixed::<0>::from_bits(t[39] as i32).mul(self.diffuse);
                 d.comb(t[0], echo.to_bits() as usize, self.decay);
                 [
-                    left_dry + mul(self.mix, d.get(t[25]) - d.get(t[32])),
-                    right_dry + mul(self.mix, d.get(t[26]) - d.get(t[31])),
+                    mul(wet_gain, d.get(t[25]) - d.get(t[32])),
+                    mul(wet_gain, d.get(t[26]) - d.get(t[31])),
                 ]
             }
             ReverbMode::Schroeder => {
@@ -367,8 +502,8 @@ impl Reverb {
                 );
                 d.allpass(t[40], t[43], self.decay);
                 d.allpass(t[44], t[45], self.decay);
-                let wet = mul(self.mix, d.get(t[45]));
-                [left_dry + wet, right_dry + wet]
+                let wet = mul(wet_gain, d.get(t[45]));
+                [wet, wet]
             }
             ReverbMode::SmallRoom => {
                 let t = &self.taps;
@@ -386,10 +521,7 @@ impl Reverb {
                     d.fir_sum(&[(t[16], q14(0.2)), (t[32], q14(0.2)), (t[51], q14(0.2))]);
                 let right_wet =
                     d.fir_sum(&[(t[49], q14(0.2)), (t[65], q14(0.2)), (t[17], q14(0.2))]);
-                [
-                    left_dry + mul(self.mix, left_wet),
-                    right_dry + mul(self.mix, right_wet),
-                ]
+                [mul(wet_gain, left_wet), mul(wet_gain, right_wet)]
             }
             ReverbMode::Binaural => {
                 let t = &self.taps;
@@ -405,14 +537,15 @@ impl Reverb {
                 );
                 d.put(a, tap);
                 d.lpf(filter, &mut self.lpf1);
-                let out = left_dry + mul(self.mix, d.get(t[40] + filter) + a);
+                let wet_left = mul(wet_gain, d.get(t[40] + filter) + a);
                 let b = mul(
                     early,
                     d.get(t[47] + seed) + d.get(t[48] + seed) + d.get(t[54] + seed),
                 );
                 d.put(b, t[40] + tap);
                 d.lpf(t[40] + filter, &mut self.lpf2);
-                [out, right_dry + mul(self.mix, d.get(filter) + b)]
+                let wet_right = mul(wet_gain, d.get(filter) + b);
+                [wet_left, wet_right]
             }
             ReverbMode::MediumHall => {
                 let t = &self.taps;
@@ -439,10 +572,7 @@ impl Reverb {
                     (t[52], q14(0.25)),
                     (t[56], q14(0.2)),
                 ]);
-                [
-                    left_dry + mul(self.mix, left_wet),
-                    right_dry + mul(self.mix, right_wet),
-                ]
+                [mul(wet_gain, left_wet), mul(wet_gain, right_wet)]
             }
             ReverbMode::LargeHall => {
                 let t = &self.taps;
@@ -461,17 +591,71 @@ impl Reverb {
                     d.fir_sum(&[(t[10], q14(0.6)), (t[36], q14(0.3)), (t[61], q14(0.3))]);
                 let right_wet =
                     d.fir_sum(&[(t[10], q14(0.6)), (t[37], q14(0.3)), (t[60], q14(0.3))]);
-                [
-                    left_dry + mul(self.mix, left_wet),
-                    right_dry + mul(self.mix, right_wet),
-                ]
+                [mul(wet_gain, left_wet), mul(wet_gain, right_wet)]
             }
         };
         d.step();
+        wet_terms
+    }
+    /// Calculates the selected network one time and advances the ring by one
+    /// frame.
+    ///
+    /// When the stage is idle in bypass, no delay or filter history advances.
+    /// The internal mono averages use integer division toward zero. `layout`
+    /// selects the stereo or mono wet peak measurement. The mono measurement
+    /// uses a shift.
+    pub(crate) fn process_sample(&mut self, frame: [Q14; 2], layout: OutputLayout) -> [Q14; 2] {
+        if !self.config.enabled
+            && self.bypass_remaining == 0
+            && !self.fading_out_mode
+            && self.enable_fade == Q14::ZERO
+        {
+            return frame;
+        }
+        self.dirty = true;
+        if self.config.enabled && self.enable_fade < Q14::ONE {
+            self.enable_fade = (self.enable_fade + RAMP_STEP).min(Q14::ONE);
+        } else if !self.config.enabled && self.enable_fade > Q14::ZERO {
+            self.enable_fade = (self.enable_fade - RAMP_STEP).max(Q14::ZERO);
+        }
+        if self.fading_out_mode {
+            self.mode_fade = (self.mode_fade - RAMP_STEP).max(Q14::ZERO);
+        } else if self.mode_fade < Q14::ONE {
+            self.mode_fade = (self.mode_fade + RAMP_STEP).min(Q14::ONE);
+        }
+
+        let [left, right] = frame;
+        let dry = Q14::ONE - self.mix;
+        let steady = self.config.enabled
+            && !self.fading_out_mode
+            && self.enable_fade == Q14::ONE
+            && self.mode_fade == Q14::ONE;
+        let (dry_terms, wet_terms) = if steady {
+            let wet_terms = self.step_network(left, right, self.mix);
+            ([mul(left, dry), mul(right, dry)], wet_terms)
+        } else {
+            let net_left = mul(left, self.enable_fade);
+            let net_right = mul(right, self.enable_fade);
+            let enabled_dry = if self.fading_out_mode && self.config.enabled {
+                mul(dry, self.mode_fade)
+                    + mul(Q14::ONE - self.target_mix, Q14::ONE - self.mode_fade)
+            } else {
+                dry
+            };
+            let bypass_weight = Q14::ONE - self.enable_fade;
+            let dry_terms = [
+                mul(left, bypass_weight) + mul(mul(left, enabled_dry), self.enable_fade),
+                mul(right, bypass_weight) + mul(mul(right, enabled_dry), self.enable_fade),
+            ];
+            let wet_gain = mul(self.mix, self.mode_fade);
+            let wet_terms = self.step_network(net_left, net_right, wet_gain);
+            (dry_terms, wet_terms)
+        };
+        let result = [dry_terms[0] + wet_terms[0], dry_terms[1] + wet_terms[1]];
         // Telemetry only. The wet contribution is the output minus the dry
         // term. Mono calls measure the wet signal after the downmix.
-        let left_wet = result[0] - left_dry;
-        let right_wet = result[1] - right_dry;
+        let left_wet = result[0] - dry_terms[0];
+        let right_wet = result[1] - dry_terms[1];
         match layout {
             OutputLayout::Stereo => {
                 for wet in [left_wet, right_wet] {
@@ -486,6 +670,45 @@ impl Reverb {
                 .to_bits();
                 self.wet_peak = self.wet_peak.max(wet);
             }
+        }
+        if self.fading_out_mode && self.mode_fade == Q14::ZERO {
+            if self.config.enabled {
+                self.clear_all();
+                self.fading_out_mode = false;
+                self.apply_active_config(self.config);
+                self.bypass_remaining = 0;
+            } else if self.enable_fade == Q14::ZERO {
+                self.clear_all();
+                self.fading_out_mode = false;
+                self.apply_active_config(self.config);
+                self.bypass_remaining = 0;
+                self.mode_fade = Q14::ONE;
+            }
+        } else if !self.config.enabled && self.bypass_remaining > 0 {
+            let quiet = self.enable_fade == Q14::ZERO
+                && wet_terms[0].abs().to_bits() <= 2
+                && wet_terms[1].abs().to_bits() <= 2;
+            if quiet {
+                self.bypass_quiet_frames += 1;
+            } else {
+                self.bypass_quiet_frames = 0;
+            }
+            self.bypass_remaining -= 1;
+            if self.bypass_remaining == 0 || self.bypass_quiet_frames >= CAPACITY {
+                self.bypass_remaining = 0;
+                self.enable_fade = Q14::ZERO;
+                self.mode_fade = Q14::ONE;
+                self.clear_all();
+                self.apply_active_config(self.config);
+            }
+        } else if !self.config.enabled
+            && !self.fading_out_mode
+            && self.bypass_remaining == 0
+            && self.enable_fade == Q14::ZERO
+        {
+            self.mode_fade = Q14::ONE;
+            self.clear_all();
+            self.apply_active_config(self.config);
         }
         result
     }
