@@ -66,17 +66,32 @@ impl PitchClass {
 
 /// A scale for [`NoteMask::from_key_scale`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 #[cfg_attr(
     all(feature = "wasm", target_arch = "wasm32"),
     derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
     serde(rename_all = "camelCase")
 )]
 pub enum CorrectionScale {
-    /// The major scale.
+    /// The major scale: semitone offsets 0, 2, 4, 5, 7, 9, 11.
     Major,
-    /// The natural minor scale.
+    /// The natural minor scale: semitone offsets 0, 2, 3, 5, 7, 8, 10.
     Minor,
-    /// The chromatic scale with all notes.
+    /// The harmonic minor scale: semitone offsets 0, 2, 3, 5, 7, 8, 11.
+    HarmonicMinor,
+    /// The melodic minor scale: semitone offsets 0, 2, 3, 5, 7, 9, 11.
+    MelodicMinor,
+    /// The Dorian mode: semitone offsets 0, 2, 3, 5, 7, 9, 10.
+    Dorian,
+    /// The Mixolydian mode: semitone offsets 0, 2, 4, 5, 7, 9, 10.
+    Mixolydian,
+    /// The major pentatonic scale: semitone offsets 0, 2, 4, 7, 9.
+    MajorPentatonic,
+    /// The minor pentatonic scale: semitone offsets 0, 3, 5, 7, 10.
+    MinorPentatonic,
+    /// The hexatonic blues scale: semitone offsets 0, 3, 5, 6, 7, 10.
+    Blues,
+    /// The chromatic scale with all twelve notes: semitone offsets 0..=11.
     #[default]
     Chromatic,
 }
@@ -119,24 +134,43 @@ impl NoteMask {
 
     /// Returns the pitch classes of `scale`, with `key` as the tonic.
     ///
-    /// Major uses the semitone offsets 0, 2, 4, 5, 7, 9, 11. Natural minor
-    /// uses 0, 2, 3, 5, 7, 8, 10. Chromatic permits all classes for all keys.
-    /// This function only makes a value. To apply the value, use the
-    /// correction configuration.
+    /// Each [`CorrectionScale`] variant lists its semitone offsets above `key`.
+    /// [`CorrectionScale::Chromatic`] permits all classes for all keys. This
+    /// function only makes a value. To apply the value, use the correction
+    /// configuration.
     pub fn from_key_scale(key: PitchClass, scale: CorrectionScale) -> Self {
-        if scale == CorrectionScale::Chromatic {
-            return Self::CHROMATIC;
-        }
-        let offset = usize::from(key.semitone())
-            + if scale == CorrectionScale::Minor {
-                3
-            } else {
-                0
-            };
-        let major = [
-            true, false, true, false, true, true, false, true, false, true, false, true,
-        ];
-        Self(std::array::from_fn(|i| major[(i + 24 - offset) % 12]))
+        let tones = match scale {
+            CorrectionScale::Chromatic => return Self::CHROMATIC,
+            CorrectionScale::Major => [
+                true, false, true, false, true, true, false, true, false, true, false, true,
+            ],
+            CorrectionScale::Minor => [
+                true, false, true, true, false, true, false, true, true, false, true, false,
+            ],
+            CorrectionScale::HarmonicMinor => [
+                true, false, true, true, false, true, false, true, true, false, false, true,
+            ],
+            CorrectionScale::MelodicMinor => [
+                true, false, true, true, false, true, false, true, false, true, false, true,
+            ],
+            CorrectionScale::Dorian => [
+                true, false, true, true, false, true, false, true, false, true, true, false,
+            ],
+            CorrectionScale::Mixolydian => [
+                true, false, true, false, true, true, false, true, false, true, true, false,
+            ],
+            CorrectionScale::MajorPentatonic => [
+                true, false, true, false, true, false, false, true, false, true, false, false,
+            ],
+            CorrectionScale::MinorPentatonic => [
+                true, false, false, true, false, true, false, true, false, false, true, false,
+            ],
+            CorrectionScale::Blues => [
+                true, false, false, true, false, true, true, true, false, false, true, false,
+            ],
+        };
+        let offset = usize::from(key.semitone());
+        Self(std::array::from_fn(|i| tones[(i + 12 - offset) % 12]))
     }
 }
 

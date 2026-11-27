@@ -101,6 +101,7 @@ const EXACT_REPLACEMENTS = [
   ["[`HarmonySource::ChordByName`]", '`"chordByName"`'],
   ["[`HarmonySource::ChordByDegree`]", '`"chordByDegree"`'],
   ["[`MultiVoiceMode::Choir`]", '`"choir"`'],
+  ["[`Preset::LushChoir`]", '`"lushChoir"`'],
   ["`None`", "`undefined`"],
   ["`u64::MAX`", "`2n ** 64n - 1n`"],
   ["`0x1234_abcd`", "`0x1234abcdn`"],
@@ -124,7 +125,15 @@ const PROSE_REPLACEMENTS = [
   [/\bearlier\s+in\s+the\s+slice\b/g, "earlier in the array"],
   [
     /A\s+scale\s+for\s+\[`NoteMask::from_key_scale`\]\./g,
-    "A major, natural minor or chromatic scale name.",
+    "A scale name for `noteMaskFromKeyScale`.",
+  ],
+  [
+    /A\s+preset\s+vocal\s+chain\s+for\s+\[`ProcessorConfig::from_preset`\]\./g,
+    "A preset vocal chain name for `presetConfig`.",
+  ],
+  [
+    /Each\s+preset\s+returns\s+a\s+complete\s+\[`ProcessorConfig`\]\s+that\s+passes\s+\[`ProcessorConfig::validate`\]\.\s+You\s+can\s+edit\s+any\s+field\s+before\s+you\s+give\s+the\s+configuration\s+to\s+\[`crate::Processor::new`\]\s+or\s+\[`crate::Processor::set_config`\]\./g,
+    "Each preset gives a complete, valid `ProcessorConfig`. You can edit any\nfield before you give the configuration to `new Tunelet` or\n`Tunelet.setConfig`.",
   ],
   [
     /Get\s+this\s+snapshot\s+from\s+\[`ProcessorConfig::control_activity`\]\s+or\s+\[`crate::Processor::control_activity`\]\./g,

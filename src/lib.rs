@@ -10,8 +10,9 @@
 //!
 //! [`PrepareConfig`] sets the sample rate. It also sets the maximum number of
 //! frames for one process call or one drain call. To make a
-//! [`ProcessorConfig`], start from its default value and change its public
-//! stage fields. Then give it to [`Processor::new`]. All configuration ranges
+//! [`ProcessorConfig`], start from its default value or
+//! [`ProcessorConfig::from_preset`] and change its public stage fields. Then
+//! give it to [`Processor::new`]. All configuration ranges
 //! are inclusive, unless the documentation tells you differently.
 //! Floating-point controls must be finite.
 //!
@@ -134,7 +135,10 @@ mod scale;
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub mod wasm;
 
-pub use config::{ControlActivity, PrepareConfig, ProcessorConfig, SampleRate};
+pub use config::{
+    ratio_to_semitones, semitones_to_ratio, ControlActivity, PrepareConfig, Preset,
+    ProcessorConfig, SampleRate,
+};
 pub use effects::alien::AlienConfig;
 pub use effects::punch::PunchConfig;
 pub use effects::reverb::{ReverbConfig, ReverbMode};
