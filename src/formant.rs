@@ -11,11 +11,13 @@
 //!
 //! Thirty model banks keep the history of the coefficients. Each audio frame
 //! stores a pair of banks and a blend. Thus, a fractional voice reader can
-//! find the model that applies to the audio that it reads again. The inverse
-//! filter has a delay of 441 frames. Resynthesis uses this delay to align
-//! each source sample with the stamp of the frame that filtered it. Audio
-//! and coefficients use Q14 words. All areas use one common scale that the
-//! code sets at runtime. The order of the arithmetic and of the rescale
+//! find the model that applies to the audio that it reads again. In standard
+//! latency mode, the inverse filter has a delay of 441 frames. In low-latency
+//! mode, the stage updates the model every 128 frames and filters the current
+//! frame without delay.
+//!
+//! Audio and coefficients use Q14 words. All areas use one common scale that
+//! the code sets at runtime. The order of the arithmetic and of the rescale
 //! operations changes the output samples.
 
 use crate::error::check_range;
@@ -134,9 +136,11 @@ pub(crate) fn validate_aspiration_cutoff_hz(aspiration_cutoff_hz: f32) -> Result
     )
 }
 
-/// The number of frames in each analysis step. The analysis output has a
-/// delay of this number of frames.
+/// The number of frames in each standard analysis step. The standard analysis
+/// output has a delay of this number of frames.
 pub(crate) const ANALYSIS_FRAMES: usize = 441;
+/// The number of frames in each causal low-latency analysis step.
+const CAUSAL_ANALYSIS_FRAMES: usize = 128;
 /// The order of the input LPC predictor and of the synthesis model without
 /// changes.
 const ORDER: usize = 50;
@@ -567,8 +571,33 @@ impl Formant {
             self.input[reverse_write + HISTORY] = filtered;
         }
 
-        self.design(periods, write, output_period_q6);
+        self.design(periods, write, output_period_q6, ANALYSIS_FRAMES);
         self.inverse(write)
+    }
+    /// Stores the pre-emphasized input, tries a model design each 128 frames,
+    /// and filters the current frame without delay.
+    ///
+    /// `write` and the period history must refer to the same full-size ring of
+    /// audio frames. `output_period_q6` is the kept period that sets the
+    /// analysis segments.
+    pub(crate) fn process_causal_analysis(
+        &mut self,
+        sample: i32,
+        previous: i32,
+        periods: &[Q6],
+        write: usize,
+        output_period_q6: i32,
+    ) -> i32 {
+        self.dirty = true;
+        let filtered = self.remove_glottal(sample, previous);
+        let reverse_write = HISTORY - 1 - write;
+        self.input[reverse_write] = filtered;
+        if reverse_write < ORDER {
+            self.input[reverse_write + HISTORY] = filtered;
+        }
+
+        self.design(periods, write, output_period_q6, CAUSAL_ANALYSIS_FRAMES);
+        self.inverse_at(write)
     }
     /// Moves to the next bank and keeps the old bank for the blend.
     ///
@@ -622,8 +651,8 @@ impl Formant {
         }
         self.smooth_index = (self.smooth_index + 1) % 2;
     }
-    /// Tries a model that uses the pitch each ANALYSIS_FRAMES, and stamps
-    /// each frame.
+    /// Tries a model that uses the pitch each `step_frames`, and stamps each
+    /// frame.
     ///
     /// If a pitch is available, the segment folds adjacent cycles and clamps
     /// the period to `rate / 40`. If not, the segment is a window of
@@ -641,14 +670,20 @@ impl Formant {
     ///
     /// If the Durbin analysis fails, smoothing starts again. The selected
     /// bank keeps the inverse coefficients that the analysis wrote.
-    fn design(&mut self, periods: &[Q6], position: usize, output_period_q6: i32) {
+    fn design(
+        &mut self,
+        periods: &[Q6],
+        position: usize,
+        output_period_q6: i32,
+        step_frames: usize,
+    ) {
         let max_period = (self.rate.as_u32() as usize / 40).max(1);
         let period = (output_period_q6.wrapping_shr(6).max(0) as usize).min(max_period);
         let design_now = self.design_counter == 0;
         self.design_counter += 1;
         let one = 16384;
         if design_now {
-            self.design_counter -= ANALYSIS_FRAMES as i32;
+            self.design_counter -= step_frames as i32;
             let count;
             if period == 0 {
                 count = (self.rate.as_u32() as usize + 50) / 100;
@@ -821,16 +856,21 @@ impl Formant {
 
     /// Applies the blended 50th-order prediction-error filter to the delayed
     /// input.
-    ///
-    /// The full sum of Q28 products accumulates in `i64` before one signed
-    /// shift and an `i32` clamp. The function blends the coefficients for the
-    /// current transition. Then it multiplies them with the previous samples.
     fn inverse(&self, position: usize) -> i32 {
         let read = if position < ANALYSIS_FRAMES {
             position + HISTORY - ANALYSIS_FRAMES
         } else {
             position - ANALYSIS_FRAMES
         };
+        self.inverse_at(read)
+    }
+
+    /// Applies the blended 50th-order prediction-error filter to `input[read]`.
+    ///
+    /// The full sum of Q28 products accumulates in `i64` before one signed
+    /// shift and an `i32` clamp. The function blends the coefficients for the
+    /// current transition. Then it multiplies them with the previous samples.
+    fn inverse_at(&self, read: usize) -> i32 {
         let mut blended;
         let coefficients = if let Some(slice) = self.stamp.steady_bank(&self.inverse, true, ORDER) {
             slice

@@ -181,9 +181,11 @@ multi-voice mixes.
 fraction of each half-bin where pull toward the target decreases, in `0..=1`.
 The default is 0, which applies full pull across the whole bin.
 
-`resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The
-dry path starts after Warm and has a delay of 1,593 frames. All six reverb
-modes keep the stereo dry signal.
+`resynthesis.latency_mode` selects `Standard` (1,593 nominal frames, default)
+or `LowLatency` (50 nominal frames, causal formant analysis).
+`resynthesis.dry_mix` sets the dry fraction at the resynthesis stage. The dry
+path starts after Warm and uses the same 1,593-frame or 50-frame delay. All
+six reverb modes keep the stereo dry signal.
 
 ### Harmony sources
 
@@ -360,7 +362,7 @@ These calls read the state of the processor. They do not change the audio.
 | `take_feedback()`    | The same data as `feedback()`, and clears the peak window         |
 | `telemetry()`        | Data for meters and displays (refer to the list below)            |
 | `take_telemetry()`   | The same data as `telemetry()`, and clears its three peak windows |
-| `latency_frames()`   | 1,593 frames of nominal resynthesis latency at both sample rates  |
+| `latency_frames()`   | 1,593 (`Standard`) or 50 (`LowLatency`) frames of nominal latency |
 | `formant_envelope()` | The LPC envelopes before and after the formant controls           |
 
 `Processor::control_activity()` and `ProcessorConfig::control_activity()`
@@ -380,7 +382,7 @@ The telemetry includes these items:
 `active_voice_ratios()` and `active_voice_gains()` return slices for the active
 voices. The peak windows of the telemetry are independent of the peak window of
 the feedback. In mono calls, the output and reverb wet peaks measure the audio
-after the downmix. The dry path has the 1,593-frame delay. Resampled voices,
+after the downmix. The dry path uses the nominal latency. Resampled voices,
 choir delays and effects use different delays.
 
 `formant_envelope()` writes two LPC envelopes into slices of equal length:
@@ -579,11 +581,11 @@ and show enums as string literals. To change the configuration, do these steps:
 
 If a required field is absent or a value is not valid, the call throws a
 JavaScript `Error`. If an optional field is absent or `undefined`, it gets its
-default. `resynthesis.correction.humanize` and
-`resynthesis.correction.flexTune` default to 0, and
-`resynthesis.harmony.voices` defaults to 4. The conversion ignores extra object
-properties. The generated declarations contain the parameter documentation from
-the Rust types.
+default. `resynthesis.latencyMode` defaults to `"standard"`,
+`resynthesis.correction.humanize` and `resynthesis.correction.flexTune`
+default to 0, and `resynthesis.harmony.voices` defaults to 4. The conversion
+ignores extra object properties. The generated declarations contain the
+parameter documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
