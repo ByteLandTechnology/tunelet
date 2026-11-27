@@ -134,6 +134,94 @@ pub(crate) fn validate_aspiration_cutoff_hz(aspiration_cutoff_hz: f32) -> Result
     )
 }
 
+/// Optional changes to [`FormantConfig`].
+///
+/// Each `None` field keeps its active value on the processor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct FormantConfigPatch {
+    /// Enables formant analysis and synthesis (`true` or `false`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "boolean | undefined")
+    )]
+    pub enabled: Option<bool>,
+    /// The vocal-tract width factor, 0.5..=2.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub width: Option<f32>,
+    /// The vocal-tract length factor, 0.5..=2.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub stretch: Option<f32>,
+    /// The aspiration level, 0..=1, without a unit.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub aspiration_mix: Option<f32>,
+    /// The high-pass cutoff for aspiration in hertz, 500..=10000.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub aspiration_cutoff_hz: Option<f32>,
+}
+
+impl FormantConfigPatch {
+    /// Checks all supplied fields and does not change the processor state.
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        if let Some(width) = self.width {
+            validate_width(width)?;
+        }
+        if let Some(stretch) = self.stretch {
+            validate_stretch(stretch)?;
+        }
+        if let Some(aspiration_mix) = self.aspiration_mix {
+            validate_aspiration_mix(aspiration_mix)?;
+        }
+        if let Some(aspiration_cutoff_hz) = self.aspiration_cutoff_hz {
+            validate_aspiration_cutoff_hz(aspiration_cutoff_hz)?;
+        }
+        Ok(())
+    }
+
+    /// Validates all supplied fields and writes them into `config`.
+    pub(crate) fn apply_to(self, config: &mut FormantConfig) -> Result<(), Error> {
+        self.validate()?;
+        if let Some(enabled) = self.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(width) = self.width {
+            config.width = width;
+        }
+        if let Some(stretch) = self.stretch {
+            config.stretch = stretch;
+        }
+        if let Some(aspiration_mix) = self.aspiration_mix {
+            config.aspiration_mix = aspiration_mix;
+        }
+        if let Some(aspiration_cutoff_hz) = self.aspiration_cutoff_hz {
+            config.aspiration_cutoff_hz = aspiration_cutoff_hz;
+        }
+        Ok(())
+    }
+}
+
 /// The number of frames in each analysis step. The analysis output has a
 /// delay of this number of frames.
 pub(crate) const ANALYSIS_FRAMES: usize = 441;

@@ -31,13 +31,13 @@ pub(crate) mod history;
 
 use crate::error::{check_count, check_range};
 use crate::filter::{Biquad, Design};
-use crate::formant::{Formant, FormantConfig, ANALYSIS_FRAMES};
-use crate::harmony::{HarmonyConfig, HarmonyState, HARMONY_VOICES};
+use crate::formant::{Formant, FormantConfig, FormantConfigPatch, ANALYSIS_FRAMES};
+use crate::harmony::{HarmonyConfig, HarmonyConfigPatch, HarmonyState, HARMONY_VOICES};
 use crate::midi::MidiEvent;
 use crate::numeric::fixed::{Q12, Q14, Q6, Q8};
 use crate::numeric::{clamp_i32, quadratic, ring, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
-use crate::pitch::{PitchConfig, PitchEstimate};
+use crate::pitch::{PitchConfig, PitchConfigPatch, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
 use crate::{Error, SampleRate};
 use history::{clear_dirty_ring, prepare_history, record_history};
@@ -190,6 +190,91 @@ pub(crate) fn validate_humanize(humanize: f32) -> Result<(), Error> {
 /// Checks the range of the outer soft-zone width of each target bin.
 pub(crate) fn validate_flex_tune(flex_tune: f32) -> Result<(), Error> {
     check_range("resynthesis.correction.flex_tune", flex_tune, 0.0, 1.0)
+}
+
+/// Optional changes to [`CorrectionConfig`].
+///
+/// Each `None` field keeps its active value on the processor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct CorrectionConfigPatch {
+    /// Enables the selection of correction targets (`true` or `false`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "boolean | undefined")
+    )]
+    pub enabled: Option<bool>,
+    /// The configured target pitch classes (`NoteMask`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "NoteMask | undefined")
+    )]
+    pub notes: Option<NoteMask>,
+    /// The half-life of the ratio in milliseconds, 0..=400.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub retune_ms: Option<f32>,
+    /// The relaxation on sustained notes without a unit, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub humanize: Option<f32>,
+    /// The outer soft-zone width of each target bin without a unit, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub flex_tune: Option<f32>,
+}
+
+impl CorrectionConfigPatch {
+    /// Checks all supplied fields and does not change the processor state.
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        if let Some(retune_ms) = self.retune_ms {
+            validate_retune_ms(retune_ms)?;
+        }
+        if let Some(humanize) = self.humanize {
+            validate_humanize(humanize)?;
+        }
+        if let Some(flex_tune) = self.flex_tune {
+            validate_flex_tune(flex_tune)?;
+        }
+        Ok(())
+    }
+
+    /// Validates all supplied fields and writes them into `config`.
+    pub(crate) fn apply_to(self, config: &mut CorrectionConfig) -> Result<(), Error> {
+        self.validate()?;
+        if let Some(enabled) = self.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(notes) = self.notes {
+            config.notes = notes;
+        }
+        if let Some(retune_ms) = self.retune_ms {
+            config.retune_ms = retune_ms;
+        }
+        if let Some(humanize) = self.humanize {
+            config.humanize = humanize;
+        }
+        if let Some(flex_tune) = self.flex_tune {
+            config.flex_tune = flex_tune;
+        }
+        Ok(())
+    }
 }
 
 /// The controls for pitch correction, pitch shift, voice arrangement and
@@ -406,6 +491,224 @@ pub(crate) fn validate_harmonic_modulation(harmonic_modulation: f32) -> Result<(
 /// Checks the range of the resynthesis dry mix.
 pub(crate) fn validate_dry_mix(dry_mix: f32) -> Result<(), Error> {
     check_range("resynthesis.dry_mix", dry_mix, 0.0, 1.0)
+}
+
+/// Optional changes to [`ResynthesisConfig`].
+///
+/// Each `None` field keeps its active value on the processor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase"),
+    tsify(large_number_types_as_bigints)
+)]
+pub struct ResynthesisConfigPatch {
+    /// Optional changes to [`PitchConfig`].
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "PitchConfigPatch | undefined")
+    )]
+    pub pitch: Option<PitchConfigPatch>,
+    /// Optional changes to [`CorrectionConfig`].
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "CorrectionConfigPatch | undefined")
+    )]
+    pub correction: Option<CorrectionConfigPatch>,
+    /// The pitch multiplier, 0.25..=4.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub pitch_ratio: Option<f32>,
+    /// Optional changes to [`FormantConfig`].
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "FormantConfigPatch | undefined")
+    )]
+    pub formant: Option<FormantConfigPatch>,
+    /// The voice arrangement (`MultiVoiceMode`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "MultiVoiceMode | undefined")
+    )]
+    pub mode: Option<MultiVoiceMode>,
+    /// The total number of choir voices, with the lead voice, 1..=16.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub choir_voices: Option<u8>,
+    /// The drift control for secondary voices, 10..=100, without a unit.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub choir_detune: Option<f32>,
+    /// The scale of the choir delay table, 20..=200, without a unit.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub choir_delay: Option<f32>,
+    /// The stereo width of the choir, 0..=100%.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub choir_spread_percent: Option<f32>,
+    /// Enables a stereo pan for each voice (`true` or `false`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "boolean | undefined")
+    )]
+    pub stereo_output: Option<bool>,
+    /// Optional changes to [`HarmonyConfig`].
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "HarmonyConfigPatch | undefined")
+    )]
+    pub harmony: Option<HarmonyConfigPatch>,
+    /// The linear gain of the four harmony voices, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub harmony_gain: Option<f32>,
+    /// The modulation depth, 0..=24, without a unit.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub harmonic_modulation: Option<f32>,
+    /// The dry fraction at the resynthesis stage, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub dry_mix: Option<f32>,
+    /// The seed for choir drift and aspiration (`0..=u64::MAX`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "bigint | undefined")
+    )]
+    pub random_seed: Option<u64>,
+}
+
+impl ResynthesisConfigPatch {
+    /// Checks the supplied scalar fields of resynthesis.
+    fn validate_scalars(self) -> Result<(), Error> {
+        if let Some(pitch_ratio) = self.pitch_ratio {
+            validate_pitch_ratio(pitch_ratio)?;
+        }
+        if let Some(choir_detune) = self.choir_detune {
+            validate_choir_detune(choir_detune)?;
+        }
+        if let Some(choir_delay) = self.choir_delay {
+            validate_choir_delay(choir_delay)?;
+        }
+        if let Some(choir_spread_percent) = self.choir_spread_percent {
+            validate_choir_spread_percent(choir_spread_percent)?;
+        }
+        if let Some(harmony_gain) = self.harmony_gain {
+            validate_harmony_gain(harmony_gain)?;
+        }
+        if let Some(harmonic_modulation) = self.harmonic_modulation {
+            validate_harmonic_modulation(harmonic_modulation)?;
+        }
+        if let Some(dry_mix) = self.dry_mix {
+            validate_dry_mix(dry_mix)?;
+        }
+        if let Some(choir_voices) = self.choir_voices {
+            validate_choir_voices(choir_voices)?;
+        }
+        Ok(())
+    }
+
+    /// Checks all supplied sub-stages and scalar fields.
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        if let Some(pitch) = self.pitch {
+            pitch.validate()?;
+        }
+        if let Some(correction) = self.correction {
+            correction.validate()?;
+        }
+        if let Some(formant) = self.formant {
+            formant.validate()?;
+        }
+        if let Some(harmony) = self.harmony {
+            harmony.validate()?;
+        }
+        self.validate_scalars()
+    }
+
+    /// Validates all supplied fields and writes them into `config`.
+    pub(crate) fn apply_to(self, config: &mut ResynthesisConfig) -> Result<(), Error> {
+        if let Some(pitch) = self.pitch {
+            pitch.apply_to(&mut config.pitch)?;
+        }
+        if let Some(correction) = self.correction {
+            correction.apply_to(&mut config.correction)?;
+        }
+        if let Some(formant) = self.formant {
+            formant.apply_to(&mut config.formant)?;
+        }
+        if let Some(harmony) = self.harmony {
+            harmony.apply_to(&mut config.harmony)?;
+        }
+        self.validate_scalars()?;
+        if let Some(pitch_ratio) = self.pitch_ratio {
+            config.pitch_ratio = pitch_ratio;
+        }
+        if let Some(mode) = self.mode {
+            config.mode = mode;
+        }
+        if let Some(choir_voices) = self.choir_voices {
+            config.choir_voices = choir_voices;
+        }
+        if let Some(choir_detune) = self.choir_detune {
+            config.choir_detune = choir_detune;
+        }
+        if let Some(choir_delay) = self.choir_delay {
+            config.choir_delay = choir_delay;
+        }
+        if let Some(choir_spread_percent) = self.choir_spread_percent {
+            config.choir_spread_percent = choir_spread_percent;
+        }
+        if let Some(stereo_output) = self.stereo_output {
+            config.stereo_output = stereo_output;
+        }
+        if let Some(harmony_gain) = self.harmony_gain {
+            config.harmony_gain = harmony_gain;
+        }
+        if let Some(harmonic_modulation) = self.harmonic_modulation {
+            config.harmonic_modulation = harmonic_modulation;
+        }
+        if let Some(dry_mix) = self.dry_mix {
+            config.dry_mix = dry_mix;
+        }
+        if let Some(random_seed) = self.random_seed {
+            config.random_seed = random_seed;
+        }
+        Ok(())
+    }
 }
 
 /// The fixed choir delay offsets in frames, before the scale by

@@ -135,6 +135,104 @@ pub(crate) fn validate_brightness_hz(brightness_hz: f32) -> Result<(), Error> {
     check_range("reverb.brightness_hz", brightness_hz, 80.0, 20000.0)
 }
 
+/// Optional changes to [`ReverbConfig`].
+///
+/// Each `None` field keeps its active value on the processor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct ReverbConfigPatch {
+    /// Enables the selected network (`true` or `false`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "boolean | undefined")
+    )]
+    pub enabled: Option<bool>,
+    /// The topology of the delay network (`ReverbMode`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "ReverbMode | undefined")
+    )]
+    pub mode: Option<ReverbMode>,
+    /// The wet fraction, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub mix: Option<f32>,
+    /// The diffusion control without a unit, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub diffusion: Option<f32>,
+    /// The feedback control without a unit, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub decay: Option<f32>,
+    /// The low-pass cutoff in hertz for networks with damped paths, 80..=20000.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub brightness_hz: Option<f32>,
+}
+
+impl ReverbConfigPatch {
+    /// Checks all supplied fields and does not change the processor state.
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        if let Some(mix) = self.mix {
+            validate_mix(mix)?;
+        }
+        if let Some(diffusion) = self.diffusion {
+            validate_diffusion(diffusion)?;
+        }
+        if let Some(decay) = self.decay {
+            validate_decay(decay)?;
+        }
+        if let Some(brightness_hz) = self.brightness_hz {
+            validate_brightness_hz(brightness_hz)?;
+        }
+        Ok(())
+    }
+
+    /// Validates all supplied fields and writes them into `config`.
+    pub(crate) fn apply_to(self, config: &mut ReverbConfig) -> Result<(), Error> {
+        self.validate()?;
+        if let Some(enabled) = self.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(mode) = self.mode {
+            config.mode = mode;
+        }
+        if let Some(mix) = self.mix {
+            config.mix = mix;
+        }
+        if let Some(diffusion) = self.diffusion {
+            config.diffusion = diffusion;
+        }
+        if let Some(decay) = self.decay {
+            config.decay = decay;
+        }
+        if let Some(brightness_hz) = self.brightness_hz {
+            config.brightness_hz = brightness_hz;
+        }
+        Ok(())
+    }
+}
+
 /// The shared Q14 delay network with two low-pass damping filters that keep
 /// state.
 #[derive(Debug)]

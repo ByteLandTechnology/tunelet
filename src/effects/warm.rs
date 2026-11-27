@@ -57,6 +57,55 @@ pub(crate) fn validate_drive_db(drive_db: f32) -> Result<(), Error> {
     check_range("warm.drive_db", drive_db, 0.0, 6.0)
 }
 
+/// Optional changes to [`WarmConfig`].
+///
+/// Each `None` field keeps its active value on the processor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct WarmConfigPatch {
+    /// Enables the saturation stage (`true` or `false`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "boolean | undefined")
+    )]
+    pub enabled: Option<bool>,
+    /// The drive in decibels, 0..=6.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub drive_db: Option<f32>,
+}
+
+impl WarmConfigPatch {
+    /// Checks all supplied fields and does not change the processor state.
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        if let Some(drive_db) = self.drive_db {
+            validate_drive_db(drive_db)?;
+        }
+        Ok(())
+    }
+
+    /// Validates all supplied fields and writes them into `config`.
+    pub(crate) fn apply_to(self, config: &mut WarmConfig) -> Result<(), Error> {
+        self.validate()?;
+        if let Some(enabled) = self.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(drive_db) = self.drive_db {
+            config.drive_db = drive_db;
+        }
+        Ok(())
+    }
+}
+
 /// An adaptive asymmetric saturator with one persistent high-pass output
 /// filter.
 #[derive(Debug)]

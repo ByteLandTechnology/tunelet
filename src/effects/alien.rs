@@ -53,7 +53,62 @@ impl AlienConfig {
     /// Returns the first [`Error::InvalidConfig`] with its dotted field path
     /// and the problem.
     pub fn validate(self) -> Result<(), Error> {
-        check_count("alien.loop_frames", i64::from(self.loop_frames), 1, 96_000)
+        validate_loop_frames(self.loop_frames)
+    }
+}
+
+/// Checks the range of the loop length of Alien.
+pub(crate) fn validate_loop_frames(loop_frames: u32) -> Result<(), Error> {
+    check_count("alien.loop_frames", i64::from(loop_frames), 1, 96_000)
+}
+
+/// Optional changes to [`AlienConfig`].
+///
+/// Each `None` field keeps its active value on the processor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct AlienConfigPatch {
+    /// Selects reversed playback instead of the direct input (`true` or
+    /// `false`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "boolean | undefined")
+    )]
+    pub enabled: Option<bool>,
+    /// The loop length in frames, 1..=96000.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub loop_frames: Option<u32>,
+}
+
+impl AlienConfigPatch {
+    /// Checks all supplied fields and does not change the processor state.
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        if let Some(loop_frames) = self.loop_frames {
+            validate_loop_frames(loop_frames)?;
+        }
+        Ok(())
+    }
+
+    /// Validates all supplied fields and writes them into `config`.
+    pub(crate) fn apply_to(self, config: &mut AlienConfig) -> Result<(), Error> {
+        self.validate()?;
+        if let Some(enabled) = self.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(loop_frames) = self.loop_frames {
+            config.loop_frames = loop_frames;
+        }
+        Ok(())
     }
 }
 

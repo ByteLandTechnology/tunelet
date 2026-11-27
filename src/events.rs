@@ -10,7 +10,7 @@ use crate::harmony;
 use crate::midi::MidiEvent;
 use crate::pitch;
 use crate::resynthesis;
-use crate::{Error, EventProblem, ProcessorConfig, ResynthesisConfig};
+use crate::{Error, EventProblem, ProcessorConfig, ProcessorConfigPatch, ResynthesisConfig};
 
 /// One scalar configuration parameter for [`ControlEvent::Parameter`].
 ///
@@ -201,9 +201,10 @@ impl ParameterControl {
 ///
 /// Give controls to a process call as [`TimedEvent`] values. The call borrows
 /// the slice only for that call. There is no heap allocation and no deferred
-/// queue. Use [`Self::Parameter`] to change one scalar field. A stage event
-/// replaces all settings of that stage. Configuration changes have the same
-/// effects on state as [`crate::Processor::set_config`].
+/// queue. Use [`Self::Parameter`] to change one scalar field, or
+/// [`Self::Patch`] to change selected fields. A stage event replaces all
+/// settings of that stage. Configuration changes have the same effects on
+/// state as [`crate::Processor::set_config`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -214,6 +215,8 @@ impl ParameterControl {
 pub enum ControlEvent {
     /// This event replaces the full configuration.
     Configure(ProcessorConfig),
+    /// This event merges supplied fields into the active configuration.
+    Patch(ProcessorConfigPatch),
     /// This event replaces the resynthesis configuration.
     Resynthesis(ResynthesisConfig),
     /// This event replaces the Punch configuration.
@@ -262,6 +265,10 @@ impl ControlEvent {
     /// Checks the configuration or MIDI ranges of the event, and does not
     /// apply the event.
     ///
+    /// For [`Self::Patch`], this method checks all supplied fields, and checks
+    /// the pitch frequency order if the patch gives both bounds. A process
+    /// call also checks a single pitch bound against the active configuration.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfig`] for an invalid configuration, scalar
@@ -271,6 +278,7 @@ impl ControlEvent {
     pub fn validate(self) -> Result<(), Error> {
         match self {
             Self::Configure(config) => config.validate(),
+            Self::Patch(patch) => patch.validate(),
             Self::Resynthesis(config) => config.validate(),
             Self::Punch(config) => config.validate(),
             Self::Warm(config) => config.validate(),
@@ -389,6 +397,7 @@ fn validate_in_sequence(event: ControlEvent, config: &mut ProcessorConfig) -> Re
             *config = value;
             Ok(())
         }
+        ControlEvent::Patch(patch) => patch.apply_to(config),
         ControlEvent::Resynthesis(value) => {
             value.validate()?;
             config.resynthesis = value;

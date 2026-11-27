@@ -10,7 +10,7 @@ use crate::numeric::NumericContext;
 use crate::resynthesis::{self, Resynthesis};
 use crate::{
     ControlActivity, ControlEvent, Error, ParameterControl, PrepareConfig, ProcessorConfig,
-    TimedEvent,
+    ProcessorConfigPatch, TimedEvent,
 };
 
 /// Selects the output channel layout for the downmix and the peak meters.
@@ -706,6 +706,26 @@ impl Processor {
         Ok(())
     }
 
+    /// Merges supplied fields onto the active configuration, validates touched
+    /// stages and applies the result.
+    ///
+    /// State retention, resets on a change of `stereo_output`, restarts on a
+    /// change of `random_seed` and drain cancellation are the same as for
+    /// [`set_config`](Self::set_config). An empty patch also cancels an active
+    /// drain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfig`] if a supplied field or the merged
+    /// pitch frequency order is not valid. The method returns this error
+    /// before it changes any state or any active drain.
+    pub fn patch_config(&mut self, patch: ProcessorConfigPatch) -> Result<(), Error> {
+        let mut config = self.config;
+        patch.apply_to(&mut config)?;
+        self.apply_config(config);
+        Ok(())
+    }
+
     /// Applies a configuration that the public setter or the preflight checked.
     fn apply_config(&mut self, config: ProcessorConfig) {
         if self.config.punch != config.punch {
@@ -802,13 +822,18 @@ impl Processor {
 
     /// Applies a validated control immediately before its frame is rendered.
     ///
-    /// A stage event replaces one stage in the active configuration. A scalar
+    /// A stage or patch event updates the active configuration. A scalar
     /// parameter event updates one field and its quantized state. MIDI and
     /// reset events act directly. A reset does not discard later events in the
     /// block.
     fn apply(&mut self, event: ValidatedEvent) {
         match event.into_inner() {
             ControlEvent::Configure(value) => self.apply_config(value),
+            ControlEvent::Patch(patch) => {
+                let mut config = self.config;
+                let _ = patch.apply_to(&mut config);
+                self.apply_config(config);
+            }
             ControlEvent::Resynthesis(value) => {
                 let mut config = self.config;
                 config.resynthesis = value;

@@ -117,6 +117,94 @@ pub(crate) fn validate_attack_ms(attack_ms: f32) -> Result<(), Error> {
     check_range("punch.attack_ms", attack_ms, 0.01, 5000.0)
 }
 
+/// Optional changes to [`PunchConfig`].
+///
+/// Each `None` field keeps its active value on the processor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase")
+)]
+pub struct PunchConfigPatch {
+    /// Enables this input stage (`true` or `false`).
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "boolean | undefined")
+    )]
+    pub enabled: Option<bool>,
+    /// The input gain in decibels, -96..=12.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub gain_db: Option<f32>,
+    /// The transient emphasis without a unit, 0..=1.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub impact: Option<f32>,
+    /// The output ceiling of the saturation in dBFS, -96..=0.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub ceiling_db: Option<f32>,
+    /// The attack half-life of the peak followers in milliseconds, 0.01..=5000.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub attack_ms: Option<f32>,
+}
+
+impl PunchConfigPatch {
+    /// Checks all supplied fields and does not change the processor state.
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        if let Some(gain_db) = self.gain_db {
+            validate_gain_db(gain_db)?;
+        }
+        if let Some(impact) = self.impact {
+            validate_impact(impact)?;
+        }
+        if let Some(ceiling_db) = self.ceiling_db {
+            validate_ceiling_db(ceiling_db)?;
+        }
+        if let Some(attack_ms) = self.attack_ms {
+            validate_attack_ms(attack_ms)?;
+        }
+        Ok(())
+    }
+
+    /// Validates all supplied fields and writes them into `config`.
+    pub(crate) fn apply_to(self, config: &mut PunchConfig) -> Result<(), Error> {
+        self.validate()?;
+        if let Some(enabled) = self.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(gain_db) = self.gain_db {
+            config.gain_db = gain_db;
+        }
+        if let Some(impact) = self.impact {
+            config.impact = impact;
+        }
+        if let Some(ceiling_db) = self.ceiling_db {
+            config.ceiling_db = ceiling_db;
+        }
+        if let Some(attack_ms) = self.attack_ms {
+            config.attack_ms = attack_ms;
+        }
+        Ok(())
+    }
+}
+
 /// Two peak followers that control an arctangent saturator, with all buffers
 /// inline.
 #[derive(Debug)]

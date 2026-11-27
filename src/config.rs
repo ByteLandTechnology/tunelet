@@ -1,14 +1,14 @@
 //! Sample rates, block limits and the complete processor configuration.
 
-use crate::effects::alien::AlienConfig;
-use crate::effects::punch::PunchConfig;
-use crate::effects::reverb::{ReverbConfig, ReverbMode};
-use crate::effects::warm::WarmConfig;
+use crate::effects::alien::{AlienConfig, AlienConfigPatch};
+use crate::effects::punch::{PunchConfig, PunchConfigPatch};
+use crate::effects::reverb::{ReverbConfig, ReverbConfigPatch, ReverbMode};
+use crate::effects::warm::{WarmConfig, WarmConfigPatch};
 use crate::error::{check_range, ConfigProblem};
 use crate::harmony::HarmonySource;
 use crate::resynthesis::MultiVoiceMode;
 use crate::Error;
-use crate::ResynthesisConfig;
+use crate::{ResynthesisConfig, ResynthesisConfigPatch};
 use std::num::NonZeroUsize;
 
 /// The sample rate of the input and the output.
@@ -324,6 +324,117 @@ pub struct ControlActivity {
     pub reverb_decay: bool,
     /// `true` if [`ReverbConfig::brightness_hz`] is active.
     pub reverb_brightness_hz: bool,
+}
+
+/// Optional changes to [`ProcessorConfig`], in the order of the stages.
+///
+/// Apply a patch with [`crate::Processor::patch_config`] or
+/// [`crate::ControlEvent::Patch`]. Each `None` field keeps its active value on
+/// the processor. Validation examines only the supplied stages and fields
+/// before any state changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(default, rename_all = "camelCase"),
+    tsify(large_number_types_as_bigints)
+)]
+pub struct ProcessorConfigPatch {
+    /// Optional changes to [`PunchConfig`].
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "PunchConfigPatch | undefined")
+    )]
+    pub punch: Option<PunchConfigPatch>,
+    /// Optional changes to [`WarmConfig`].
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "WarmConfigPatch | undefined")
+    )]
+    pub warm: Option<WarmConfigPatch>,
+    /// Optional changes to [`ResynthesisConfig`].
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "ResynthesisConfigPatch | undefined")
+    )]
+    pub resynthesis: Option<ResynthesisConfigPatch>,
+    /// Optional changes to [`AlienConfig`].
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "AlienConfigPatch | undefined")
+    )]
+    pub alien: Option<AlienConfigPatch>,
+    /// Optional changes to [`ReverbConfig`].
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "ReverbConfigPatch | undefined")
+    )]
+    pub reverb: Option<ReverbConfigPatch>,
+    /// The linear gain after all effects, 0..=64.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(skip_serializing_if = "Option::is_none"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub output_gain: Option<f32>,
+}
+
+impl ProcessorConfigPatch {
+    /// Checks all supplied stages and fields in signal order.
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        if let Some(punch) = self.punch {
+            punch.validate()?;
+        }
+        if let Some(warm) = self.warm {
+            warm.validate()?;
+        }
+        if let Some(resynthesis) = self.resynthesis {
+            resynthesis.validate()?;
+        }
+        if let Some(alien) = self.alien {
+            alien.validate()?;
+        }
+        if let Some(reverb) = self.reverb {
+            reverb.validate()?;
+        }
+        if let Some(output_gain) = self.output_gain {
+            validate_output_gain(output_gain)?;
+        }
+        Ok(())
+    }
+
+    /// Validates all supplied stages and fields in signal order, then writes
+    /// them into `config`.
+    pub(crate) fn apply_to(self, config: &mut ProcessorConfig) -> Result<(), Error> {
+        let mut next = *config;
+        if let Some(punch) = self.punch {
+            punch.apply_to(&mut next.punch)?;
+        }
+        if let Some(warm) = self.warm {
+            warm.apply_to(&mut next.warm)?;
+        }
+        if let Some(resynthesis) = self.resynthesis {
+            resynthesis.apply_to(&mut next.resynthesis)?;
+        }
+        if let Some(alien) = self.alien {
+            alien.apply_to(&mut next.alien)?;
+        }
+        if let Some(reverb) = self.reverb {
+            reverb.apply_to(&mut next.reverb)?;
+        }
+        if let Some(output_gain) = self.output_gain {
+            validate_output_gain(output_gain)?;
+            next.output_gain = output_gain;
+        }
+        *config = next;
+        Ok(())
+    }
 }
 
 /// Checks the output gain range.
