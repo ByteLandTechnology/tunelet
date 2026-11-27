@@ -340,14 +340,20 @@ block. To get the tail, do these steps:
 3. From each drain call, use only the frames that the call returns.
 
 The drain fills the unused output with zeros. The drain has a finite budget,
-`tail_frames()`, which can include silence. The last drain call resets the
-audio histories and the feedback. A successful call that processes audio or
-sets the configuration cancels the drain. `reset()` also cancels the drain.
+`tail_frames()`, which can include silence. Every call that returns frames
+keeps the feedback and the telemetry of that block. After the last tail
+frames, the next non-empty drain call returns zero and resets the processor.
+Empty buffers do not advance or finish the drain. A successful call that
+processes audio or sets the configuration, or `reset()`, cancels the drain.
 
 ### Reset
 
-`reset()` keeps the configuration, the random stream and some controller and
-filter state. If you need a fully new state, construct a new processor.
+`reset()` clears all audio histories, filter memories, MIDI state, peak
+windows and the frame count. It loads the configured correction notes again
+and starts the random stream again from `random_seed` without memory
+allocation. The preparation, the configuration and `formant_generation` in
+the telemetry do not change. After `reset()`, the processor gives the same
+PCM output as `Processor::new` for equal inputs, settings and seeds.
 
 ## Feedback and telemetry
 

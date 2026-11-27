@@ -93,8 +93,7 @@ pub(crate) struct PitchTracker {
     tracking_counter: i32,
     /// The latest refined Q6 period. A restart of acquisition sets it to zero.
     period: Q6,
-    /// The last refined Q6 period. A restart or an audio reset does not clear
-    /// it.
+    /// The last refined Q6 period. A restart of acquisition does not clear it.
     previous_period: Q6,
     /// The Q14 threshold of the normalized difference. It applies only to the
     /// acceptance of acquisition minima.
@@ -149,15 +148,25 @@ impl PitchTracker {
         self.threshold = Q14::from_f64(threshold as f64);
     }
 
-    /// Clears the full-rate audio, the current period and the prefilter
-    /// memories, and requests acquisition.
-    /// The acquisition tables clear at the next decimated call. The previous
-    /// usable period stays until another tracking update replaces it.
+    /// Clears the full-rate audio, the acquisition and tracking correlations,
+    /// the current and previous periods and the prefilter memories, and
+    /// requests acquisition.
     pub(crate) fn reset(&mut self) {
         clear_dirty_ring(self.raw.as_mut_slice(), usize::from(self.written), 0);
         self.written = 0;
         self.write = 0;
         self.restart();
+        self.previous_period = Q6::default();
+        self.detection.fill(0);
+        self.detection_index = 0;
+        self.detection_count = 0;
+        self.energy.fill(0);
+        self.cross.fill(0);
+        self.tracking_energy.fill(0);
+        self.tracking_cross.fill(0);
+        self.base = 0;
+        self.tracking_counter = 0;
+        self.best = 0;
         for pre in &mut self.pre {
             pre.reset();
         }

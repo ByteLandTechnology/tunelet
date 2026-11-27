@@ -81,14 +81,17 @@
 //! output with zeros. The drain uses a finite configured budget and mutes
 //! aspiration. It is not a silence detector.
 //!
-//! The call that uses all of the budget does the same reset as
-//! [`Processor::reset`]. This occurs also if that call returns audio. A
-//! successful process call, a successful configuration call or a reset
-//! cancels the drain.
+//! Every drain call that returns frames keeps [`Feedback`] and [`Telemetry`]
+//! for that block. After the last tail frames, the next non-empty drain call
+//! returns zero and does the same reset as [`Processor::reset`]. Empty buffers
+//! do not advance or finish the drain. A successful process call, a successful
+//! configuration call or a reset cancels the drain.
 //!
-//! [`Processor::reset`] keeps the configuration and some controller state, for
-//! example the random stream. Its documentation lists the state that it keeps.
-//! If you need a fully new instance, make a new processor.
+//! [`Processor::reset`] clears all audio histories, filter memories, MIDI
+//! state, peak windows and the frame count, and starts the random stream again
+//! from `random_seed`. The preparation, the configuration and
+//! [`Telemetry::formant_generation`] do not change. Without memory allocation,
+//! the processor then produces the same PCM output as [`Processor::new`].
 //!
 //! # Execution model
 //!

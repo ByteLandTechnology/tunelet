@@ -39,9 +39,9 @@ pub enum ReverbMode {
 /// The reverb is disabled by default. In bypass, the stage returns the input
 /// and does not advance the delay network or the damping filters. If the
 /// stage is enabled and the mix is zero, the network still operates. A reset
-/// clears the delay buffer but keeps the memories of the damping filters. The
-/// mix, diffusion and decay controls are quantized to Q14. The function of
-/// each control changes with the network.
+/// clears the delay buffer, the write cursor and the memories of the damping
+/// filters. The mix, diffusion and decay controls are quantized to Q14. The
+/// function of each control changes with the network.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(
@@ -145,11 +145,9 @@ pub(crate) struct Reverb {
     config: ReverbConfig,
     /// The shared circular storage for all network topologies.
     delay: DelayLine,
-    /// The first damping filter. A delay reset or a mode change does not
-    /// clear its memories.
+    /// The first damping filter. A mode change does not clear its memories.
     lpf1: Biquad,
-    /// The second damping filter. It keeps its memories in the same way as
-    /// the first filter.
+    /// The second damping filter. A mode change does not clear its memories.
     lpf2: Biquad,
     /// 67 prepared frame offsets into the shared ring.
     taps: [usize; 67],
@@ -168,7 +166,7 @@ pub(crate) struct Reverb {
     /// The largest absolute Q14 wet contribution in the telemetry window. No
     /// audio calculation reads it.
     wet_peak: i32,
-    /// If `true`, the delay buffer changed since construction or the last reset.
+    /// If `true`, the stage changed state since construction or the last reset.
     dirty: bool,
 }
 
@@ -304,11 +302,13 @@ impl Reverb {
             self.configure_brightness_hz();
         }
     }
-    /// Clears only the delay contents, and keeps the write cursor and the
-    /// damping memories.
+    /// Clears the delay buffer, sets the write cursor to zero and resets both
+    /// damping filters.
     pub(crate) fn reset(&mut self) {
         if self.dirty {
             self.delay.reset();
+            self.lpf1.reset();
+            self.lpf2.reset();
             self.dirty = false;
         }
     }
@@ -491,33 +491,113 @@ impl Reverb {
     }
 }
 
-/// Estimates a finite tail budget from the largest modeled feedback
-/// gain.
+/// Estimates a finite tail budget from the tap layout and a -60 dBFS (1e-3)
+/// decay threshold.
 ///
-/// Each assumed circulation is 0.8 seconds long. The budget has the
-/// circulations necessary to reach an amplitude of 1e-6, plus two seconds.
-/// Fixed-point limit cycles can continue longer than this budget. If the
-/// stage is disabled or the mix is zero, the function returns zero.
+/// The function models outer comb loops and short allpass sections separately
+/// for each [`ReverbMode`]. Fixed-point limit cycles below -60 dBFS can
+/// continue after this budget. If the stage is disabled or the mix is zero,
+/// the function returns zero.
 pub(crate) fn tail_frames(rate: SampleRate, config: ReverbConfig) -> usize {
     if !config.enabled || config.mix == 0.0 {
         return 0;
     }
-    let decay = config.decay as f64 / 1.05;
-    let diffuse = config.diffusion as f64;
-    let gain = match config.mode {
-        ReverbMode::Binaural => 0.0,
-        ReverbMode::Echo => decay,
-        ReverbMode::Schroeder => 0.9f64.max(decay),
-        ReverbMode::SmallRoom => 0.7f64.max(decay),
-        ReverbMode::MediumHall => (0.9 * diffuse).max(decay),
-        ReverbMode::LargeHall => (0.95 * diffuse).max(decay),
+    let layout = reverb_layout(rate.hz());
+    let t = layout.taps;
+    let diffuse_q14 = Q14::from_f64((config.diffusion * 100.0) as f64 / 100.0);
+    let decay_q14 = Q14::from_f64((config.decay * 100.0) as f64 / 105.0);
+    let diffuse = diffuse_q14.to_bits() as f64 / 16384.0;
+    let decay = decay_q14.to_bits() as f64 / 16384.0;
+    let threshold = 1e-3_f64;
+    let comb_frames = |delay: usize, gain: f64| -> usize {
+        if delay == 0 || gain < threshold {
+            0
+        } else {
+            let turns = (threshold.ln() / gain.ln()).floor() as usize + 1;
+            turns * delay
+        }
     };
-    let turns = if gain > 0.0 {
-        (1e-6f64.ln() / gain.ln()).ceil()
-    } else {
-        1.0
+    let allpass_frames = |first: usize, second: usize, gain: f64| -> usize {
+        let delay = t[second] - t[first];
+        let initial = 1.0 - gain * gain;
+        if delay == 0 || gain <= 0.0 || initial < threshold {
+            delay
+        } else {
+            let turns = 1 + ((threshold / initial).ln() / gain.ln()).floor().max(0.0) as usize + 1;
+            turns * delay
+        }
     };
-    (rate.hz() as f64 * (turns * 0.8 + 2.0)).ceil() as usize
+    let filter_margin = (rate.hz() as f64 * 0.05).ceil() as usize;
+    match config.mode {
+        ReverbMode::Binaural => (t[54] - t[40] + t[10] + layout.binaural_offset) + filter_margin,
+        ReverbMode::Echo => {
+            let echo: Fixed<0> = Fixed::<0>::from_bits(t[39] as i32).mul(diffuse_q14);
+            comb_frames(echo.to_bits() as usize, decay) + t[32] + filter_margin
+        }
+        ReverbMode::Schroeder => {
+            let combs = [
+                comb_frames(t[12] - t[0], 0.9),
+                comb_frames(t[22] - t[13], 0.89),
+                comb_frames(t[28] - t[23], 0.87),
+                comb_frames(t[34] - t[29], 0.86),
+            ]
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+            let allpasses = allpass_frames(40, 43, decay) + allpass_frames(44, 45, decay);
+            combs + allpasses + filter_margin
+        }
+        ReverbMode::SmallRoom => {
+            let half = (t[35] - t[0]).max(t[66] - t[40]);
+            let comb = comb_frames(half, decay) + half;
+            let allpasses = [
+                allpass_frames(1, 15, 0.3),
+                allpass_frames(2, 7, 0.7),
+                allpass_frames(8, 14, 0.5),
+                allpass_frames(18, 24, 0.5),
+                allpass_frames(41, 50, 0.3),
+                allpass_frames(42, 46, 0.6),
+                allpass_frames(53, 57, 0.5),
+            ]
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+            comb + allpasses + filter_margin
+        }
+        ReverbMode::MediumHall => {
+            let outer = (t[35] - t[0]) + (t[66] - t[40]);
+            let comb = comb_frames(outer, decay) + outer;
+            let allpasses = [
+                allpass_frames(3, 15, 0.4 * diffuse),
+                allpass_frames(4, 7, 0.9 * diffuse),
+                allpass_frames(8, 14, 0.6 * diffuse),
+                allpass_frames(18, 24, 0.6 * diffuse),
+                allpass_frames(41, 50, 0.5 * diffuse),
+                allpass_frames(42, 46, 0.8 * diffuse),
+            ]
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+            comb + allpasses + filter_margin
+        }
+        ReverbMode::LargeHall => {
+            let outer = (t[38] - t[1]) + (t[64] - t[40]);
+            let comb = comb_frames(outer, decay) + outer;
+            let allpasses = [
+                allpass_frames(3, 5, 0.6 * diffuse),
+                allpass_frames(6, 9, 0.6 * diffuse),
+                allpass_frames(19, 30, 0.95 * diffuse),
+                allpass_frames(20, 27, 0.5 * diffuse),
+                allpass_frames(41, 63, 0.95 * diffuse),
+                allpass_frames(42, 58, 0.5 * diffuse),
+                allpass_frames(59, 62, 0.5 * diffuse),
+            ]
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+            comb + allpasses + filter_margin
+        }
+    }
 }
 
 /// The length in frames of the shared delay ring at both sample rates.
@@ -528,8 +608,8 @@ const CAPACITY: usize = 17_000;
 struct DelayLine {
     /// Fixed-length storage on the heap. The values use the Q14 audio scale.
     buffer: Box<[Q14; CAPACITY]>,
-    /// The current frame position, always less than `CAPACITY`. A reset does
-    /// not change it.
+    /// The current frame position, always less than `CAPACITY`. A reset sets
+    /// it to zero.
     write: usize,
 }
 impl DelayLine {
@@ -541,9 +621,10 @@ impl DelayLine {
             .unwrap_or_else(|_| unreachable!("prepared reverb delay length"));
         Self { buffer, write: 0 }
     }
-    /// Clears the samples and does not move the current write position.
+    /// Clears the samples and sets the current write position to zero.
     fn reset(&mut self) {
         self.buffer.fill(Q14::default());
+        self.write = 0;
     }
     /// Maps a delay to a storage index with a maximum of one wrap.
     ///

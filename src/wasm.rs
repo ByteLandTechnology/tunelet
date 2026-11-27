@@ -517,10 +517,12 @@ impl WasmProcessor {
 
     /// Starts a finite tail budget and returns its frame count as a number.
     ///
-    /// Call this method one time after the final input block. Then call `drain`
-    /// or `drainMono` until the call returns zero. Completion resets the audio
-    /// histories and the feedback in the final drain call. Another call starts
-    /// the full budget again, and it does not clear the histories.
+    /// Call this method one time after the final input block. Then call a drain
+    /// method until the call returns zero. Every call that returns positive
+    /// frames keeps the feedback and the telemetry of that block. Completion
+    /// resets the processor on the next non-empty call that returns zero.
+    /// Another call starts the full budget again, and it does not clear the
+    /// histories.
     #[wasm_bindgen(js_name = beginDrain)]
     pub fn begin_drain(&mut self) -> usize {
         self.processor.begin_drain()
@@ -536,10 +538,11 @@ impl WasmProcessor {
     /// Renders stereo tail frames into `Int16Array` buffers of equal length.
     ///
     /// The method returns the number of rendered frames and fills the unused
-    /// output with zeros. If the drain is not active or is complete, the method
-    /// returns zero. Empty arrays do not use the budget. Completion resets the
-    /// histories and the feedback in the final drain call, also when that call
-    /// returns audio.
+    /// output with zeros. Every call that returns positive frames keeps the
+    /// feedback and the telemetry of that block. After the last tail frames,
+    /// the next non-empty call returns zero and resets the processor. Before a
+    /// drain starts or after that reset, the method returns zero. Empty arrays
+    /// do not use the budget and do not finish the drain.
     ///
     /// # Errors
     ///
@@ -562,10 +565,11 @@ impl WasmProcessor {
     ///
     /// The method mixes each stereo tail frame to mono and fills the unused
     /// output with zeros. Peak feedback and telemetry measure the mono signal
-    /// after the mono downmix. If the drain is not active or is complete, the
-    /// method returns zero. Empty arrays do not use the budget. Completion
-    /// resets the histories and the feedback in the final drain call, also when
-    /// that call returns audio.
+    /// after the mono downmix. Every call that returns positive frames keeps
+    /// the feedback and the telemetry of that block. Empty arrays do not use
+    /// the budget and do not finish the drain. Completion resets the processor
+    /// on the next non-empty call that returns zero. Before a drain starts or
+    /// after that reset, the method returns zero.
     ///
     /// # Errors
     ///
@@ -807,11 +811,15 @@ impl WasmProcessor {
         Ok(valid)
     }
 
-    /// Resets the audio histories and feedback, as the native processor does.
+    /// Resets all audio histories, filter memories, MIDI state, peak windows
+    /// and the frame count, as the native processor does.
     ///
-    /// The configuration, the random stream and some controller and filter
-    /// state do not change. This method cancels any active drain. For a fully
-    /// new instance, construct a new `Tunelet`.
+    /// The method clears all correction keys, loads the configured correction
+    /// notes again and starts the random stream again from `randomSeed`. It
+    /// cancels any active drain. The preparation, the active configuration and
+    /// `formantGeneration` in the telemetry do not change. After this call,
+    /// the instance gives the same PCM output as a new `Tunelet` with the same
+    /// configuration.
     pub fn reset(&mut self) {
         self.processor.reset();
     }
