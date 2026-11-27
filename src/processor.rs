@@ -504,8 +504,8 @@ impl Processor {
     /// the current configuration.
     ///
     /// A `false` flag means that the related control makes no sample change in
-    /// the active voice mode, harmony source or reverb network. This method
-    /// does not allocate memory and does not change state.
+    /// the active voice mode, harmony source, channel map or reverb network.
+    /// This method does not allocate memory and does not change state.
     pub fn control_activity(&self) -> ControlActivity {
         self.config.control_activity()
     }
@@ -739,9 +739,10 @@ impl Processor {
     ///
     /// This method cancels an active drain. It also clears the correction
     /// ratio, the Punch envelopes, the Warm filters, the Alien recording and
-    /// the reverb delays. It releases the harmony MIDI notes and, in
-    /// MIDI-chord mode, the chord voices. It releases correction keys 0..=127
-    /// and loads the configured correction notes again. It keeps these items:
+    /// the reverb delays. It clears the harmony MIDI keybed and releases the
+    /// active MIDI voices and chord voices. It releases correction keys 0..=127,
+    /// clears any latched correction chord and loads the configured correction
+    /// notes again. It keeps these items:
     ///
     /// - the configuration
     /// - the random stream and the arctangent lookup position of Punch

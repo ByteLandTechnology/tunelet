@@ -37,12 +37,12 @@ pub enum MidiEvent {
     },
     /// All notes stop (controller 123).
     ///
-    /// For harmony, it clears the active MIDI assignments and the stolen notes
-    /// that are still held, on all channels. In MIDI-chord mode, it also
-    /// releases the chord voices. The gain envelopes do not change, so the
-    /// released voices decay. The prepared targets of the named and degree
-    /// chord sources do not change. For the correction keyboard, it clears
-    /// keys 0..=127 and loads the configured correction notes again.
+    /// For harmony, it clears the MIDI keybed on all channels and releases the
+    /// active MIDI voices. In MIDI-chord mode, it also releases the chord
+    /// voices. The gain envelopes do not change, so the released voices decay.
+    /// The prepared targets of the named and degree chord sources do not
+    /// change. For the correction keyboard, it clears keys 0..=127 and any
+    /// latched chord, and loads [`crate::CorrectionConfig::notes`] again.
     AllNotesOff,
 }
 

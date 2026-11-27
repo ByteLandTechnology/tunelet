@@ -21,8 +21,11 @@
 //! - Field names use camelCase.
 //! - Enum values are strings.
 //! - Each object must contain all required fields.
-//! - The optional correction `humanize` and `flexTune` fields default to 0.
-//! - The optional harmony `voices` field defaults to 4.
+//! - If an optional field is absent or `undefined`, it gets its default.
+//! - The optional correction `humanize` and `flexTune` fields default to 0,
+//!   and `midiMode` defaults to `"momentary"`.
+//! - The optional harmony `voices` field defaults to 4, `midiChannelMap`
+//!   defaults to `"baseWindow"` and `midiBaseChannel` defaults to 0.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
 //! `{ type, value }`, and the reset control has no `value`. Scalar parameter
@@ -708,8 +711,8 @@ impl WasmProcessor {
     /// the active configuration.
     ///
     /// A `false` flag means that the related control makes no sample change in
-    /// the active voice mode, harmony source or reverb network. The audio
-    /// state does not change.
+    /// the active voice mode, harmony source, channel map or reverb network.
+    /// The audio state does not change.
     ///
     /// # Errors
     ///

@@ -38,7 +38,7 @@ use crate::numeric::fixed::{Q12, Q14, Q6, Q8};
 use crate::numeric::{clamp_i32, quadratic, ring, NumericContext, HISTORY};
 use crate::pitch::tracker::PitchTracker;
 use crate::pitch::{PitchConfig, PitchEstimate};
-use crate::scale::{CorrectionTable, NoteMask};
+use crate::scale::{CorrectionMidiMode, CorrectionTable, NoteMask};
 use crate::{Error, SampleRate};
 use history::{clear_dirty_ring, prepare_history, record_history};
 
@@ -62,17 +62,19 @@ pub enum MultiVoiceMode {
 /// period domain.
 ///
 /// Correction is enabled by default, with all chromatic notes, a retune time
-/// of zero, zero humanize and zero flex-tune. Target selection and the
-/// smoothing of the correction ratio occur at each update of the pitch
-/// tracking. When a period is tracked, this update usually occurs every five
-/// frames. If the active note table is empty or correction is disabled, the
-/// ratio moves toward 1.0 with `retune_ms`.
+/// of zero, zero humanize, zero flex-tune and momentary MIDI mode. Target
+/// selection and the smoothing of the correction ratio occur at each update of
+/// the pitch tracking. When a period is tracked, this update usually occurs
+/// every five frames. If the active note table is empty or correction is
+/// disabled, the ratio moves toward 1.0 with `retune_ms`.
 ///
-/// While at least one key in 0..=127 is held, correction MIDI replaces the
-/// active note table. It does not change this configuration. When all keys
-/// release, on All Notes Off or on reset, the configured `notes` load again.
-/// A change to `notes` or to `enabled` also loads the configured mask again.
-/// Reset releases the correction keys 0..=127.
+/// Correction MIDI replaces the active note table. It does not change this
+/// configuration. In [`CorrectionMidiMode::Momentary`], when all keys in
+/// 0..=127 release, the configured `notes` load again. In
+/// [`CorrectionMidiMode::Latch`], a chord stays active until
+/// [`MidiEvent::AllNotesOff`], a reset or a scale change. A change to `notes`
+/// or to `enabled` also loads the configured mask again. Reset releases the
+/// correction keys 0..=127 and clears any latched chord.
 ///
 /// Construction loads the configured `notes` mask with the periods for the
 /// prepared sample rate. Later changes to `notes`, to `enabled` or from
@@ -94,9 +96,10 @@ pub struct CorrectionConfig {
     /// The configured target pitch classes. The default is
     /// [`NoteMask::CHROMATIC`].
     ///
-    /// All boolean masks are valid. Held keys from correction MIDI replace the
-    /// active table. When all keys release, or if this mask or `enabled`
-    /// changes, this mask loads again.
+    /// All boolean masks are valid. Correction MIDI can replace the active
+    /// table. In [`CorrectionMidiMode::Momentary`], when all keys release,
+    /// this mask loads again. In [`CorrectionMidiMode::Latch`], All Notes Off,
+    /// a reset or a change to this mask or `enabled` loads it again.
     pub notes: NoteMask,
     /// The half-life of the smoothing in milliseconds, 0..=400. The default
     /// is 0.
@@ -135,6 +138,16 @@ pub struct CorrectionConfig {
         tsify(optional, type = "number | undefined")
     )]
     pub flex_tune: f32,
+    /// How [`crate::ControlEvent::CorrectionMidi`] keeps or releases notes.
+    ///
+    /// The default is [`CorrectionMidiMode::Momentary`]. In JavaScript, the
+    /// field is optional and an absent or `undefined` value gives the default.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default, deserialize_with = "crate::harmony::deserialize_default"),
+        tsify(optional, type = "CorrectionMidiMode | undefined")
+    )]
+    pub midi_mode: CorrectionMidiMode,
 }
 
 /// Decodes an optional correction control and maps an absent value to 0.
@@ -154,6 +167,7 @@ impl Default for CorrectionConfig {
             retune_ms: 0.0,
             humanize: 0.0,
             flex_tune: 0.0,
+            midi_mode: CorrectionMidiMode::default(),
         }
     }
 }
@@ -161,10 +175,10 @@ impl Default for CorrectionConfig {
 impl CorrectionConfig {
     /// Validates all fields, also if correction is disabled.
     ///
-    /// All values of `enabled` and `notes` are valid. `retune_ms`, `humanize`
-    /// and `flex_tune` must be finite and in their documented inclusive ranges.
-    /// Validation does not clamp values. It does not change the state of the
-    /// processor.
+    /// All values of `enabled`, `notes` and `midi_mode` are valid. `retune_ms`,
+    /// `humanize` and `flex_tune` must be finite and in their documented
+    /// inclusive ranges. Validation does not clamp values. It does not change
+    /// the state of the processor.
     ///
     /// # Errors
     ///
@@ -842,7 +856,14 @@ impl Resynthesis {
         if old.correction.notes != config.correction.notes
             || old.correction.enabled != config.correction.enabled
         {
-            self.scale.set_notes(config.correction.notes);
+            self.scale.clear_override(config.correction.notes);
+            self.scale_initialized = false;
+            self.dwell = Q14::ZERO;
+        } else if old.correction.midi_mode != config.correction.midi_mode
+            && self
+                .scale
+                .apply_mode(config.correction.midi_mode, config.correction.notes)
+        {
             self.scale_initialized = false;
             self.dwell = Q14::ZERO;
         } else if config.correction.humanize == 0.0 {
@@ -1079,8 +1100,8 @@ impl Resynthesis {
         }
     }
 
-    /// Releases the correction keys 0..=127, loads the configured correction
-    /// notes again and resets the audio state.
+    /// Releases the correction keys 0..=127, clears any latched chord, loads
+    /// the configured correction notes again and resets the audio state.
     ///
     /// The items that `reset_audio` keeps do not change, except the correction
     /// keyboard and the active note table.
@@ -1156,10 +1177,14 @@ impl Resynthesis {
     /// Applies a correction MIDI event that the API or the block code checked
     /// before.
     pub(crate) fn apply_correction_midi(&mut self, event: MidiEvent) {
-        self.scale
-            .apply_validated_midi(event, self.config.correction.notes);
-        self.scale_initialized = false;
-        self.dwell = Q14::ZERO;
+        if self.scale.apply_validated_midi(
+            event,
+            self.config.correction.midi_mode,
+            self.config.correction.notes,
+        ) {
+            self.scale_initialized = false;
+            self.dwell = Q14::ZERO;
+        }
     }
 
     /// Returns the finite number of frames for a drain of resynthesis.

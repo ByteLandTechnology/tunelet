@@ -315,12 +315,18 @@ function verifyRuntimeImport(consumerDir, packageName) {
       "const initialConfig = rootModule.defaultConfig();",
       "initialConfig.resynthesis.correction.humanize = undefined;",
       "initialConfig.resynthesis.correction.flexTune = undefined;",
+      "initialConfig.resynthesis.correction.midiMode = undefined;",
       "initialConfig.resynthesis.harmony.voices = undefined;",
+      "initialConfig.resynthesis.harmony.midiChannelMap = undefined;",
+      "initialConfig.resynthesis.harmony.midiBaseChannel = undefined;",
       "const processor = new rootModule.Tunelet(48000, 128, initialConfig);",
       "try {",
       "  assert.equal(processor.config().resynthesis.correction.humanize, 0);",
       "  assert.equal(processor.config().resynthesis.correction.flexTune, 0);",
+      '  assert.equal(processor.config().resynthesis.correction.midiMode, "momentary");',
       "  assert.equal(processor.config().resynthesis.harmony.voices, 4);",
+      '  assert.equal(processor.config().resynthesis.harmony.midiChannelMap, "baseWindow");',
+      "  assert.equal(processor.config().resynthesis.harmony.midiBaseChannel, 0);",
       "  assert.equal(typeof processor.controlActivity().choirVoices, \"boolean\");",
       "  const initialTelemetry = processor.telemetry();",
       "  assert.ok(initialTelemetry.voiceRatios instanceof Float32Array);",
@@ -354,9 +360,15 @@ function verifyRuntimeImport(consumerDir, packageName) {
       "  const omittedCorrectionConfig = processor.config();",
       "  delete omittedCorrectionConfig.resynthesis.correction.humanize;",
       "  delete omittedCorrectionConfig.resynthesis.correction.flexTune;",
+      "  delete omittedCorrectionConfig.resynthesis.correction.midiMode;",
+      "  delete omittedCorrectionConfig.resynthesis.harmony.midiChannelMap;",
+      "  delete omittedCorrectionConfig.resynthesis.harmony.midiBaseChannel;",
       "  processor.setConfig(omittedCorrectionConfig);",
       "  assert.equal(processor.config().resynthesis.correction.humanize, 0);",
       "  assert.equal(processor.config().resynthesis.correction.flexTune, 0);",
+      '  assert.equal(processor.config().resynthesis.correction.midiMode, "momentary");',
+      '  assert.equal(processor.config().resynthesis.harmony.midiChannelMap, "baseWindow");',
+      "  assert.equal(processor.config().resynthesis.harmony.midiBaseChannel, 0);",
       "",
       "  const mono = new Int16Array(128);",
       "  const eventResynthesis = processor.config().resynthesis;",
@@ -381,6 +393,23 @@ function verifyRuntimeImport(consumerDir, packageName) {
       "  assert.equal(processor.config().resynthesis.dryMix, 0.25);",
       "  assert.equal(processor.config().resynthesis.correction.humanize, 0.5);",
       "  assert.equal(processor.config().resynthesis.correction.flexTune, 0.25);",
+      "  assert.equal(processor.controlActivity().harmonyMidiChannelMap, false);",
+      "  assert.equal(processor.controlActivity().harmonyMidiBaseChannel, false);",
+      "  const harmonyActivityConfig = processor.config();",
+      '  harmonyActivityConfig.resynthesis.mode = "harmony";',
+      '  harmonyActivityConfig.resynthesis.harmony.source = "midiChannels";',
+      '  harmonyActivityConfig.resynthesis.harmony.midiChannelMap = "baseWindow";',
+      "  processor.setConfig(harmonyActivityConfig);",
+      "  assert.equal(processor.controlActivity().harmonyMidiChannelMap, true);",
+      "  assert.equal(processor.controlActivity().harmonyMidiBaseChannel, true);",
+      '  harmonyActivityConfig.resynthesis.harmony.midiChannelMap = "wrapFour";',
+      "  processor.setConfig(harmonyActivityConfig);",
+      "  assert.equal(processor.controlActivity().harmonyMidiChannelMap, true);",
+      "  assert.equal(processor.controlActivity().harmonyMidiBaseChannel, false);",
+      '  harmonyActivityConfig.resynthesis.harmony.source = "midiOmni";',
+      "  processor.setConfig(harmonyActivityConfig);",
+      "  assert.equal(processor.controlActivity().harmonyMidiChannelMap, false);",
+      "  assert.equal(processor.controlActivity().harmonyMidiBaseChannel, false);",
       "} finally {",
       "  processor.free();",
       "}",
@@ -738,6 +767,8 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "  TuneletAudioViews,",
     "  type ControlActivity,",
     "  type ControlEvent,",
+    "  type CorrectionMidiMode,",
+    "  type MidiChannelMap,",
     "  type ParameterControl,",
     "  type ProcessorConfig,",
     "  type ResynthesisConfig,",
@@ -778,10 +809,13 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "        ...baseConfig.resynthesis.correction,",
     "        humanize: optionalVoices,",
     "        flexTune: optionalVoices,",
+    '        midiMode: optionalVoices === undefined ? undefined : ("latch" satisfies CorrectionMidiMode),',
     "      },",
     "      harmony: {",
     "        ...baseConfig.resynthesis.harmony,",
     "        voices: optionalVoices,",
+    '        midiChannelMap: optionalVoices === undefined ? undefined : ("wrapFour" satisfies MidiChannelMap),',
+    "        midiBaseChannel: optionalVoices,",
     "      },",
     "    },",
     "  };",
@@ -801,6 +835,10 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "  const processor = new Tunelet(48000, 128, configWithUndefined);",
     "  processor.setConfig(configWithUndefined);",
     "  const activity: ControlActivity = processor.controlActivity();",
+    "  const channelMapFlags: [boolean, boolean] = [",
+    "    activity.harmonyMidiChannelMap,",
+    "    activity.harmonyMidiBaseChannel,",
+    "  ];",
     "  const telemetry: Telemetry = processor.telemetry();",
     "  const voiceSlices: [Float32Array, Float32Array] = [",
     "    telemetry.voiceRatios,",
@@ -865,6 +903,7 @@ function verifyTypeDeclarations(consumerDir, packageName) {
     "  views.dispose();",
     "  processor.free();",
     "  void activity;",
+    "  void channelMapFlags;",
     "  void voiceSlices;",
     "  void ptrs;",
     "  void stereoOut;",
@@ -1156,7 +1195,7 @@ function verifyNormalizedJsDoc(consumerDir, packageName) {
       );
       assert.doesNotMatch(
         text,
-        /`(?:max_frequency_hz|min_frequency_hz|stereo_output|retune_ms|attack_ms|gain_db|ceiling_db)`/,
+        /`(?:max_frequency_hz|min_frequency_hz|stereo_output|retune_ms|midi_channel_map|midi_base_channel|midi_mode|attack_ms|gain_db|ceiling_db)`/,
         `Unexpected snake_case config field in ${filePath}`,
       );
     }
@@ -1211,11 +1250,18 @@ function verifyNormalizedJsDoc(consumerDir, packageName) {
   )[0].replace(/\s+/g, " ");
   assert.ok(controlActivityDoc.includes("`ProcessorConfig`"));
   assert.ok(controlActivityDoc.includes("`Tunelet.controlActivity`"));
+  assert.ok(controlActivityDoc.includes("channel map"));
   assert.ok(
     controlActivityInterfaceMatch[2].includes("`ResynthesisConfig.choirVoices`"),
   );
   assert.ok(
     controlActivityInterfaceMatch[2].includes("`HarmonyConfig.source`"),
+  );
+  assert.ok(
+    controlActivityInterfaceMatch[2].includes("`HarmonyConfig.midiChannelMap`"),
+  );
+  assert.ok(
+    controlActivityInterfaceMatch[2].includes("`HarmonyConfig.midiBaseChannel`"),
   );
   assert.ok(
     controlActivityInterfaceMatch[2].includes("`ReverbConfig.brightnessHz`"),

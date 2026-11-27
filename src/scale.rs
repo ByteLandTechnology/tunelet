@@ -81,6 +81,24 @@ pub enum CorrectionScale {
     Chromatic,
 }
 
+/// How [`crate::ControlEvent::CorrectionMidi`] keeps or releases notes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(
+    all(feature = "wasm", target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize, tsify::Tsify),
+    serde(rename_all = "camelCase")
+)]
+pub enum CorrectionMidiMode {
+    /// Held MIDI keys replace the configured scale until all keys in 0..=127
+    /// release. This is the default.
+    #[default]
+    Momentary,
+    /// A MIDI chord stays active after its keys release until All Notes Off, a
+    /// reset or a scale change.
+    Latch,
+}
+
 /// The permitted correction pitch classes, in the order C, C♯, D, D♯, E, F,
 /// F♯, G, G♯, A, A♯, B.
 ///
@@ -140,6 +158,26 @@ impl NoteMask {
     }
 }
 
+/// The bits for pitch class C across MIDI notes 0..=127.
+const CLASS_C_NOTES: u128 = (1 << 0)
+    | (1 << 12)
+    | (1 << 24)
+    | (1 << 36)
+    | (1 << 48)
+    | (1 << 60)
+    | (1 << 72)
+    | (1 << 84)
+    | (1 << 96)
+    | (1 << 108)
+    | (1 << 120);
+
+/// Converts a 128-note bitmask into its twelve pitch-class flags.
+fn mask_from_bits(bits: u128) -> NoteMask {
+    NoteMask(std::array::from_fn(|class| {
+        (bits & (CLASS_C_NOTES << class)) != 0
+    }))
+}
+
 /// The prepared correction periods and the arithmetic midpoint boundaries.
 pub(crate) struct CorrectionTable {
     /// The number of active targets.
@@ -163,7 +201,11 @@ pub(crate) struct CorrectionTable {
     /// again from these periods.
     base_periods: [i32; 12],
     /// The held MIDI keys 0..=127.
-    pub keyboard: [bool; 128],
+    keyboard: u128,
+    /// The latched MIDI keys 0..=127 for [`CorrectionMidiMode::Latch`].
+    latched: u128,
+    /// If `true`, correction MIDI currently replaces the configured notes.
+    midi_active: bool,
 }
 
 impl CorrectionTable {
@@ -175,7 +217,9 @@ impl CorrectionTable {
             midpoints: [0; 13],
             notes: [0; 12],
             base_periods: [0; 12],
-            keyboard: [false; 128],
+            keyboard: 0,
+            latched: 0,
+            midi_active: false,
         };
         result.set_sample_rate(rate);
         result.set_notes(mask);
@@ -226,33 +270,98 @@ impl CorrectionTable {
             self.midpoints[0] = self.midpoints[self.count] / 2;
         }
     }
-    /// Releases keys 0..=127 and loads `notes` again.
-    pub(crate) fn reset(&mut self, notes: NoteMask) {
-        self.keyboard.fill(false);
-        self.set_notes(notes);
+    /// Clears any latched chord and loads the configured `fallback` mask.
+    pub(crate) fn clear_override(&mut self, fallback: NoteMask) {
+        self.latched = 0;
+        self.midi_active = false;
+        self.set_notes(fallback);
     }
-    /// Applies an event whose MIDI ranges were already checked.
+    /// Updates the active table for a new `mode`, and returns `true` if the
+    /// active target table changed.
+    pub(crate) fn apply_mode(&mut self, mode: CorrectionMidiMode, fallback: NoteMask) -> bool {
+        match mode {
+            CorrectionMidiMode::Momentary => {
+                self.latched = 0;
+                if self.keyboard == 0 {
+                    if self.midi_active {
+                        self.midi_active = false;
+                        self.set_notes(fallback);
+                        return true;
+                    }
+                } else {
+                    self.midi_active = true;
+                    self.set_notes(mask_from_bits(self.keyboard));
+                    return true;
+                }
+                false
+            }
+            CorrectionMidiMode::Latch => {
+                if self.keyboard != 0 {
+                    self.latched = self.keyboard;
+                    self.midi_active = true;
+                    self.set_notes(mask_from_bits(self.latched));
+                    return true;
+                }
+                false
+            }
+        }
+    }
+    /// Releases all keys 0..=127 and, if correction MIDI was active, loads
+    /// `fallback` again.
     ///
-    /// If no key in 0..=127 is held, this method loads `notes` again.
-    pub(crate) fn apply_validated_midi(&mut self, event: MidiEvent, notes: NoteMask) {
+    /// If correction MIDI was not active, the prepared target table does not
+    /// load again.
+    pub(crate) fn reset(&mut self, fallback: NoteMask) {
+        self.keyboard = 0;
+        self.latched = 0;
+        if self.midi_active {
+            self.midi_active = false;
+            self.set_notes(fallback);
+        }
+    }
+    /// Applies an event whose MIDI ranges were already checked, and returns
+    /// `true` if the active target table changed.
+    pub(crate) fn apply_validated_midi(
+        &mut self,
+        event: MidiEvent,
+        mode: CorrectionMidiMode,
+        fallback: NoteMask,
+    ) -> bool {
         match event {
-            MidiEvent::NoteOn { note, velocity, .. } => {
-                self.keyboard[usize::from(note)] = velocity != 0
+            MidiEvent::NoteOn { note, velocity, .. } if velocity != 0 => {
+                let bit = 1_u128 << note;
+                let was_empty = self.keyboard == 0;
+                self.keyboard |= bit;
+                self.latched = if was_empty { bit } else { self.latched | bit };
+                self.midi_active = true;
+                let active = match mode {
+                    CorrectionMidiMode::Momentary => self.keyboard,
+                    CorrectionMidiMode::Latch => self.latched,
+                };
+                self.set_notes(mask_from_bits(active));
+                true
             }
-            MidiEvent::NoteOff { note, .. } => self.keyboard[usize::from(note)] = false,
+            MidiEvent::NoteOn { note, .. } | MidiEvent::NoteOff { note, .. } => {
+                self.keyboard &= !(1_u128 << note);
+                if mode == CorrectionMidiMode::Momentary {
+                    if self.keyboard == 0 {
+                        self.midi_active = false;
+                        self.set_notes(fallback);
+                    } else {
+                        self.midi_active = true;
+                        self.set_notes(mask_from_bits(self.keyboard));
+                    }
+                    return true;
+                }
+                false
+            }
             MidiEvent::AllNotesOff => {
-                self.reset(notes);
-                return;
+                self.keyboard = 0;
+                self.latched = 0;
+                self.midi_active = false;
+                self.set_notes(fallback);
+                true
             }
-        }
-        let mut mask = [false; 12];
-        for (i, &held) in self.keyboard.iter().enumerate() {
-            mask[i % 12] |= held;
-        }
-        if mask == [false; 12] {
-            self.set_notes(notes);
-        } else {
-            self.set_notes(NoteMask(mask));
         }
     }
 }

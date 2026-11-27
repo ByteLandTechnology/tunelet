@@ -190,20 +190,35 @@ modes keep the stereo dry signal.
 Set `resynthesis.mode` to `Harmony`. Then select the source of the voices
 with `resynthesis.harmony.source`:
 
-| Source          | The voices follow                                      |
-| --------------- | ------------------------------------------------------ |
-| `FixedInterval` | A fixed number of semitones from the singer            |
-| `SmartInterval` | An interval in scale steps, in a key and a scale       |
-| `ChordByDegree` | A chord on a scale degree                              |
-| `ChordByName`   | A named chord, for example `MinorSeventh`              |
-| `ChordViaMidi`  | The active MIDI notes, as a chord                      |
-| `MidiOmni`      | MIDI notes from all channels, on the first free voice  |
-| `MidiChannels`  | MIDI channel `n` for voice `n` (channels 0–3), default |
+| Source          | The voices follow                                                 |
+| --------------- | ----------------------------------------------------------------- |
+| `FixedInterval` | A fixed number of semitones from the singer                       |
+| `SmartInterval` | An interval in scale steps, in a key and a scale                  |
+| `ChordByDegree` | A chord on a scale degree                                         |
+| `ChordByName`   | A named chord, for example `MinorSeventh`                         |
+| `ChordViaMidi`  | The active MIDI notes, as a chord                                 |
+| `MidiOmni`      | MIDI notes from all channels, on the first free voice             |
+| `MidiChannels`  | MIDI channels from `midi_channel_map` for four voices, default    |
 
 `resynthesis.harmony.voices` sets the number of interval voices, in `0..=4`.
 The default is 4. `FixedInterval` and `SmartInterval` use the first `voices`
 voices. The other voices release with the usual gain envelope. The chord
 and MIDI sources ignore this field.
+
+For `MidiChannels`, `resynthesis.harmony.midi_channel_map` selects `BaseWindow`
+(default) or `WrapFour`. `BaseWindow` assigns channels
+`midi_base_channel..=midi_base_channel + 3` to the four voices, with
+`midi_base_channel` in `0..=12` (default 0). `WrapFour` assigns channel `c` in
+`0..=15` to voice `c % 4` and ignores `midi_base_channel`. Other harmony sources
+ignore both fields. A 16-channel keybed keeps held notes across live changes
+among `MidiOmni`, `ChordViaMidi` and `MidiChannels`. On legato release, a voice
+resumes the next newest held note.
+
+For `ControlEvent::CorrectionMidi`, `resynthesis.correction.midi_mode` selects
+`Momentary` (default) or `Latch` across notes `0..=127`. If all keys release in
+`Momentary` mode, `resynthesis.correction.notes` loads again. `Latch` keeps the
+chord after key release until `MidiEvent::AllNotesOff`, `reset()` or a scale
+change.
 
 `resynthesis.harmony_gain` scales the four harmony voices in mono and in
 stereo. It does not scale the lead voice.
@@ -365,8 +380,8 @@ These calls read the state of the processor. They do not change the audio.
 
 `Processor::control_activity()` and `ProcessorConfig::control_activity()`
 return a `ControlActivity` struct. A `false` flag means that the related
-control makes no sample change in the active voice mode, harmony source or
-reverb network.
+control makes no sample change in the active voice mode, harmony source,
+channel map or reverb network.
 
 The telemetry includes these items:
 
@@ -581,9 +596,12 @@ If a required field is absent or a value is not valid, the call throws a
 JavaScript `Error`. If an optional field is absent or `undefined`, it gets its
 default. `resynthesis.correction.humanize` and
 `resynthesis.correction.flexTune` default to 0, and
-`resynthesis.harmony.voices` defaults to 4. The conversion ignores extra object
-properties. The generated declarations contain the parameter documentation from
-the Rust types.
+`resynthesis.correction.midiMode` defaults to `"momentary"`.
+`resynthesis.harmony.voices` defaults to 4,
+`resynthesis.harmony.midiChannelMap` defaults to `"baseWindow"` and
+`resynthesis.harmony.midiBaseChannel` defaults to 0. The conversion ignores
+extra object properties. The generated declarations contain the parameter
+documentation from the Rust types.
 
 `resynthesis.randomSeed` and the `processedFrames` field of feedback and
 telemetry use `bigint`. Frame offsets, block lengths and latency use
