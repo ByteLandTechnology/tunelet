@@ -28,6 +28,7 @@
 //! - The order of the fixed-point arithmetic.
 
 pub(crate) mod history;
+mod vibrato;
 
 use crate::error::{check_count, check_range};
 use crate::filter::{Biquad, Design};
@@ -41,6 +42,7 @@ use crate::pitch::{PitchConfig, PitchEstimate};
 use crate::scale::{CorrectionTable, NoteMask};
 use crate::{Error, SampleRate};
 use history::{clear_dirty_ring, prepare_history, record_history};
+use vibrato::PeriodFilter;
 
 /// The method that resynthesis uses to render its voices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -62,11 +64,11 @@ pub enum MultiVoiceMode {
 /// period domain.
 ///
 /// Correction is enabled by default, with all chromatic notes, a retune time
-/// of zero, zero humanize and zero flex-tune. Target selection and the
-/// smoothing of the correction ratio occur at each update of the pitch
-/// tracking. When a period is tracked, this update usually occurs every five
-/// frames. If the active note table is empty or correction is disabled, the
-/// ratio moves toward 1.0 with `retune_ms`.
+/// of zero, zero humanize, zero flex-tune and zero vibrato preservation.
+/// Target selection and the smoothing of the correction ratio occur at each
+/// update of the pitch tracking. When a period is tracked, this update
+/// usually occurs every five frames. If the active note table is empty or
+/// correction is disabled, the ratio moves toward 1.0 with `retune_ms`.
 ///
 /// While at least one key in 0..=127 is held, correction MIDI replaces the
 /// active note table. It does not change this configuration. When all keys
@@ -135,6 +137,19 @@ pub struct CorrectionConfig {
         tsify(optional, type = "number | undefined")
     )]
     pub flex_tune: f32,
+    /// The fraction of 4 Hz to 8 Hz vibrato that bypasses correction, without
+    /// a unit, 0..=1. The default is 0.
+    ///
+    /// Zero applies full correction to the vibrato. A value of 1 keeps the
+    /// 4 Hz to 8 Hz vibrato while the mean pitch moves to the active target
+    /// note. In JavaScript, the field is optional and an absent or `undefined`
+    /// value gives 0.
+    #[cfg_attr(
+        all(feature = "wasm", target_arch = "wasm32"),
+        serde(default, deserialize_with = "deserialize_zero_f32"),
+        tsify(optional, type = "number | undefined")
+    )]
+    pub vibrato_preserve: f32,
 }
 
 /// Decodes an optional correction control and maps an absent value to 0.
@@ -154,6 +169,7 @@ impl Default for CorrectionConfig {
             retune_ms: 0.0,
             humanize: 0.0,
             flex_tune: 0.0,
+            vibrato_preserve: 0.0,
         }
     }
 }
@@ -161,10 +177,10 @@ impl Default for CorrectionConfig {
 impl CorrectionConfig {
     /// Validates all fields, also if correction is disabled.
     ///
-    /// All values of `enabled` and `notes` are valid. `retune_ms`, `humanize`
-    /// and `flex_tune` must be finite and in their documented inclusive ranges.
-    /// Validation does not clamp values. It does not change the state of the
-    /// processor.
+    /// All values of `enabled` and `notes` are valid. `retune_ms`, `humanize`,
+    /// `flex_tune` and `vibrato_preserve` must be finite and in their
+    /// documented inclusive ranges. Validation does not clamp values. It does
+    /// not change the state of the processor.
     ///
     /// # Errors
     ///
@@ -173,7 +189,8 @@ impl CorrectionConfig {
     pub fn validate(self) -> Result<(), Error> {
         validate_retune_ms(self.retune_ms)?;
         validate_humanize(self.humanize)?;
-        validate_flex_tune(self.flex_tune)
+        validate_flex_tune(self.flex_tune)?;
+        validate_vibrato_preserve(self.vibrato_preserve)
     }
 }
 
@@ -190,6 +207,16 @@ pub(crate) fn validate_humanize(humanize: f32) -> Result<(), Error> {
 /// Checks the range of the outer soft-zone width of each target bin.
 pub(crate) fn validate_flex_tune(flex_tune: f32) -> Result<(), Error> {
     check_range("resynthesis.correction.flex_tune", flex_tune, 0.0, 1.0)
+}
+
+/// Checks the range of the vibrato preservation fraction.
+fn validate_vibrato_preserve(vibrato_preserve: f32) -> Result<(), Error> {
+    check_range(
+        "resynthesis.correction.vibrato_preserve",
+        vibrato_preserve,
+        0.0,
+        1.0,
+    )
 }
 
 /// The controls for pitch correction, pitch shift, voice arrangement and
@@ -538,6 +565,17 @@ pub(crate) struct Resynthesis {
     /// The current smoothed Q14 correction ratio. It does not include the
     /// global shift or the voice ratios.
     correction: Q14,
+    /// The smoothed Q24 ratio of the secular pitch contour when vibrato
+    /// preservation is active.
+    secular_correction: i64,
+    /// The smoothed Q24 modulation ratio when vibrato preservation is active.
+    vibrato_ratio: i64,
+    /// If `true`, `vibrato_preserve` is nonzero and the contour filter runs.
+    vibrato_enabled: bool,
+    /// The Q24 vibrato preservation weight.
+    vibrato_preserve: i64,
+    /// The Q24 contour filter that separates secular periods from vibrato.
+    period_filter: PeriodFilter,
     /// The Q14 half-life coefficient for correction updates. These updates
     /// usually occur every five frames.
     correction_decay: Q14,
@@ -643,6 +681,11 @@ impl Resynthesis {
             formant_position: 0,
             post: [Biquad::new(), Biquad::new()],
             correction: Q14::ONE,
+            secular_correction: 1 << 24,
+            vibrato_ratio: 1 << 24,
+            vibrato_enabled: false,
+            vibrato_preserve: 0,
+            period_filter: PeriodFilter::new(rate),
             correction_decay: Q14::ZERO,
             sustained_decay: Q14::ZERO,
             retune_half_life: 0,
@@ -730,6 +773,28 @@ impl Resynthesis {
         };
     }
 
+    /// Quantizes the vibrato preservation weight and updates the contour filter
+    /// state unconditionally.
+    fn configure_vibrato_preserve(&mut self) {
+        let was_vibrato_enabled = self.vibrato_enabled;
+        if self.config.correction.vibrato_preserve == 0.0 {
+            self.vibrato_enabled = false;
+            self.vibrato_preserve = 0;
+            if was_vibrato_enabled {
+                self.period_filter.reset();
+                self.vibrato_ratio = 1 << 24;
+            }
+        } else {
+            self.vibrato_enabled = true;
+            self.vibrato_preserve =
+                vibrato::quantize_preserve(self.config.correction.vibrato_preserve);
+            if !was_vibrato_enabled {
+                self.secular_correction = i64::from(self.correction.to_bits()) << 10;
+                self.vibrato_ratio = 1 << 24;
+            }
+        }
+    }
+
     /// Calculates the choir drift decay and drift amount unconditionally.
     fn configure_choir_drift(&mut self) {
         let base = (self.rate.hz() / 100.0) as f64 * 0.2;
@@ -785,6 +850,7 @@ impl Resynthesis {
         self.configure_dry_mix();
         self.configure_correction_decay();
         self.configure_flex_tune();
+        self.configure_vibrato_preserve();
         self.configure_choir_drift();
         self.configure_choir_pan();
         self.configure_harmony_gain();
@@ -855,6 +921,9 @@ impl Resynthesis {
         }
         if old.correction.flex_tune != config.correction.flex_tune {
             self.configure_flex_tune();
+        }
+        if old.correction.vibrato_preserve != config.correction.vibrato_preserve {
+            self.configure_vibrato_preserve();
         }
         if old.pitch_ratio != config.pitch_ratio {
             self.configure_pitch_ratio();
@@ -1139,7 +1208,10 @@ impl Resynthesis {
         self.voice_ratios.fill(Q14::ONE);
         self.formant_position = 0;
         self.current_output_period = Q6::ZERO;
+        self.period_filter.reset();
         self.correction = Q14::ONE;
+        self.secular_correction = 1 << 24;
+        self.vibrato_ratio = 1 << 24;
         self.dwell = Q14::ZERO;
         self.scale_initialized = false;
         self.previous_scale_index = 0;
@@ -1322,8 +1394,8 @@ impl Resynthesis {
         Q14::from_bits(raw).clamp(self.correction_decay, self.sustained_decay)
     }
 
-    /// Selects a target in the period domain and returns the Q14 target ratio
-    /// and Q14 decay coefficient.
+    /// Selects a target in the period domain and returns the Q14 target ratio,
+    /// Q14 decay coefficient and Q14 correction pull.
     ///
     /// The Q6 input period must be a usable result from the pitch tracker. The
     /// search moves through the midpoints, also across octave limits, and
@@ -1333,11 +1405,12 @@ impl Resynthesis {
     ///
     /// If the shifted period is not positive, the function clears
     /// `scale_initialized` and dwell, and returns `None`. If correction is
-    /// disabled or the active table is empty, the function returns unity ratio
-    /// and `correction_decay`.
-    fn select_target_ratio(&mut self, period: Q6) -> Option<(Q14, Q14)> {
+    /// disabled or the active table is empty, the function returns unity ratio,
+    /// `correction_decay` and zero pull.
+    fn select_target_ratio(&mut self, period: Q6) -> Option<(Q14, Q14, Q14)> {
         let mut target_ratio = Q14::ONE;
         let mut decay = self.correction_decay;
+        let mut pull = Q14::ZERO;
         if self.config.correction.enabled && self.scale.count != 0 {
             let was_initialized = self.scale_initialized;
             let count = self.scale.count;
@@ -1406,6 +1479,7 @@ impl Resynthesis {
             }
             let denominator = Q6::from_bits(self.scale.periods[self.scale_index]);
             if denominator != Q6::ZERO {
+                pull = Q14::ONE;
                 target_ratio = target.div(denominator);
                 if self.flex_tune != Q14::ZERO {
                     let (distance, span) = if target >= denominator {
@@ -1421,7 +1495,7 @@ impl Resynthesis {
                         if distance > inner {
                             let outer = span - inner;
                             let taper = Q14::ONE - (distance - inner).div::<6, 14>(outer);
-                            let pull = taper.mul::<14, 14>(taper);
+                            pull = taper.mul::<14, 14>(taper);
                             target_ratio = Q14::ONE + pull.mul(target_ratio - Q14::ONE);
                         }
                     }
@@ -1430,19 +1504,43 @@ impl Resynthesis {
         } else {
             self.dwell = Q14::ZERO;
         }
-        Some((target_ratio, decay))
+        Some((target_ratio, decay, pull))
     }
 
     /// Updates the Q14 correction ratio from `period`.
     ///
-    /// If `select_target_ratio` finds a non-positive shifted period, the
-    /// correction ratio becomes 1.0 immediately.
+    /// If `vibrato_preserve` is zero, this method skips the contour filter and
+    /// the modulation product to keep the Q14 quantization unchanged. If
+    /// `vibrato_preserve` is nonzero, the contour filter supplies a secular
+    /// period for target selection and a modulation ratio that `flex_tune` pull
+    /// tapers. If `select_target_ratio` finds a non-positive shifted period,
+    /// the correction ratio becomes 1.0 immediately.
     fn update_correction(&mut self, period: Q6) {
-        let Some((target_ratio, decay)) = self.select_target_ratio(period) else {
+        if !self.vibrato_enabled {
+            let Some((target_ratio, decay, _)) = self.select_target_ratio(period) else {
+                self.correction = Q14::ONE;
+                return;
+            };
+            self.correction = decay.mul(self.correction - target_ratio) + target_ratio;
+            return;
+        }
+        let (secular_period, mod_ratio) = self.period_filter.split(period, self.vibrato_preserve);
+        let Some((target_ratio, decay, pull)) = self.select_target_ratio(secular_period) else {
+            self.secular_correction = 1 << 24;
+            self.vibrato_ratio = 1 << 24;
             self.correction = Q14::ONE;
             return;
         };
-        self.correction = decay.mul(self.correction - target_ratio) + target_ratio;
+        let target_mod = Q14::ONE + pull.mul(mod_ratio - Q14::ONE);
+        let decay = i64::from(decay.to_bits());
+        let target_q24 = i64::from(target_ratio.to_bits()) << 10;
+        self.secular_correction =
+            target_q24 + ((self.secular_correction - target_q24) * decay) / 16_384;
+        let mod_q24 = i64::from(target_mod.to_bits()) << 10;
+        self.vibrato_ratio = mod_q24 + ((self.vibrato_ratio - mod_q24) * decay) / 16_384;
+        let secular_q14 = Q14::from_bits(((self.secular_correction + 512) >> 10) as i32);
+        let mod_q14 = Q14::from_bits(((self.vibrato_ratio + 512) >> 10) as i32);
+        self.correction = secular_q14.mul(mod_q14);
     }
 
     /// Selects the period and the correction.
@@ -1637,11 +1735,23 @@ impl Resynthesis {
             self.old_position = self.old_position - position_of(HISTORY as i32);
         }
         if step.restarted {
+            if self.vibrato_enabled {
+                self.period_filter.reset();
+                self.secular_correction = 1 << 24;
+                self.vibrato_ratio = 1 << 24;
+            }
             self.correction = Q14::ONE;
             self.scale_initialized = false;
             self.dwell = Q14::ZERO;
         }
         if step.acquired {
+            if self.vibrato_enabled {
+                if step.period > Q6::ZERO {
+                    self.period_filter.seed(step.period);
+                } else {
+                    self.period_filter.reset();
+                }
+            }
             self.formant.detection_mode_off();
         }
         if step.tracking_update {

@@ -21,7 +21,8 @@
 //! - Field names use camelCase.
 //! - Enum values are strings.
 //! - Each object must contain all required fields.
-//! - The optional correction `humanize` and `flexTune` fields default to 0.
+//! - The optional correction `humanize`, `flexTune` and `vibratoPreserve`
+//!   fields default to 0.
 //! - The optional harmony `voices` field defaults to 4.
 //!
 //! [`default_config`] gives a configuration to start from. Control events use
