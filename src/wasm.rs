@@ -32,11 +32,16 @@
 //! same Rust types that validation uses.
 //!
 //! The class allocates the PCM storage at construction and uses it again for
-//! each block. It also keeps an event buffer and uses that capacity again
-//! across calls. These operations can allocate:
+//! each block. It also keeps event and `u32` MIDI buffers and uses their
+//! capacity again across calls. For blocks with only three-byte MIDI messages,
+//! `processWithMidi` and `processMonoWithMidi` copy `(offset, packedMessage)`
+//! word pairs from a `Uint32Array` in one `copy_to` call.
+//!
+//! These operations can allocate:
 //!
 //! - Event decode when a call gives more events than before, or when an event
 //!   converts a stage configuration.
+//! - Packed MIDI copy when a call gives more `u32` words than before.
 //! - The conversion of configurations.
 //! - Feedback, control-activity and telemetry objects.
 //! - The buffers of the formant envelopes.
@@ -49,13 +54,13 @@
 //! read or write views. If you do not need a processor any more, call `free()`
 //! and do not touch its views again.
 
-use crate::events::ValidatedEvents;
+use crate::events::{ValidatedEvents, ValidatedPackedMidi};
 use crate::processor::EnvelopeKey;
 use crate::{
     ControlActivity, ControlEvent, Error, Feedback, MidiEvent, ParameterControl, PrepareConfig,
     Processor, ProcessorConfig, SampleRate, Telemetry, TimedEvent,
 };
-use js_sys::{Array, Float32Array, Int16Array, Object, Reflect};
+use js_sys::{Array, Float32Array, Int16Array, Object, Reflect, Uint32Array};
 use serde::{Deserialize, Serialize};
 use tsify::{serde_wasm_bindgen, Ts, Tsify};
 use wasm_bindgen::prelude::*;
@@ -109,7 +114,7 @@ pub fn default_config() -> Result<Ts<ProcessorConfig>, JsError> {
 /// - `Float32Array` buffer calls and in-place `Float32` calls share those
 ///   three `f32` buffers.
 /// - Check `memory.buffer` before input writes and after calls that pass
-///   `events`, because Wasm memory growth detaches old views.
+///   `events` or `midi`, because Wasm memory growth detaches old views.
 /// - Do not read or write the views of an instance after `free()`.
 ///
 /// If a call that processes audio fails, it throws a JavaScript `Error` before
@@ -147,6 +152,9 @@ pub struct WasmProcessor {
     /// The reusable buffer for block events. It becomes longer when a call
     /// gives more events, and it does not become shorter.
     events: Vec<TimedEvent>,
+    /// The reusable buffer for `(offset, packedMessage)` MIDI words. It becomes
+    /// longer when a call gives more words, and it does not become shorter.
+    midi_words: Vec<u32>,
 }
 
 #[wasm_bindgen(js_class = Tunelet)]
@@ -211,6 +219,7 @@ impl WasmProcessor {
             envelope_output: Vec::new(),
             envelope_cache: None,
             events: Vec::new(),
+            midi_words: Vec::new(),
         })
     }
 
@@ -368,6 +377,88 @@ impl WasmProcessor {
         audio.copy_to(&mut self.input[..frames]);
         self.processor
             .process_mono_in_place(&mut self.input[..frames], events)?;
+        audio.copy_from(&self.input[..frames]);
+        Ok(())
+    }
+
+    /// Processes mono input into left and right `Int16Array` buffers with
+    /// packed binary MIDI controls from a `Uint32Array`.
+    ///
+    /// `midi` contains `(offset, packedMessage)` word pairs, so its length must
+    /// be even. Each `offset` is a zero-based frame index below the block
+    /// length, and offsets must not decrease. In each `packedMessage`, bits
+    /// `24..=31` select the bus (`0` for harmony MIDI, `1` for correction
+    /// MIDI). Bits `16..=23` hold the status byte (`0x80..=0xff`). Bits
+    /// `8..=15` and bits `0..=7` hold the two data bytes (`0..=127`).
+    ///
+    /// The supported messages are Note On, Note On with zero velocity, Note
+    /// Off and controller 123 (All Notes Off). The processor ignores other
+    /// three-byte messages with valid byte ranges after the offset checks
+    /// succeed.
+    ///
+    /// The method copies `midi` in one pass into a reusable Rust buffer. Only
+    /// the first call and a call with more words than before reserve memory.
+    /// Empty blocks and drain cancellation obey the same rules as `process`.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if the channel lengths are not equal, the block is
+    /// larger than `maxBlockFrames` or `midi.length` is odd. It also throws if
+    /// the buffer reservation fails or a MIDI entry has an invalid offset, an
+    /// unknown bus or invalid MIDI bytes. If an error occurs, the output
+    /// buffers and the DSP state do not change.
+    #[wasm_bindgen(js_name = processWithMidi)]
+    pub fn process_with_midi(
+        &mut self,
+        input: &Int16Array,
+        left: &Int16Array,
+        right: &Int16Array,
+        midi: &Uint32Array,
+    ) -> Result<(), JsError> {
+        let frames = input.length() as usize;
+        Error::check_length(frames, left.length() as usize)?;
+        Error::check_length(frames, right.length() as usize)?;
+        self.processor.check_block(frames)?;
+        let midi = decode_midi_words(&mut self.midi_words, midi, frames)?;
+        input.copy_to(&mut self.input[..frames]);
+        self.processor.process_planar_midi_words(
+            &self.input[..frames],
+            &mut self.left[..frames],
+            &mut self.right[..frames],
+            midi,
+        );
+        left.copy_from(&self.left[..frames]);
+        right.copy_from(&self.right[..frames]);
+        Ok(())
+    }
+
+    /// Replaces the audio in a mono `Int16Array` with the stereo downmix and
+    /// applies packed binary MIDI controls from a `Uint32Array`.
+    ///
+    /// The `(offset, packedMessage)` word layout, the validation rules, the
+    /// reusable word buffer and the drain cancellation are the same as for
+    /// `processWithMidi`. Peak feedback and telemetry measure the mono signal
+    /// after the downmix, as in `processMono`.
+    ///
+    /// # Errors
+    ///
+    /// The method throws if the block is larger than `maxBlockFrames` or
+    /// `midi.length` is odd. It also throws if the buffer reservation fails or
+    /// a MIDI entry has an invalid offset, an unknown bus or invalid MIDI
+    /// bytes. It throws before the audio of the caller or the DSP state
+    /// changes.
+    #[wasm_bindgen(js_name = processMonoWithMidi)]
+    pub fn process_mono_with_midi(
+        &mut self,
+        audio: &Int16Array,
+        midi: &Uint32Array,
+    ) -> Result<(), JsError> {
+        let frames = audio.length() as usize;
+        self.processor.check_block(frames)?;
+        let midi = decode_midi_words(&mut self.midi_words, midi, frames)?;
+        audio.copy_to(&mut self.input[..frames]);
+        self.processor
+            .process_mono_midi_words(&mut self.input[..frames], midi);
         audio.copy_from(&self.input[..frames]);
         Ok(())
     }
@@ -826,6 +917,32 @@ impl WasmProcessor {
         self.processor.check_block(frames)?;
         Ok(frames)
     }
+}
+
+/// Copies and validates `(offset, packedMessage)` word pairs from `midi`
+/// before the audio or the state changes.
+///
+/// The function rejects an odd word count before it reserves memory or copies
+/// data.
+fn decode_midi_words<'a>(
+    buffer: &'a mut Vec<u32>,
+    midi: &Uint32Array,
+    frames: usize,
+) -> Result<ValidatedPackedMidi<'a, [u32; 2]>, JsError> {
+    let words = midi.length() as usize;
+    if !words.is_multiple_of(2) {
+        return Err(JsError::new("midi length must be even"));
+    }
+    if buffer.len() < words {
+        buffer.try_reserve_exact(words - buffer.len())?;
+        buffer.resize(words, 0);
+    }
+    let slice = &mut buffer[..words];
+    if words != 0 {
+        midi.copy_to(slice);
+    }
+    let pairs = slice.as_chunks::<2>().0;
+    Ok(ValidatedPackedMidi::new(pairs, frames)?)
 }
 
 /// One cached `ParameterControl` discriminant and its constructor.

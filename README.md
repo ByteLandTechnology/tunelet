@@ -223,14 +223,14 @@ processor.
 
 Select the process function for your output layout:
 
-| Output layout                        | Function for input          | Function for the tail |
-| ------------------------------------ | --------------------------- | --------------------- |
-| `[[i16; 2]]` stereo frames           | `process`                   | `drain`               |
-| `[[f32; 2]]` stereo frames           | `process_f32`               | `drain_f32`           |
-| Separate `i16` left and right slices | `process_planar`            | `drain_planar`        |
-| Separate `f32` left and right slices | `process_planar_f32`        | `drain_planar_f32`    |
-| Mono `i16` slice                     | `process_mono_in_place`     | `drain_mono`          |
-| Mono `f32` slice                     | `process_mono_in_place_f32` | `drain_mono_f32`      |
+| Output layout                        | Function for input          | Function for packed MIDI          | Function for the tail |
+| ------------------------------------ | --------------------------- | --------------------------------- | --------------------- |
+| `[[i16; 2]]` stereo frames           | `process`                   | `process_with_midi`               | `drain`               |
+| `[[f32; 2]]` stereo frames           | `process_f32`               | —                                 | `drain_f32`           |
+| Separate `i16` left and right slices | `process_planar`            | `process_planar_with_midi`        | `drain_planar`        |
+| Separate `f32` left and right slices | `process_planar_f32`        | —                                 | `drain_planar_f32`    |
+| Mono `i16` slice                     | `process_mono_in_place`     | `process_mono_in_place_with_midi` | `drain_mono`          |
+| Mono `f32` slice                     | `process_mono_in_place_f32` | —                                 | `drain_mono_f32`      |
 
 The `f32` methods convert `NaN` input samples to `0`. They clamp other input
 values to `-1.0..=1.0`, multiply by `32767.0` in `f64` and round to `i16`. They
@@ -283,6 +283,14 @@ let events = [
 ];
 processor.process(&input, &mut output, &events)?;
 ```
+
+For blocks that carry only three-byte MIDI messages, give `PackedMidiEvent`
+records to `process_with_midi`, `process_planar_with_midi` or
+`process_mono_in_place_with_midi`. Each record pairs `offset` with `bus` (`0`
+for harmony MIDI, `1` for correction MIDI) and three MIDI bytes in
+`[status, data1, data2]`. `MidiEvent::from_bytes` decodes the bytes without
+heap allocation. If `MidiEvent::from_bytes` returns `Ok(None)`, the processor
+ignores that message after the offset checks succeed.
 
 ### Scalar parameters
 
@@ -491,8 +499,10 @@ page that opens the JavaScript.
 | --------------------------------- | ------------------------------------------------------------------------ |
 | Shared initialization             | `loadTunelet(source?)`                                                   |
 | Mono `Int16Array` to stereo       | `process(input, left, right, events?)`                                   |
+| Stereo `Int16Array` with MIDI     | `processWithMidi(input, left, right, midi)`                              |
 | Mono `Float32Array` to stereo     | `processF32(input, left, right, events?)`                                |
 | In-place `Int16Array` mono        | `processMono(audio, events?)`                                            |
+| In-place `Int16Array` with MIDI   | `processMonoWithMidi(audio, midi)`                                       |
 | In-place `Float32Array` mono      | `processMonoF32(audio, events?)`                                         |
 | Fixed `Float32` buffer offsets    | `inputF32Ptr`, `leftF32Ptr`, `rightF32Ptr`                               |
 | Cached `Float32` memory views     | `new TuneletAudioViews(memory, processor)`                               |
@@ -517,9 +527,9 @@ in-place `Float32` calls. All blocks must fit in `maxBlockFrames`. This
 package does not install an AudioWorklet or an integration with an audio
 device.
 
-For `process`, `processMono`, `drain`, `drainMono`, `processF32`,
-`processMonoF32`, `drainF32` and `drainMonoF32`, pass `Int16Array` or
-`Float32Array` buffers. These rules apply:
+For `process`, `processWithMidi`, `processMono`, `processMonoWithMidi`,
+`drain`, `drainMono`, `processF32`, `processMonoF32`, `drainF32` and
+`drainMonoF32`, pass `Int16Array` or `Float32Array` buffers. These rules apply:
 
 - Stereo output arrays must not overlap.
 - The input can overlap an output, because the binding copies the input
@@ -557,8 +567,8 @@ and `views.right`.
 
 These lifetime rules apply to `Float32` views:
 
-- A new `Tunelet`, `setConfig`, `events`, `controlActivity`, feedback,
-  telemetry or `formantEnvelope` can grow Wasm memory and detach
+- A new `Tunelet`, `setConfig`, `events`, packed MIDI, `controlActivity`,
+  feedback, telemetry or `formantEnvelope` can grow Wasm memory and detach
   `memory.buffer`.
 - Read `views.input` before each input write so `TuneletAudioViews` checks
   `memory.buffer` and refreshes detached views.
@@ -615,6 +625,35 @@ Use `correctionMidi` for the separate correction keyboard. The native rules
 for event order and for the validation of the whole block also apply to these
 bindings.
 
+For Web MIDI and `AudioWorklet` hosts, `processWithMidi` and
+`processMonoWithMidi` accept packed three-byte MIDI messages in a
+`Uint32Array`. The array contains `(offset, packedMessage)` word pairs, so
+`midi.length` must be even. Word `2 * i` is the zero-based frame `offset` in
+`0..frames`, and offsets must not decrease.
+
+Word `2 * i + 1` packs the bus and the three MIDI bytes as
+`(bus << 24) | (status << 16) | (data1 << 8) | data2`:
+
+| Bits      | Field    | Valid range   | Description                                   |
+| --------- | -------- | ------------- | --------------------------------------------- |
+| `24..=31` | `bus`    | `0..=1`       | `0` for harmony MIDI, `1` for correction MIDI |
+| `16..=23` | `status` | `0x80..=0xff` | MIDI status byte with channel `status & 0x0f` |
+| `8..=15`  | `data1`  | `0..=127`     | Note number or controller number              |
+| `0..=7`   | `data2`  | `0..=127`     | Velocity or controller value                  |
+
+```ts
+const midi = new Uint32Array(2);
+midi[0] = 0;
+midi[1] = (0 << 24) | (0x90 << 16) | (60 << 8) | 100;
+processor.processWithMidi(input, left, right, midi);
+```
+
+The supported messages are Note On, Note On with zero velocity, Note Off and
+controller 123 (All Notes Off). The processor ignores other three-byte
+messages with valid byte ranges after the offset checks succeed. If
+`midi.length` is odd, a bus is unknown or an offset or MIDI byte is not valid,
+the call rejects the full block. The state and the output then do not change.
+
 ### Feedback, telemetry and formant envelopes
 
 `controlActivity()` returns a `ControlActivity` object with camelCase boolean
@@ -641,8 +680,10 @@ call with more points than before reserve memory.
 ### Memory allocation
 
 The constructor allocates reusable `i16` and `f32` buffers of length
-`maxBlockFrames`. The processor also keeps an event buffer and uses its
-capacity again across calls. `processF32InPlace`, `processMonoF32InPlace`,
+`maxBlockFrames`. The processor also keeps event and `u32` MIDI buffers and
+uses their capacity again across calls. `processWithMidi` and
+`processMonoWithMidi` copy the `Uint32Array` in one pass and make no event
+objects in JavaScript. `processF32InPlace`, `processMonoF32InPlace`,
 `drainF32InPlace` and `drainMonoF32InPlace` without `events` do not allocate
 Rust storage, make JavaScript views or call JavaScript imports. If Wasm memory
 does not grow, `TuneletAudioViews` also allocates no new `Float32Array` views
@@ -656,6 +697,7 @@ allocate and grow Wasm memory:
 - Configuration conversion.
 - Supplied events when a call gives more events than before, or when an event
   converts a stage configuration.
+- Packed MIDI words when a call gives more words than before.
 - Errors.
 - Control activity, feedback and telemetry.
 - The formant envelopes.
